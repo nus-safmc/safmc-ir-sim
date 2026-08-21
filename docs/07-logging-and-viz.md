@@ -85,25 +85,31 @@ Coverage is reported **two ways** because they measure different things:
 
 Under `collision_behaviour="stop"` a crashed drone contributes nothing for the rest of the
 episode, so raw coverage rewards *not crashing* as much as *searching well*. The obvious fix is
-to divide by live-agent-seconds. Measured on seed 3, 12 drones, 120 s:
+to divide by live-agent-seconds. Measured on seed 3, 12 drones, 180 s:
 
-| policy | mode | sensed | live agent-s | per live-minute | crashed |
-|---|---|---|---|---|---|
-| `frontier` | stop | 0.616 | 315 | **0.117** | 10 |
-| `frontier` | unobstructed | 0.656 | 1197 | **0.033** | 0 |
-| `sdlw` | stop | 0.459 | 1354 | 0.020 | 0 |
-| `sdlw` | unobstructed | 0.459 | 1354 | 0.020 | 0 |
+| policy | mode | sensed | live agent-s | per live-minute | crashed | score |
+|---|---|---|---|---|---|---|
+| `frontier` | stop | 0.547 | 652 | **0.050** | 8 | 20 |
+| `frontier` | unobstructed | 0.875 | 1283 | **0.041** | 0 | 95 |
+| `sdlw` | stop | 0.528 | 1822 | 0.017 | 1 | 25 |
+| `sdlw` | unobstructed | 0.531 | 1870 | 0.017 | 0 | 25 |
+| `wall_follow` | stop | 0.525 | 824 | **0.038** | 7 | 20 |
+| `wall_follow` | unobstructed | 0.713 | 1456 | **0.029** | 0 | 60 |
 
-**The normalisation is not a clean fix.** Dividing by live-agent-seconds makes the crashing run
-look four times *better*, because the denominator collapsed while most of the coverage had
-already happened. It rewards dying early.
+**The normalisation is not a clean fix.** For both crash-prone policies, dividing by
+live-agent-seconds makes the *crashing* run look better than the clean one — 0.050 against
+0.041 for `frontier` — because the denominator collapses while most of the coverage has already
+happened. It rewards dying early.
 
-So: report raw coverage, per-live-minute, **and** the crash count, and compare search
-strategies under `unobstructed` as the control. Use `stop` to ask a different question —
-whether the strategy is survivable. They are two experiments, not one.
+So: report raw coverage, per-live-minute **and** the crash count, and compare search strategies
+under `unobstructed` as the control. Use `stop` to ask a different question — whether the
+strategy is survivable. They are two experiments, not one, and on this evidence they give
+**opposite answers**: `frontier` sweeps 0.875 of the field and scores 95 when it cannot crash,
+and 0.547 for 20 when it can.
 
-(`sdlw` is identical in both modes because it never collides, which is a useful check that the
-two modes coincide when they should.)
+(`sdlw` is nearly identical in both modes because it rarely collides, which is a useful check
+that the two coincide when they should — and a reminder that its conservatism is a real
+property, not an artefact.)
 
 Also reported: `crashed_agents` **and** `crash_events` separately, because the target paper
 counts only distinct agents and therefore saturates at the fleet size — its k=12 figures are

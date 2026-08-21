@@ -104,7 +104,24 @@ exactly.
 
 ## Status
 
-v0.1. Runs end to end; five reference policies; full logging and replay. Known open items are
-in [docs/CHECKPOINTS.md](docs/CHECKPOINTS.md) — chiefly that the map-based policy currently
-crashes much of its fleet, so the strategy comparison needs the `unobstructed` control before
-anyone quotes it.
+v0.1. Runs end to end; five reference policies; full logging and replay; 595 tests.
+
+Audited adversarially against `SPEC.md` by seven independent agents, each attempting
+falsification, with every claim then handed to a skeptic to refute — 24 findings survived and
+were fixed. Report: [docs/AUDIT-v0.1.md](docs/AUDIT-v0.1.md).
+
+**The first real measurement, and how to read it.** 12 drones, 180 s, seeds 0-4:
+
+| policy | `unobstructed` (isolates search strategy) | `stop` (includes crashes) |
+|---|---|---|
+| `frontier` (map-based) | **67.0** | 13.0 |
+| `wall_follow` | 50.0 | 15.0 |
+| `sdlw` (mapless, IROS 2026) | 19.0 | 17.0 |
+
+The two modes rank the policies in **opposite orders**, and both rankings are true — they
+answer different questions. The map-based policy has much the better search strategy and
+unusable obstacle-avoidance tuning. The honest next step is to fix its clearance and re-run,
+not to declare a winner. Five seeds is also far too few to publish.
+
+Open items are listed at the end of [docs/CHECKPOINTS.md](docs/CHECKPOINTS.md) and
+[docs/AUDIT-v0.1.md](docs/AUDIT-v0.1.md).
