@@ -150,3 +150,42 @@ these numbers. Recorded as an open item rather than a headline.
 
 **Open at this point.** Metrics module; the collision-mode control study; the adversarial
 audit.
+
+---
+
+## C5b — metrics, docs, and a fleet-deadlock fix
+
+**Built.** `metrics.py`; `docs/05-policy-api.md`, `06-sensors.md`, `07-logging-and-viz.md`,
+`08-porting-to-ros.md`; top-level `README.md`; two runnable examples.
+
+**Found while writing the examples — a real simulator artefact, not a strategy failure.**
+
+The take-off grid was spaced at 4 drone radii (0.72 m) and placed 0.66 m from the southern
+boundary. Both are inside a typical reactive avoidance threshold: a drone's neighbours sat
+0.36 m away and its rear-facing ranger read 0.62 m *before it had moved*. Any policy using an
+omnidirectional threshold therefore turned on the spot for the entire run and never left the
+Start Area — scoring zero, and looking exactly like a bad search strategy.
+
+Fixed with two named constants carrying the reasoning: `START_SPACING_M = 1.25` (leaving
+~0.89 m of clear air between neighbours) and `START_WALL_MARGIN_M = 1.5`. A 25-drone fleet
+still fits comfortably: 15 per row, two rows, 2.5 m of the 6 m Start Area. Three regression
+tests now cover it, including one that asserts every reference policy actually gets a drone
+out of the Start Area within 45 s.
+
+**Verified — MEASURED.** The fix changes the ranking, which is the point of catching it:
+
+| policy | mean score before | mean score after |
+|---|---|---|
+| `wall_follow` | (deadlocked) | **42.5** |
+| `random_walk` | 8.8 | 27.5 |
+| `frontier` | 22.5 | 22.5 |
+| `sdlw` | 18.8 | 20.0 |
+
+`wall_follow` now leads by a wide margin, which is what the arena's own geometry predicted:
+once the 10 x 10 m Unknown Search Area is placed, the Known Search Area is close to a 2 m
+corridor ring, and in a corridor, wall following is very hard to beat. That is a genuine
+strategic finding for the team, and it fell out of taking the published constraints literally.
+
+**Verified — TESTED.** 533 tests.
+
+**Open at this point.** The adversarial audit against `docs/SPEC.md`.

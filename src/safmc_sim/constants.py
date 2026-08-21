@@ -108,3 +108,22 @@ YAW_RATE_MAX = 1.5              # A-3-adjacent; no published limit, PX4 default 
 # Simulation defaults (not claims about the world)
 DEFAULT_TICK_HZ = 20.0          # matches NAV_RATE_HZ
 DEFAULT_SEED = 0
+
+START_SPACING_M = 1.25
+"""Centre-to-centre spacing of the take-off grid in the Start Area.
+
+Not arbitrary. At 2 x DRONE_RADIUS_M = 0.36 m of body, this leaves ~0.89 m of clear air
+between neighbours -- deliberately more than the ~0.8 m threshold a reactive avoidance policy
+typically uses. Pack them tighter and every drone sees its neighbour inside its own
+avoidance threshold at t=0, so the whole fleet turns on the spot forever and never leaves the
+Start Area. That was observed at 0.72 m spacing and is a simulator artefact, not a strategy
+failure: the real Start Area is 20 x 6 m and has ample room for 25 drones at this spacing
+(15 per row, two rows, 2.5 m of depth)."""
+
+START_WALL_MARGIN_M = 1.5
+"""How far the take-off grid is kept from the field boundary.
+
+Same class of artefact as START_SPACING_M and found the same way. At 0.66 m from the southern
+boundary, every drone's rear-facing ranger reported ~0.62 m before it had moved, so a policy
+with an omnidirectional 0.8 m avoidance threshold turned on the spot for the entire run
+without ever leaving the Start Area. Real drones are placed by hand with room around them."""

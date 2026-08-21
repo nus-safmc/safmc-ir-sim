@@ -309,3 +309,53 @@ def test_visualiser_reads_only_the_log(tmp_path):
     assert payload["arena"]["targets"]
     html = viz.TEMPLATE.replace("__PAYLOAD__", json.dumps(payload))
     assert "__PAYLOAD__" not in html and len(html) > 10_000
+
+
+# -- start formation ------------------------------------------------------------------------
+
+
+def test_the_fleet_actually_leaves_the_start_area():
+    """Regression: the take-off grid must not trip the fleet's own avoidance thresholds.
+
+    Found the hard way. At 0.72 m spacing a drone's neighbours sat 0.36 m away, and at 0.66 m
+    from the southern boundary its rear ranger read 0.62 m before it had moved. Any policy with
+    an omnidirectional avoidance threshold therefore turned on the spot for the entire run and
+    never left the Start Area -- which looks exactly like a bad strategy and is in fact a
+    simulator artefact. Both distances are now named constants with margins.
+    """
+    for policy in ("random_walk", "sdlw", "wall_follow", "frontier"):
+        result = run(
+            RunConfig(seed=0, n_drones=12, policy=policy, duration_s=45.0, record=False)
+        )
+        departures = [e for e in result.events if e.kind == "mission_started"]
+        assert departures, f"{policy}: no drone left the Start Area in 45 s"
+
+
+def test_start_formation_keeps_clear_of_walls_and_of_itself():
+    from safmc_sim import constants as K
+
+    for n in (K.FLEET_MIN, 18, K.FLEET_MAX):
+        runner = Runner(RunConfig(n_drones=n, policy="hold"))
+        states = runner._start_positions()
+        xy = states[:, :2]
+        assert len(xy) == n
+
+        # No drone within a body diameter of another.
+        deltas = np.linalg.norm(xy[:, None, :] - xy[None, :, :], axis=2)
+        np.fill_diagonal(deltas, np.inf)
+        assert deltas.min() > 2 * K.DRONE_RADIUS_M
+
+        # Clear of the field boundary, and inside the Start Area.
+        assert xy[:, 0].min() >= K.START_WALL_MARGIN_M
+        assert xy[:, 1].min() >= K.START_WALL_MARGIN_M
+        assert xy[:, 0].max() <= K.FIELD_WIDTH_M - K.START_WALL_MARGIN_M
+        assert xy[:, 1].max() <= K.START_AREA_DEPTH_M
+
+
+def test_an_impossible_start_spacing_is_rejected():
+    from safmc_sim import constants as K
+
+    with pytest.raises(ConfigError, match="start_spacing_m"):
+        RunConfig(start_spacing_m=2 * K.DRONE_RADIUS_M)
+    with pytest.raises(ConfigError, match="Start Area depth"):
+        Runner(RunConfig(n_drones=25, start_spacing_m=3.0, policy="hold"))._start_positions()

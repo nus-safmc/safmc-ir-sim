@@ -93,6 +93,10 @@ class RunConfig:
     marker_rate_hz: float = K.MARKER_RATE_HZ
     """Default 2 Hz, the measured AprilTag rate on the real hardware."""
 
+    start_spacing_m: float = K.START_SPACING_M
+    """Take-off grid spacing. See constants.START_SPACING_M -- too small deadlocks reactive
+    policies against their own neighbours before anyone leaves the Start Area."""
+
     collision_behaviour: str = "stop"
     """``stop`` freezes a colliding drone permanently, which is faithful -- the rules allow no
     mid-run repair. ``unobstructed`` disables collision so drones fly through obstacles.
@@ -115,6 +119,11 @@ class RunConfig:
             raise ConfigError(f"tick_hz must be > 0, got {self.tick_hz}")
         if self.duration_s <= 0:
             raise ConfigError(f"duration_s must be > 0, got {self.duration_s}")
+        if self.start_spacing_m <= 2.0 * K.DRONE_RADIUS_M:
+            raise ConfigError(
+                f"start_spacing_m {self.start_spacing_m} must exceed the drone diameter "
+                f"{2 * K.DRONE_RADIUS_M}; drones would start overlapping"
+            )
         if self.collision_behaviour not in ("stop", "unobstructed"):
             raise ConfigError(
                 f"collision_behaviour must be 'stop' or 'unobstructed', "
@@ -252,22 +261,26 @@ class Runner:
         """A grid formation inside the Start Area, seeded and non-overlapping.
 
         The rules require simultaneous take-off from the Start Area, so drones begin packed in
-        the southern strip rather than scattered. Spacing is four drone radii, which is tight
-        but keeps a 25-drone fleet inside the 20 x 6 m strip.
+        the southern strip rather than scattered. Spacing is ``START_SPACING_M``, which is
+        chosen to keep neighbours outside a typical avoidance threshold -- see the constant's
+        docstring for why packing tighter deadlocks the whole fleet at t=0.
         """
         rng = np.random.default_rng(self._seeds[0])
         n = self.config.n_drones
-        spacing = 4.0 * K.DRONE_RADIUS_M
-        per_row = max(1, int((self.arena.width_m - 2.0) // spacing))
+        spacing = self.config.start_spacing_m
+        per_row = max(1, int((self.arena.width_m - 2.0 * K.START_WALL_MARGIN_M) // spacing))
         rows = int(np.ceil(n / per_row))
+        margin = K.START_WALL_MARGIN_M
         depth_needed = rows * spacing
-        if depth_needed > self.arena.start_area_depth_m - 1.0:
+        usable = self.arena.start_area_depth_m - margin
+        if depth_needed > usable:
             raise ConfigError(
                 f"{n} drones at {spacing:.2f} m spacing need {depth_needed:.1f} m of Start "
-                f"Area depth but only {self.arena.start_area_depth_m - 1.0:.1f} m is usable"
+                f"Area depth but only {usable:.1f} m is usable after the "
+                f"{margin} m wall margin"
             )
-        x0 = 1.0 + float(rng.uniform(0.0, 0.5))
-        y0 = 0.5 + float(rng.uniform(0.0, 0.5))
+        x0 = margin + float(rng.uniform(0.0, 0.5))
+        y0 = margin + float(rng.uniform(0.0, 0.5))
         states = []
         for i in range(n):
             row, col = divmod(i, per_row)
