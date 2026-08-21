@@ -21,27 +21,33 @@ A finding that fell out of building this, and that matters strategically
 -----------------------------------------------------------------------
 Taken literally, the published constraints very nearly determine the arena.
 
-The Known Search Area is 14 m deep (assumption A-6; the 2026 table withdrew the figure). The
-Unknown Search Area is 10 m. The minimum wall-to-wall gap is 2 m. 2 + 10 + 2 = 14 exactly, so
-the room's south edge can only sit at y = 8 -- its north-south position is *forced*, and only
-its east-west position has freedom. That is consistent with the diagram showing it "roughly
-centred".
+The Known Search Area is 14 m deep (assumption A-6; the 2026 table withdrew the figure) and
+the Unknown Search Area is 10 m, leaving **4 m of north-south slack in total** for a room that
+must clear the north perimeter by the published 2 m gap. The room's south side faces the Start
+Area boundary, which is a virtual line rather than a wall, so no gap rule applies there -- its
+position has roughly 1.9 m of freedom, no more.
 
-The consequence is stronger than it first looks. Once the room is placed, the free space in
-the Known Search Area is a **corridor ring roughly 2 m wide** around a central 10 x 10 m
-room, widening on one side. There is almost no room left for the free-standing maze walls the
-diagram depicts: any such wall must clear the room by 2 m and the perimeter by 2 m, and those
-two constraints nearly exhaust the space. Empirically only about one fits.
+The consequence is what matters. Once the room is placed, the free space in the Known Search
+Area is a **corridor ring of about 2 m** around a central 10 x 10 m room, widening on one
+side. There is almost no room left for the free-standing maze walls the diagram depicts: any
+such wall must clear both the room and the perimeter by 2 m, and those constraints nearly
+exhaust the space. Empirically about one fits.
 
 Two things follow:
 
 1. **Search in the Known Search Area is closer to one-dimensional than two.** A ring corridor
    rewards a very different policy from an open field -- coverage is nearly a traversal
-   problem, and the interesting decisions are which doorway to enter and when to commit.
+   problem, and the interesting decisions are which doorway to enter and when to commit. The
+   reference policies bear this out: ``wall_follow`` outscores both the map-based and the
+   published mapless policy by a wide margin.
 2. **Either A-6 is wrong or the 2 m gap is not an all-pairs constraint.** Both readings are
    defensible and they produce materially different arenas. ``ArenaConfig.min_gap_wall_m``
-   and the target counts exist so the team can test the alternative once someone sees the
-   real field. Any result quoted from this simulator should say which reading it used.
+   and the target counts exist so the team can test the alternative once someone sees the real
+   field. Any result quoted from this simulator should say which reading it used.
+
+(An earlier version of this note claimed the room's north-south position was *forced*. That was
+wrong: it required a 2 m gap on the south side, where there is no wall to be 2 m from. The
+strategic conclusion survives; the geometry claim did not.)
 """
 
 from __future__ import annotations
@@ -472,19 +478,27 @@ def generate_arena(
     walls = _boundary_walls(width, depth, thickness)
     structure = [w.polygon() for w in walls]
 
-    # The room's y is forced: 2 m gap + 10 m room + 2 m gap == the 14 m Known Search Area.
-    room_y0 = START_AREA_DEPTH_M + cfg.min_gap_wall_m
-    room_span = KNOWN_AREA_DEPTH_M - UNKNOWN_AREA_SIZE_M - 2 * cfg.min_gap_wall_m
-    if room_span < -1e-9:
+    # Gaps are measured between wall FACES, not centre lines. A wall centred on its line
+    # extends thickness/2 either side, so a room placed with its centre line min_gap from the
+    # perimeter leaves only min_gap - thickness/2 of actual air. Getting this wrong put the
+    # room's north face 1.95 m from the perimeter in every seed while validation passed.
+    half = thickness / 2.0
+    # North, west and east must clear the perimeter by the published gap. The room's SOUTH
+    # side faces the Start Area boundary, which is a virtual line rather than a wall
+    # (rulebook 3.2), so no wall-to-wall gap applies there -- only that the room stays out of
+    # the Start Area.
+    y_lo = START_AREA_DEPTH_M + half
+    y_hi = depth - cfg.min_gap_wall_m - UNKNOWN_AREA_SIZE_M - half
+    x_lo = cfg.min_gap_wall_m + half
+    x_hi = width - cfg.min_gap_wall_m - UNKNOWN_AREA_SIZE_M - half
+    if y_hi < y_lo - 1e-9 or x_hi < x_lo - 1e-9:
         raise ArenaError(
-            f"the {UNKNOWN_AREA_SIZE_M} m Unknown Search Area plus two "
-            f"{cfg.min_gap_wall_m} m gaps does not fit in a {KNOWN_AREA_DEPTH_M} m "
-            f"Known Search Area"
+            f"a {UNKNOWN_AREA_SIZE_M} m Unknown Search Area with {cfg.min_gap_wall_m} m "
+            f"perimeter gaps and {thickness} m walls does not fit a "
+            f"{width} x {depth} m field with a {START_AREA_DEPTH_M} m Start Area"
         )
-    room_y0 += float(rng.uniform(0.0, max(room_span, 0.0)))
-    x_lo = cfg.min_gap_wall_m
-    x_hi = width - UNKNOWN_AREA_SIZE_M - cfg.min_gap_wall_m
-    room_x0 = float(rng.uniform(x_lo, x_hi))
+    room_y0 = float(rng.uniform(y_lo, max(y_hi, y_lo)))
+    room_x0 = float(rng.uniform(x_lo, max(x_hi, x_lo)))
 
     room = _room_walls(
         room_x0, room_y0, UNKNOWN_AREA_SIZE_M, thickness, rng,
@@ -741,12 +755,27 @@ def _validate_gaps(spec: ArenaSpec) -> None:
         for p in groups.get(kind, [])
     ]
     for i, (poly, _) in enumerate(independent):
-        for other, _ in independent[i + 1 :] + structural:
+        for other, kind in independent[i + 1 :] + structural:
             gap = poly.distance(other)
             if gap < min_gap_wall - 1e-6:
                 raise ArenaError(
-                    f"wall-to-wall gap {gap:.3f} m is below the published minimum of "
+                    f"inner wall to {kind} gap {gap:.3f} m is below the published minimum of "
                     f"{min_gap_wall} m"
+                )
+
+    # The Unknown Search Area room against the perimeter. These are two independently placed
+    # structures, so the gap rule applies between them -- and it was previously unchecked,
+    # which is how a systematic 1.95 m north gap survived in every seed. The room's south face
+    # is exempt: it looks at the Start Area boundary, which is a virtual line, not a wall.
+    room = groups.get("unknown_wall", [])
+    perimeter = groups.get("perimeter_wall", [])
+    for room_poly in room:
+        for wall_poly in perimeter:
+            gap = room_poly.distance(wall_poly)
+            if gap < min_gap_wall - 1e-6:
+                raise ArenaError(
+                    f"Unknown Search Area to perimeter gap {gap:.3f} m is below the published "
+                    f"minimum of {min_gap_wall} m"
                 )
 
     pillar_polys = [p.polygon() for p in spec.pillars]

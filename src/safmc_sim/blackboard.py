@@ -18,6 +18,7 @@ same tick and results cannot depend on the order agents were stepped (R-POL-8).
 
 from __future__ import annotations
 
+import copy
 from abc import ABC, abstractmethod
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -63,7 +64,12 @@ class PerfectBlackboard(Blackboard):
     def publish(self, agent_id: str, values: Mapping[str, Any]) -> None:
         if not values:
             return
-        self._back.setdefault(agent_id, {}).update(values)
+        # Deep-copy on publish. Storing by reference let a publisher keep a handle on a
+        # mutable value it had already broadcast: mutating it mid-tick changed what agents
+        # stepped *after* the publisher read, while agents stepped before it saw the old
+        # value. That is precisely the index-order dependence the double buffer exists to
+        # prevent (R-POL-8), and it is invisible until a policy publishes a dict or a list.
+        self._back.setdefault(agent_id, {}).update(copy.deepcopy(dict(values)))
 
     def commit(self) -> None:
         for agent_id, values in self._back.items():

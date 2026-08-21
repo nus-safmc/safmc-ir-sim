@@ -93,6 +93,11 @@ class RunConfig:
     marker_rate_hz: float = K.MARKER_RATE_HZ
     """Default 2 Hz, the measured AprilTag rate on the real hardware."""
 
+    sample_hz: float | None = None
+    """Render sampling rate. ``None`` means every tick. Must not exceed ``tick_hz``: ir-sim
+    computes ``int(sample_time / step_time)`` and divides by it, so a faster sample rate
+    produces a bare ZeroDivisionError from inside its world step (R-TIME-4)."""
+
     start_spacing_m: float = K.START_SPACING_M
     """Take-off grid spacing. See constants.START_SPACING_M -- too small deadlocks reactive
     policies against their own neighbours before anyone leaves the Start Area."""
@@ -132,6 +137,12 @@ class RunConfig:
         if self.cruise_alt_m <= 0 or self.cruise_alt_m > self.quad_params.ceiling_m:
             raise ConfigError(
                 f"cruise_alt_m {self.cruise_alt_m} must be in (0, {self.quad_params.ceiling_m}]"
+            )
+        if self.sample_hz is not None and self.sample_hz > self.tick_hz:
+            raise ConfigError(
+                f"sample_hz {self.sample_hz} exceeds tick_hz {self.tick_hz}. ir-sim computes "
+                f"int(sample_time / step_time) and would raise an opaque ZeroDivisionError "
+                f"deep inside world.step() (world.py:171)."
             )
         _decimation(self.tof_rate_hz, self.tick_hz, "tof_rate_hz")
         _decimation(self.marker_rate_hz, self.tick_hz, "marker_rate_hz")
@@ -226,6 +237,12 @@ class Runner:
 
     def __init__(self, config: RunConfig, recorder=None) -> None:
         self.config = config
+        if recorder is not None and not config.record:
+            raise ConfigError(
+                "a recorder was supplied but RunConfig.record is False. Set record=True, or "
+                "pass recorder=None -- silently ignoring one of the two would make the log's "
+                "absence look like a simulator decision rather than a configuration mistake."
+            )
         self._recorder = recorder
         self._seeds = np.random.SeedSequence(config.seed).spawn(4)
         self.arena = generate_arena(config.seed, config.arena_config)
@@ -295,6 +312,8 @@ class Runner:
         tof_ring_module.install()
 
         world = self.arena.to_irsim_world(self.config.dt)
+        if self.config.sample_hz is not None:
+            world["sample_time"] = 1.0 / self.config.sample_hz
         world["collision_mode"] = (
             "stop" if self.config.collision_behaviour == "stop" else "unobstructed"
         )
@@ -368,12 +387,18 @@ class Runner:
         if self._recorder is not None:
             self._recorder.begin(self.config, self.arena, [a.agent_id for a in self.agents])
 
-        for tick in range(self.config.max_ticks):
-            self._tick = tick
-            if self._tick_once(tick):
-                break
+        try:
+            for tick in range(self.config.max_ticks):
+                self._tick = tick
+                if self._tick_once(tick):
+                    break
+        except BaseException:
+            # A policy that raises still aborts the run (R-POL-9), but it must not also leak
+            # an ir-sim environment and a matplotlib figure per attempt.
+            self._teardown()
+            raise
 
-        sim_time = self._tick * self.config.dt
+        sim_time = (self._tick + 1) * self.config.dt
         landed = self._landed_positions()
         score = self.mission.score(landed)
         result = RunResult(
@@ -421,6 +446,7 @@ class Runner:
                     f"{type(command).__name__}; expected one of "
                     f"{[c.__name__ for c in _COMMAND_TYPES]}"
                 )
+            _check_finite(command, agent.agent_id, tick, self.config.policy)
             commands.append(command)
             self.blackboard.publish(agent.agent_id, agent.policy.drain_outbox())
 
@@ -465,7 +491,7 @@ class Runner:
             tick=tick,
             sim_time_s=sim_time,
             pose=pose,
-            velocity_xy=(float(agent.state[4, 0]), float(agent.state[5, 0])),
+            velocity_xy=self.pose_source.velocity_of(agent.agent_id, agent.state, tick),
             lifecycle=agent.lifecycle,
             tof=agent.last_scan,
             markers=agent.last_markers,
@@ -510,6 +536,13 @@ class Runner:
         if agent.lifecycle == Lifecycle.LANDING:
             return [0.0, 0.0, -params.climb_rate_max_ms, 0.0]
 
+        if agent.lifecycle != Lifecycle.FLYING:
+            # Total by construction (R-DRONE-9): an unrecognised lifecycle must not fall
+            # through to the flying branch, where it would be silently commanded to fly.
+            raise ConfigError(
+                f"{agent.agent_id} is in unhandled lifecycle {agent.lifecycle!r}; "
+                f"expected one of {Lifecycle.ALL}"
+            )
         return self._flying_action(agent, command)
 
     def _flying_action(self, agent: AgentView, command: Command) -> list[float]:
@@ -564,7 +597,7 @@ class Runner:
             return 0.0
         params = self.config.quad_params
         return float(
-            np.clip(_YAW_GAIN * wrap_pi(target - theta), -params.yaw_rate_max, params.yaw_rate_max)
+            np.clip(_YAW_GAIN * wrap_pi(target - theta), -params.yaw_rate_max_rads, params.yaw_rate_max_rads)
         )
 
     # -- rules ------------------------------------------------------------------------------------
@@ -609,6 +642,7 @@ class Runner:
                 self._emit(tick, sim_time, "airborne", agent.agent_id, {"z": agent.z})
 
             if agent.lifecycle == Lifecycle.LANDING and agent.z <= _LANDED_TOLERANCE_M:
+                self._freeze(agent)
                 agent.lifecycle = Lifecycle.LANDED
                 self._emit(
                     tick, sim_time, "landed", agent.agent_id,
@@ -618,11 +652,23 @@ class Runner:
 
             reason = self._collision_reason(agent)
             if reason is not None:
+                self._freeze(agent)
                 agent.lifecycle = Lifecycle.CRASHED
                 agent.crash_reason = reason
                 self._emit(
                     tick, sim_time, "crashed", agent.agent_id,
                     {"reason": reason, "x": float(agent.xy[0]), "y": float(agent.xy[1])},
+                )
+                continue
+
+            if self._out_of_bounds(agent):
+                self._freeze(agent)
+                agent.lifecycle = Lifecycle.CRASHED
+                agent.crash_reason = "left the field"
+                self._emit(
+                    tick, sim_time, "crashed", agent.agent_id,
+                    {"reason": "left the field", "x": float(agent.xy[0]),
+                     "y": float(agent.xy[1])},
                 )
                 continue
 
@@ -637,11 +683,33 @@ class Runner:
 
         self.events.extend(self.mission.update(tick, sim_time, self._landed_positions()))
 
+    @staticmethod
+    def _freeze(agent: AgentView) -> None:
+        """Bring a drone to a dead stop, in state, at the moment it becomes terminal.
+
+        Zeroing the *command* is not enough. Velocity is carried in the state (rows 4 and 5)
+        and decays through a first-order lag, so a drone that lands while still moving keeps
+        sliding for a second or more afterwards. Measured at up to 116 mm -- 12% of the 1 m
+        scoring radius -- which was enough to score a target the drone had not actually reached
+        at the moment it touched down, and to make offline re-scoring disagree with the online
+        result (R-DRONE-10, R-MISS-8). Mission.update's whole recompute-from-scratch design
+        rests on "a landed drone never moves"; this is what makes that true.
+        """
+        agent.robot._state[4, 0] = 0.0
+        agent.robot._state[5, 0] = 0.0
+        agent.robot._velocity = np.zeros_like(agent.robot._velocity)
+
     def _collision_reason(self, agent: AgentView) -> str | None:
         if self.config.collision_behaviour == "stop" and bool(getattr(agent.robot, "collision", False)):
             other = getattr(agent.robot, "collision_obj", None)
             name = getattr(other[0], "name", "obstacle") if other else "obstacle"
             return f"collided with {name}"
+
+        if self.config.collision_behaviour != "stop":
+            # 'unobstructed' must disable ALL collision, not just ir-sim's. Leaving markers
+            # lethal here made the control mode not a control: a policy could still lose
+            # drones in the run that was supposed to isolate search strategy from crashes.
+            return None
 
         # Mission markers are not ir-sim obstacles, because ir-sim's collision is strictly 2D
         # and would make a 1.0 m marker impassable at every altitude. Height-gated here instead.
@@ -653,6 +721,21 @@ class Runner:
                 if float(np.hypot(agent.xy[0] - target.x, agent.xy[1] - target.y)) < reach:
                     return f"struck marker {target.id}"
         return None
+
+    def _out_of_bounds(self, agent: AgentView) -> bool:
+        """Has the drone left the field?
+
+        Needed because ``collision_behaviour="unobstructed"`` disables ir-sim's collision
+        entirely, and ir-sim has no implicit world bounds -- a drone was measured 55 m into a
+        20 m field. Leaving the arena is not a search strategy, and letting it happen silently
+        corrupts every coverage number computed against the field's free area.
+        """
+        margin = K.DRONE_RADIUS_M
+        x, y = agent.xy
+        return not (
+            -margin <= x <= self.arena.width_m + margin
+            and -margin <= y <= self.arena.depth_m + margin
+        )
 
     def _landed_positions(self) -> dict[str, np.ndarray]:
         return {a.agent_id: a.xy for a in self.agents if a.lifecycle == Lifecycle.LANDED}
@@ -684,6 +767,37 @@ class Runner:
 
 
 _COMMAND_TYPES = (Takeoff, VelocityBody, VelocityWorld, PositionWorld, Hold, Land)
+
+_COMMAND_FLOAT_FIELDS = {
+    Takeoff: ("altitude_m",),
+    VelocityBody: ("vx", "vy", "vz", "yaw_rate"),
+    VelocityWorld: ("vx", "vy", "z", "yaw"),
+    PositionWorld: ("x", "y", "z", "yaw", "speed_ms"),
+    Hold: (),
+    Land: (),
+}
+
+
+def _check_finite(command, agent_id: str, tick: int, policy: str) -> None:
+    """Reject NaN and infinity in a command, naming the agent and tick.
+
+    The commonest policy bug is a 0/0 normalisation. Without this, the NaN propagates into the
+    drone's position, ir-sim tries to build collision geometry from it, and the run dies inside
+    shapely with `GEOSException: Points of LinearRing do not form a closed linestring` -- no
+    agent, no tick, no line of policy code. The type of the command was already validated with
+    a clear error; its values deserve the same.
+    """
+    for field_name in _COMMAND_FLOAT_FIELDS[type(command)]:
+        value = getattr(command, field_name)
+        if value is None:
+            continue
+        if not np.isfinite(value):
+            raise PolicyError(
+                f"policy {policy!r} for {agent_id} returned "
+                f"{type(command).__name__}.{field_name}={value!r} at tick {tick}. "
+                f"Commands must be finite -- a NaN here would propagate into the drone's "
+                f"position and fail later inside shapely with no reference to your code."
+            )
 
 
 def run(config: RunConfig, recorder=None) -> RunResult:

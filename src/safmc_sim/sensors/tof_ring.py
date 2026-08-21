@@ -144,6 +144,13 @@ class ToFScan:
         return float(np.min(self.collapsed_m))
 
 
+def _read_only(array: np.ndarray) -> np.ndarray:
+    """A view of ``array`` that cannot be written through."""
+    view = array.view()
+    view.flags.writeable = False
+    return view
+
+
 def _ranger_bearings(cfg: ToFConfig) -> np.ndarray:
     """Body-frame ranger axes, CCW from the nose.
 
@@ -199,6 +206,12 @@ class ToFRing:
             self._ranger_bearings[:, None] + self._zone_offsets[None, :]
         )
         self._collapsed_bins = self._compute_collapsed_bins()
+        # Handed to policies inside every ToFScan. A frozen dataclass blocks rebinding but not
+        # in-place writes, and these two arrays are the sensor's own persistent state -- a
+        # policy doing `obs.tof.zone_bearings_rad[:] += 0.5` would permanently re-aim the ring
+        # while _collapsed_bins kept the old mapping, silently and irrecoverably (R-POL-2).
+        self._zone_bearings_ro = _read_only(self._zone_bearings)
+        self._ranger_bearings_ro = _read_only(self._ranger_bearings)
 
         self._scan: ToFScan | None = None
         self._last_endpoints: np.ndarray | None = None
@@ -222,7 +235,7 @@ class ToFRing:
 
     @property
     def zone_bearings_rad(self) -> np.ndarray:
-        return self._zone_bearings
+        return self._zone_bearings_ro
 
     # -- the ir-sim contract --------------------------------------------------------------
 
@@ -284,10 +297,17 @@ class ToFRing:
             ranges_m=ranges,
             status=status,
             collapsed_m=collapsed,
-            zone_bearings_rad=self._zone_bearings,
-            ranger_bearings_rad=self._ranger_bearings,
-            tick=int(getattr(world, "count", -1)) if world is not None else -1,
-            sim_time_s=float(getattr(world, "time", -1.0)) if world is not None else -1.0,
+            zone_bearings_rad=self._zone_bearings_ro,
+            ranger_bearings_rad=self._ranger_bearings_ro,
+            # ir-sim steps sensors BEFORE incrementing the world clock (env_base.py:328-330),
+            # so world.count is still the previous tick here. Report the tick this scan
+            # actually belongs to.
+            tick=int(getattr(world, "count", -1)) + 1 if world is not None else -1,
+            sim_time_s=(
+                float(getattr(world, "time", 0.0)) + float(getattr(world, "step_time", 0.0))
+                if world is not None
+                else -1.0
+            ),
         )
 
         # Endpoints for rendering: a no-return is drawn at the sensor's physical reach so the

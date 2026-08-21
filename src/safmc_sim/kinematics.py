@@ -42,7 +42,7 @@ from .constants import (
     CLIMB_RATE_MAX_MS,
     CRUISE_SPEED_MS,
     VELOCITY_TAU_S,
-    YAW_RATE_MAX,
+    YAW_RATE_MAX_RADS,
 )
 from .errors import ConfigError
 from .frames import wrap_pi
@@ -70,7 +70,7 @@ class QuadParams:
     climb_rate_max_ms: float = CLIMB_RATE_MAX_MS
     """Vertical speed cap (A-3). Applied directly; altitude has no modelled lag."""
 
-    yaw_rate_max: float = YAW_RATE_MAX
+    yaw_rate_max_rads: float = YAW_RATE_MAX_RADS
     """Yaw rate cap, radians/second."""
 
     ceiling_m: float = CEILING_M
@@ -79,7 +79,7 @@ class QuadParams:
     def __post_init__(self) -> None:
         if self.tau_s <= 0.0:
             raise ConfigError(f"tau_s must be > 0, got {self.tau_s}")
-        for name in ("speed_max_ms", "climb_rate_max_ms", "yaw_rate_max", "ceiling_m"):
+        for name in ("speed_max_ms", "climb_rate_max_ms", "yaw_rate_max_rads", "ceiling_m"):
             value = getattr(self, name)
             if not np.isfinite(value) or value <= 0.0:
                 raise ConfigError(f"{name} must be finite and > 0, got {value}")
@@ -133,7 +133,7 @@ class Quad25D(KinematicsHandler):
             vy_cmd *= scale
 
         vz_cmd = float(np.clip(vz_cmd, -p.climb_rate_max_ms, p.climb_rate_max_ms))
-        yaw_rate_cmd = float(np.clip(yaw_rate_cmd, -p.yaw_rate_max, p.yaw_rate_max))
+        yaw_rate_cmd = float(np.clip(yaw_rate_cmd, -p.yaw_rate_max_rads, p.yaw_rate_max_rads))
 
         # First-order lag, explicit Euler. Guard the gain at 1.0 so a tick longer than tau
         # cannot overshoot into oscillation -- with dt > tau the correct discrete behaviour is

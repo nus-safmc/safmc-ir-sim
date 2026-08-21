@@ -101,9 +101,11 @@ class MarkerCam:
         bearings = wrap_pi(np.arctan2(delta[:, 1], delta[:, 0]) - theta - cfg.bearing_offset_rad)
 
         candidate = (surface <= cfg.max_range_m) & (np.abs(bearings) <= cfg.fov_rad / 2.0)
-        # A marker only exists above the floor up to its own height; a drone above it sees
-        # nothing. Consistent with the ToF ring's height gating.
-        candidate &= np.array([z < t.height_m for t in targets])
+        # No altitude cut-off. An earlier version copied the ToF ring's height gate, which
+        # made a drone above 1.0 m completely blind to markers even though the ceiling is
+        # 1.4 m. That reasoning is inverted for a camera: the real OV2640 is pitched 45
+        # degrees NOSE-DOWN, so it preferentially sees what is *below* it. Occlusion is still
+        # evaluated at the drone's altitude, which is the part that genuinely depends on z.
         if not candidate.any():
             return ()
 

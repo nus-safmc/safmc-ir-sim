@@ -60,7 +60,7 @@ def test_speed_cap_applies_to_the_vector_not_per_axis():
 def test_yaw_is_integrated_and_wrapped_inside_the_handler():
     # R-DRONE-3. The reference implementation of arXiv:2607.25195 integrates yaw outside
     # env.step() and never wraps it, which is what this forbids.
-    handler = make(yaw_rate_max=10.0)
+    handler = make(yaw_rate_max_rads=10.0)
     state = run(handler, np.zeros((6, 1)), [0, 0, 0, 2.0], 100)  # 10 rad of yaw
     assert -np.pi < state[ITHETA, 0] <= np.pi
 
@@ -77,7 +77,7 @@ def test_altitude_is_rate_limited_and_clamped_to_the_ceiling():
 
 
 def test_yaw_rate_is_capped():
-    handler = make(yaw_rate_max=0.5)
+    handler = make(yaw_rate_max_rads=0.5)
     state = handler.step(np.zeros((6, 1)), np.array([[0], [0], [0], [99.0]]), 0.1)
     assert state[ITHETA, 0] == pytest.approx(0.05)
 

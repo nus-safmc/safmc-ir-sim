@@ -44,6 +44,11 @@ def wrap_pi(angle):
     """
     a = np.asarray(angle, dtype=float)
     wrapped = -(np.mod(-a + np.pi, _TWO_PI) - np.pi)
+    # For inputs a hair above pi, `-a + pi` is a tiny negative number and np.mod rounds it to
+    # exactly 2*pi, so the expression returns exactly -pi -- outside the declared half-open
+    # interval, and breaking the idempotence this function promises. One representable double
+    # in 2^64, but the interval is stated exactly, so close it exactly.
+    wrapped = np.where(wrapped == -np.pi, np.pi, wrapped)
     return float(wrapped) if np.isscalar(angle) or wrapped.ndim == 0 else wrapped
 
 

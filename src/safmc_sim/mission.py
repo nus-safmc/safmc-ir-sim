@@ -128,9 +128,14 @@ class Mission:
     ) -> list[Event]:
         """Recompute which targets are serviced. ``landed`` maps agent id to its (x, y).
 
-        Servicing is recomputed from scratch each tick rather than latched, because a landed
-        drone never moves -- so the set only grows, and computing it fresh means the log can
-        be re-scored offline from positions alone (R-MISS-8).
+        Servicing is **latched**: once a target is serviced it stays serviced, and the set of
+        drones credited only grows. Two reasons, and the second is the load-bearing one.
+
+        A landed drone does not move (the runner freezes its velocity state on touchdown), so
+        in normal operation recomputation and latching agree. But relying on that made scoring
+        silently sensitive to a physics detail in a completely different module. Latching makes
+        the rule match the competition's own semantics -- a rescue that has happened has
+        happened -- and keeps the online result reproducible offline from the log (R-MISS-8).
         """
         events: list[Event] = []
         if not landed:
@@ -154,7 +159,8 @@ class Mission:
                 np.tile(target_xy, (len(near), 1)),
                 _SCORING_Z,
             )
-            servicing = tuple(sorted(agent_ids[i] for i, ok in zip(near, visible) if ok))
+            found = {agent_ids[i] for i, ok in zip(near, visible) if ok}
+            servicing = tuple(sorted(set(state.serviced_by) | found))
             if servicing == state.serviced_by:
                 continue
 

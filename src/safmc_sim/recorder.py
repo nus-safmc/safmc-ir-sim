@@ -34,6 +34,7 @@ only there.
 from __future__ import annotations
 
 import json
+import math
 import platform
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -76,7 +77,12 @@ def _jsonable(value: Any) -> Any:
         return float(value)
     if isinstance(value, (np.bool_,)):
         return bool(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, float):
+        # json.dumps writes bare Infinity/NaN, which is NOT valid JSON: every strict parser
+        # rejects it, including JSON.parse in the replay page, which then renders blank. The
+        # log carries inf legitimately (a ToF no-return), so it has to be encoded, not banned.
+        return value if math.isfinite(value) else None
+    if value is None or isinstance(value, (str, int, bool)):
         return value
     return repr(value)
 
@@ -137,6 +143,15 @@ class Recorder:
             "seed": config.seed,
             "config": _jsonable(config),
             "agents": self._agents,
+            # The codebook travels with the log. Without it, states.npz is a wall of integers
+            # whose meaning lives in whatever version of recorder.py happened to write it.
+            "codebook": {
+                "lifecycle": {str(code): name for code, name in LIFECYCLE_NAMES.items()},
+                "command": {str(code): name for code, name in COMMAND_NAMES.items()},
+                "pose_columns": ["x", "y", "z", "theta"],
+                "velocity_columns": ["vx", "vy"],
+                "tof_no_return": "inf",
+            },
             "arena": _jsonable(
                 {
                     "seed": arena.seed,
@@ -154,6 +169,10 @@ class Recorder:
 
     def tick(self, tick: int, sim_time_s: float, agents, commands) -> None:
         self._times.append(sim_time_s)
+        # float64, not float32. Offline re-scoring compares positions against a 1.0 m radius,
+        # and float32 quantises a 20 m coordinate at ~1e-6 m -- enough for a drone parked
+        # exactly on the boundary to be scored one way online and the other way offline
+        # (R-MISS-8). The extra bytes compress away.
         self._pose.append(
             np.array(
                 [
@@ -163,7 +182,7 @@ class Recorder:
                     ]
                     for a in agents
                 ],
-                dtype=np.float32,
+                dtype=np.float64,
             )
         )
         self._velocity.append(
@@ -224,8 +243,8 @@ class Recorder:
 
         np.savez_compressed(
             self.directory / "states.npz",
-            time_s=np.array(self._times, dtype=np.float32),
-            pose=np.stack(self._pose) if self._pose else np.zeros((0, 0, 4), np.float32),
+            time_s=np.array(self._times, dtype=np.float64),
+            pose=np.stack(self._pose) if self._pose else np.zeros((0, 0, 4), np.float64),
             velocity=np.stack(self._velocity) if self._velocity else np.zeros((0, 0, 2), np.float32),
             lifecycle=np.stack(self._lifecycle) if self._lifecycle else np.zeros((0, 0), np.int8),
             command_kind=np.stack(self._command_kind) if self._command_kind else np.zeros((0, 0), np.int8),

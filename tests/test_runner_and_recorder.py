@@ -9,7 +9,9 @@ import pytest
 
 from safmc_sim import constants as K
 from safmc_sim import policies  # noqa: F401 -- registers built-ins
-from safmc_sim.api import Hold, Land, Policy, Takeoff, register_policy
+from safmc_sim.api import (
+    Hold, Land, Policy, PositionWorld, Takeoff, VelocityBody, register_policy,
+)
 from safmc_sim.errors import ConfigError, LogFormatError, PolicyError
 from safmc_sim.recorder import Recorder, load_run, score_from_log
 from safmc_sim.runner import RunConfig, Runner, run
@@ -153,21 +155,65 @@ def test_observations_are_consistent_within_a_tick():
 
 
 def test_landing_is_irreversible():
-    """R-DRONE-10: a landed drone stays landed and stops moving."""
+    """R-DRONE-10: a landed drone stays landed AND stops moving, for the rest of the run.
+
+    The previous version of this test was vacuous, which the v0.1 audit caught by mutation:
+    every drone landed on the same tick, the runner ended the run as soon as all agents were
+    terminal, and the "then try to take off again" branch never executed -- a full
+    drone-resurrection mutation passed all 533 tests. This version keeps one drone flying so
+    the run outlives the landings, and asserts on the recorded trajectory rather than the
+    final state.
+    """
 
     @register_policy("_land_then_fly")
     class LandThenFly(Policy):
         def step(self, obs):
             if obs.lifecycle == "IDLE":
                 return Takeoff()
+            # drone_00 flies for the whole run so the others' landings are followed by many
+            # more ticks in which they could misbehave.
+            if self.agent_id == "drone_00":
+                return VelocityBody(vx=0.1) if obs.lifecycle == "FLYING" else Hold()
+            # Fly at cruise right up to the landing, so the drone is still MOVING when it
+            # touches down. Landing from a stationary hover slides ~0 mm and would make this
+            # test vacuous again -- verified by mutation.
             if obs.tick < 40:
-                return Hold()
-            return Land() if obs.tick < 100 else Takeoff()
+                return VelocityBody(vx=0.45)
+            # After landing, try every command that could possibly move it.
+            if obs.lifecycle == "LANDED":
+                return [Takeoff(), VelocityBody(vx=2.0), PositionWorld(x=10.0, y=10.0)][
+                    obs.tick % 3
+                ]
+            return Land()
 
-    runner = Runner(RunConfig(seed=0, n_drones=10, duration_s=12.0, policy="_land_then_fly"))
-    result = runner.build().run()
-    assert set(result.lifecycles.values()) <= {"LANDED", "CRASHED"}
-    assert result.landed
+    from safmc_sim.recorder import LIFECYCLE_NAMES
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = run(
+            RunConfig(seed=0, n_drones=10, duration_s=40.0, policy="_land_then_fly"),
+            recorder=Recorder(tmp),
+        )
+        states = load_run(tmp)["states"]
+
+    landed_ids = [i for i, a in enumerate(result.lifecycles) if result.lifecycles[a] == "LANDED"]
+    assert landed_ids, "no drone landed, so the test proves nothing"
+
+    lifecycle = states["lifecycle"]
+    pose = states["pose"]
+    names = {code: name for code, name in LIFECYCLE_NAMES.items()}
+    checked = 0
+    for i in landed_ids:
+        series = [names[int(c)] for c in lifecycle[:, i]]
+        first = series.index("LANDED")
+        assert first < len(series) - 20, "landing happened too late to prove anything"
+        # Never leaves LANDED, however hard the policy pushes.
+        assert set(series[first:]) == {"LANDED"}
+        # And never moves again -- bit-identically.
+        assert np.array_equal(pose[first:, i, :2], np.broadcast_to(pose[first, i, :2], pose[first:, i, :2].shape))
+        checked += 1
+    assert checked
 
 
 def test_only_two_takeoff_waves_are_admitted():

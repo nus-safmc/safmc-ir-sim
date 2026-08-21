@@ -103,7 +103,7 @@ MARKER_DETECT_FOV_RAD = 1.0     # A-5  derived from fx=163.5 over 320 px, not me
 KNOWN_AREA_DEPTH_M = 14.0       # A-6  published in 2025, withdrawn from the 2026 table
 UNKNOWN_AREA_DOORWAYS = 2       # A-7  rulebook diagram is explicitly not to scale
 UNKNOWN_AREA_DOORWAY_M = 1.0    # A-7
-YAW_RATE_MAX = 1.5              # A-3-adjacent; no published limit, PX4 default territory
+YAW_RATE_MAX_RADS = 1.5              # A-3-adjacent; no published limit, PX4 default territory
 
 # Simulation defaults (not claims about the world)
 DEFAULT_TICK_HZ = 20.0          # matches NAV_RATE_HZ

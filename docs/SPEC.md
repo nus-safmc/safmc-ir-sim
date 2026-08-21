@@ -152,8 +152,15 @@ constant `tau`, default 0.35 s. **[ASSUMPTION]**
 [src: esp-everything/main/vfh.h:43].
 
 **R-DRONE-9** Drone lifecycle MUST be an explicit state machine over
-`{IDLE, ARMED, TAKEOFF, FLYING, LANDING, LANDED, CRASHED}`. Transitions MUST be total: any
-unhandled state combination raises rather than defaulting.
+`{IDLE, TAKEOFF, FLYING, LANDING, LANDED, CRASHED}`. Transitions MUST be total: an unhandled
+lifecycle value raises rather than falling through to a default.
+
+> Amended after the v0.1 audit. The original set included `ARMED`. There is no command that
+> arms without taking off -- the firmware's arm, offboard-mode and climb sequence is atomic
+> from a policy's point of view -- so `ARMED` was a state nothing could observe or act on. It
+> was specified and never implemented, which the audit correctly flagged. Removed rather than
+> added, because adding it would have created a state with no transitions in or out that a
+> policy could distinguish.
 
 **R-DRONE-10** A `LANDED` drone MUST be permanently immobile for the remainder of the run. The
 rules require a rescuing drone to remain "until the end of the mission"

@@ -31,6 +31,16 @@ class PoseSource(ABC):
     def pose_of(self, agent_id: str, state: np.ndarray, tick: int) -> Pose:
         """Produce the pose a policy will see. ``state`` is the true 6-row Quad25D state."""
 
+    def velocity_of(self, agent_id: str, state: np.ndarray, tick: int) -> tuple[float, float]:
+        """Produce the velocity a policy will see.
+
+        Part of the same seam as :meth:`pose_of`, and for the same reason: a drifting pose
+        source that left velocity as ground truth would leak an exact motion signal a real
+        drone does not have, and a policy could integrate it to recover the true position.
+        The default is ground truth; override it alongside ``pose_of``.
+        """
+        return (float(state[4, 0]), float(state[5, 0]))
+
     def reset(self) -> None: ...
 
 
@@ -71,6 +81,10 @@ class NoisyPose(PoseSource):
 
     def reset(self) -> None:
         self._drift.clear()
+
+    def velocity_of(self, agent_id, state, tick):
+        noise = self._rng.normal(0.0, self._pos_sigma, 2)
+        return (float(state[4, 0]) + noise[0], float(state[5, 0]) + noise[1])
 
     def pose_of(self, agent_id: str, state: np.ndarray, tick: int) -> Pose:
         drift = self._drift.get(agent_id)

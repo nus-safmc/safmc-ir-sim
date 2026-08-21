@@ -189,3 +189,75 @@ strategic finding for the team, and it fell out of taking the published constrai
 **Verified — TESTED.** 533 tests.
 
 **Open at this point.** The adversarial audit against `docs/SPEC.md`.
+
+---
+
+## C6 — adversarial spec audit, and the fixes it forced
+
+Full report: [AUDIT-v0.1.md](AUDIT-v0.1.md).
+
+**Done.** Seven independent auditors, one per area of `SPEC.md`, each required to locate the
+code, locate the regression test, and *attempt falsification* with its own scripts. Every
+reported violation was then handed to a separate skeptic instructed to refute it. 57 agents.
+
+**Result.** 71 requirements: 39 SATISFIED, 18 UNTESTED, 14 VIOLATED. Plus 36 extra bugs. Of 50
+claims sent to skeptics, **24 survived**.
+
+**The one that mattered most.** A `LANDED` drone was not immobile. The runner zeroed its
+command, but velocity lives in the state and decays through a lag, so a drone landing at speed
+slid up to 116 mm — 12% of the scoring radius. An auditor produced a case where a drone touched
+down 1.021 m from a bonus victim (outside the radius, not serviced) and slid to 0.906 m,
+**scoring 15 points it had not earned**, and making offline re-scoring disagree with the online
+result. `mission.py` documented the false invariant as fact.
+
+**The test that should have caught it was vacuous.** A full drone-resurrection mutation passed
+all 533 tests. The replacement was *itself* vacuous on the first attempt — drones landing from
+a hover slide ~0 mm — and now lands them at cruise speed and asserts bit-identical positions
+afterwards. Mutation-verified.
+
+Nine other confirmed defects fixed, including: a policy could permanently re-aim its own ToF
+ring through an in-place numpy write; blackboard publications were stored by reference, giving
+index-order-dependent reads; the `unobstructed` control mode still killed drones on markers and
+let them fly 55 m out of a 20 m field; `NaN` in a command surfaced as a `GEOSException` with no
+agent or tick; and the log contained bare `Infinity`/`NaN`, which is invalid JSON and rendered
+the replay page blank.
+
+**Two corrections to the spec itself.** `R-DRONE-9` specified an `ARMED` lifecycle state that
+nothing implemented and no policy could distinguish — removed. `FIDELITY.md` F-3 claimed the
+firmware's 0.40 m unreliable-return substitution was modelled; it is not modelled at all.
+
+**And a correction to my own earlier finding.** I had concluded the Unknown Search Area's
+north-south position was *forced*. It is not: that derivation demanded a 2 m gap on the room's
+south side, which faces the Start Area's virtual boundary line rather than a wall. The room has
+~1.9 m of freedom. Related real defect: gaps were measured centre-line to centre-line, so the
+room sat 1.95 m from the perimeter in **every** seed while validation passed — because the
+validator never compared the room against the perimeter at all. Both fixed.
+
+**Verified — TESTED.** 595 tests. `tests/test_audit_regressions.py` carries one named test per
+confirmed defect.
+
+**Verified — MEASURED, and this is the headline.** 12 drones, 180 s, seeds 0-4, both collision
+modes:
+
+| policy | `unobstructed` (control) | `stop` (survivability) |
+|---|---|---|
+| `frontier` (map-based) | **67.0** | 13.0 |
+| `wall_follow` | 50.0 | 15.0 |
+| `sdlw` (mapless, IROS 2026) | 19.0 | 17.0 |
+| `random_walk` | — | 21.0 |
+
+**The two modes rank the policies in opposite orders, and both rankings are true.** Isolating
+search strategy from crashes, the map-based policy is decisively better — 67 against 19 for the
+published mapless baseline. Include crashes and it is the *worst*, because it flies close to
+obstacles and dies. This is precisely the confound the target-paper recon warned about, now
+measured on our own policies, and it is only visible because `unobstructed` was fixed into a
+real control.
+
+Do not read this as "frontier wins". Read it as: **the map-based policy has the better search
+strategy and unusable obstacle-avoidance tuning**, and the honest next step is to fix its
+clearance and re-run, not to pick a winner. Five seeds is also too few to publish.
+
+**Open.** Five UNTESTED requirements with no cheap guard, listed in the audit report — chiefly
+that nothing prevents a policy calling `numpy.random` directly (`R-POL-7`), and that
+`R-DRONE-7`'s "cruise speed" is bound to a speed *cap*, which is a modelling decision rather
+than a test gap.
