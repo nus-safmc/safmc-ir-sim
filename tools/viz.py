@@ -24,6 +24,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from safmc_sim.recorder import COMMAND_NAMES, LIFECYCLE_NAMES, load_run  # noqa: E402
 
 
+def _round(array: np.ndarray, decimals: int) -> list:
+    """Round to a short decimal that serialises compactly.
+
+    Rounding a float32 array in place does not help: ``float32(2.87)`` is 2.869999885559082 as
+    a float64, and that is what ``tolist()`` emits. Widening first makes the rounding land on a
+    value whose shortest repr really is "2.87", which is a ~5x difference in page size.
+    """
+    return np.round(array.astype(np.float64), decimals).tolist()
+
+
 def build_payload(directory: Path, tof_every: int = 10, pose_every: int = 1) -> dict:
     run = load_run(directory)
     header, footer, events = run["header"], run["footer"], run["events"]
@@ -42,7 +52,7 @@ def build_payload(directory: Path, tof_every: int = 10, pose_every: int = 1) -> 
         tof_ticks = (tof["ticks"][::stride] // pose_every).astype(int).tolist()
         # inf does not survive JSON; -1 is the agreed "no return" sentinel on the JS side.
         clean = np.where(np.isfinite(sampled), sampled, -1.0)
-        tof_frames = np.round(clean, 2).tolist()
+        tof_frames = _round(clean, 2)
 
     return {
         "arena": header["arena"],
@@ -53,8 +63,8 @@ def build_payload(directory: Path, tof_every: int = 10, pose_every: int = 1) -> 
         "score": footer["score"],
         "missionSummary": footer["mission_summary"],
         "lifecycles": footer["lifecycles"],
-        "times": np.round(times, 2).tolist(),
-        "pose": np.round(pose, 3).tolist(),
+        "times": _round(times, 2),
+        "pose": _round(pose, 2),
         "lifecycleSeries": lifecycle.astype(int).tolist(),
         "commandKind": kinds.astype(int).tolist(),
         "lifecycleNames": LIFECYCLE_NAMES,
@@ -292,7 +302,7 @@ const sc=D.score;
 document.getElementById('scoreBox').innerHTML =
   `<dt>raw</dt><dd>${sc.raw_total}</dd>`+
   `<dt>suppressed by fire</dt><dd>${sc.suppressed.length?sc.suppressed.join(', '):'none'}</dd>`+
-  `<dt>relay</dt><dd>${sc.relay_formed?sc.relay_chain.join(' &rarr; '):'not formed'}</dd>`+
+  `<dt>relay</dt><dd>${sc.relay_formed?sc.relay_chain.join('  ->  '):'not formed'}</dd>`+
   `<dt>multiplier</dt><dd>&times;${sc.multiplier}</dd>`+
   `<dt style="font-weight:600;color:var(--ink)">total</dt>`+
   `<dd style="font-weight:700;font-size:17px">${sc.total}</dd>`;
@@ -320,7 +330,7 @@ document.getElementById('title').textContent =
   `${cfg.policy} | ${D.agents.length} drones | seed ${D.seed}`;
 document.getElementById('subtitle').textContent =
   `${D.times[T-1].toFixed(0)}s simulated | ${T} ticks | collision_behaviour=`+
-  `${cfg.collision_behaviour} · ir-sim ${D.meta.versions['ir-sim']}`;
+  `${cfg.collision_behaviour} | ir-sim ${D.meta.versions['ir-sim']}`;
 document.getElementById('arenaNote').textContent =
   `Dashed circles are the 1 m scoring radius; a target turns green when a landed drone `+
   `satisfied both the radius and line of sight. Shaded band is the Start Area; dashed `+
