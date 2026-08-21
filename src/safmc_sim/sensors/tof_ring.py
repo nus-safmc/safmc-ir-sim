@@ -297,8 +297,19 @@ class ToFRing:
         return self._scan
 
     def get_scan(self) -> ToFScan:
+        """The latest scan. Raises if the sensor has never stepped."""
         if self._scan is None:
             raise ConfigError("no scan yet -- step() has not run")
+        return self._scan
+
+    @property
+    def latest_scan(self) -> ToFScan | None:
+        """The latest scan, or ``None`` if the sensor has never stepped.
+
+        Exists because on tick 0 no ``env.step()`` has happened yet, so a caller that wants to
+        build a real first observation has to notice the difference between "no scan yet" and
+        "a scan that happens to be empty" without catching an exception to find out.
+        """
         return self._scan
 
     def _altitude(self) -> float:

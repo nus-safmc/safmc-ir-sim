@@ -85,3 +85,68 @@ written up in `world/arena.py`'s module docstring.
 
 **Open at this point.** Policy API, runner, blackboard, mission scoring, recorder, visualiser,
 reference policies.
+
+---
+
+## C3 + C4 + C5 — policy API, runner, mission, recorder, visualiser, reference policies
+
+**Built.**
+
+- `api.py` — `Observation`, six `Command` types matching the firmware's action set exactly,
+  the `Policy` base class, and a name-keyed registry that overwrites with a warning.
+- `blackboard.py` / `pose.py` — the two deferred-work seams, each with a working v0.1
+  implementation and a worked example of the replacement (`NoisyPose`).
+- `mission.py` — target servicing, line of sight, the fire-suppression coupling, and the
+  relay evaluated as a breadth-first search over the "within 1 m and mutually visible"
+  graph.
+- `runner.py` — the tick loop, lifecycle state machine, two-wave rule, collision handling.
+- `recorder.py` — versioned structured log (`run.jsonl` + `states.npz` + `tof.npz`) and
+  `score_from_log`, which re-scores offline from the log alone.
+- `tools/viz.py` — self-contained HTML replay: arena, tracks, live ToF rays, scoring radii,
+  agent table, event timeline, scrubbing.
+- `cli.py` — `safmc-run run | sweep | replay | policies`. Sweeps run one process per run,
+  because ir-sim's RNG is process-global.
+- Five reference policies: `hold`, `random_walk`, `wall_follow`, `frontier` (log-odds
+  occupancy map + frontier selection + VFH avoidance), and `sdlw` (a faithful port of
+  arXiv:2607.25195, with its `uhlw` baseline).
+
+**Verified — TESTED.** 530 tests, all passing.
+
+- Nothing reachable from an `Observation` is world state: a test walks every public attribute
+  four levels deep and asserts no `ArenaSpec`, `Mission`, `Runner` or ir-sim object appears.
+  R-POL-4.
+- A raising policy aborts the run with agent id, tick and the original exception chained.
+  R-POL-9.
+- All ten agents observe an identical blackboard snapshot within a tick. R-POL-8.
+- Two identical runs produce logs that differ **only** in the `meta` block; `states.npz` is
+  byte-identical. R-DET-1.
+- Adding a twelfth drone leaves the first ten agents' RNG streams unchanged. R-DET-3.
+- A sensor rate that does not divide the tick rate raises rather than rounding. R-TIME-3.
+- Offline re-scoring equals the online score exactly across three seeds. R-MISS-8.
+- Recording on versus off produces identical simulation results. R-OBS-4.
+- Scoring: the 1 m radius, the line-of-sight requirement, markers *not* blocking line of
+  sight, one-award-per-target, the 2.5 m fire coupling in both directions, relay formation
+  and its three failure modes, and the 240-point theoretical maximum. R-MISS-1..4.
+- The two-wave rule admits exactly two waves and records a refusal for the third. R-MISS-6.
+
+**Verified — MEASURED.** A 12-run comparative sweep, 12 drones, 120 s, seeds 0-3:
+
+| policy | mean score | min | max |
+|---|---|---|---|
+| `frontier` (map-based) | 22.5 | 15 | 40 |
+| `sdlw` (mapless, IROS 2026) | 18.8 | 10 | 35 |
+| `random_walk` | 8.8 | 0 | 20 |
+
+The ordering is what the project set out to be able to measure, and the null baseline
+(`hold`) scores zero as it must.
+
+**A result that needs stating carefully.** In that sweep `frontier` crashed 7-10 of 12 drones
+while `sdlw` crashed 0-4. Its higher score is achieved *despite* losing most of its fleet, and
+under `collision_behaviour="stop"` a crashed drone stops contributing for the rest of the
+episode. This is exactly the confound recon found in the target paper, so the comparison is
+not yet trustworthy: it needs the `unobstructed` mode as a control and coverage normalised by
+live-agent-seconds. `frontier`'s avoidance clearance also wants tuning before anyone quotes
+these numbers. Recorded as an open item rather than a headline.
+
+**Open at this point.** Metrics module; the collision-mode control study; the adversarial
+audit.
