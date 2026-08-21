@@ -77,3 +77,13 @@ Found during recon; recorded so nobody reintroduces them.
 - **The target paper's `openness` metric behaves opposite to its stated intent**, and its collided
   agents are permanently frozen, which confounds its headline coverage gain. Detailed in
   [related work](09-related-work.md).
+
+## 6. Added during implementation
+
+| # | Divergence | Impact |
+|---|---|---|
+| F-11 | Mission markers are excluded from ir-sim's obstacle list and get a height-gated collision check of our own instead | Correct at cruise altitude; means marker collision is decided by our code, not shapely |
+| F-12 | The south field edge is netting in the rules but is modelled as a solid boundary at net height | Drones cannot leave the field, which is required since ir-sim has no world bounds. A drone that would have flown out is stopped rather than lost |
+| F-13 | Landing always succeeds, and takes a fixed descent at the climb-rate limit | Overstates landing reliability, which feeds straight into score |
+| F-14 | Yaw and altitude are tracked with proportional controllers in the runner, not by PX4's real control loops | No overshoot, no tracking error under aggressive commands |
+| F-15 | `collision_behaviour="stop"` freezes a drone permanently on any contact | Faithful to "no mid-run repair", but harsh: a graze is fatal. Use `unobstructed` as the control when comparing search strategies |
