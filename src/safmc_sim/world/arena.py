@@ -66,7 +66,6 @@ from ..constants import (
     FIELD_DEPTH_M,
     FIELD_WIDTH_M,
     INNER_WALL_HEIGHT_M,
-    KNOWN_AREA_DEPTH_M,
     MARKER_FOOTPRINT_M,
     MARKER_HEIGHT_M,
     MIN_GAP_PILLAR_M,
@@ -192,10 +191,6 @@ class Target:
     def __post_init__(self) -> None:
         if self.kind not in TARGET_KINDS:
             raise ConfigError(f"unknown target kind {self.kind!r}, expected one of {TARGET_KINDS}")
-
-    @property
-    def position(self) -> np.ndarray:
-        return np.array([self.x, self.y])
 
 
 @dataclass(frozen=True)

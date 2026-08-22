@@ -30,7 +30,6 @@ __all__ = [
     "ned_to_arena",
     "arena_yaw_to_ned_heading",
     "ned_heading_to_arena_yaw",
-    "unit_vector",
 ]
 
 _TWO_PI = 2.0 * np.pi
@@ -93,8 +92,3 @@ def ned_to_arena(ned_x, ned_y, ned_z, heading):
         float(ned_heading_to_arena_yaw(heading)),
     )
 
-
-def unit_vector(theta):
-    """Unit vector(s) for ARENA yaw ``theta``. Returns shape ``(..., 2)``."""
-    t = np.asarray(theta, dtype=float)
-    return np.stack((np.cos(t), np.sin(t)), axis=-1)

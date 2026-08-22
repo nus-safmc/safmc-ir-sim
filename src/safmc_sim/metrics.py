@@ -80,11 +80,6 @@ class RunMetrics:
     coverage_curve: tuple[tuple[float, float], ...] = field(repr=False, default=())
     """``(sim_time_s, sensed_coverage)`` samples, for plotting."""
 
-    def as_row(self) -> dict[str, Any]:
-        return {
-            k: v for k, v in self.__dict__.items() if k != "coverage_curve"
-        }
-
 
 def arena_from_log(header: Mapping[str, Any]) -> ArenaSpec:
     """Rebuild the arena from the recorded geometry, not from the seed.

@@ -28,9 +28,5 @@ class PolicyError(SafmcSimError):
     """A policy misbehaved: raised, returned the wrong type, or reached for state it must not have."""
 
 
-class RuleViolation(SafmcSimError):
-    """A competition rule was broken in a way that invalidates the run (e.g. a third take-off wave)."""
-
-
 class LogFormatError(SafmcSimError):
     """A recorded log is malformed or of an unsupported schema version."""

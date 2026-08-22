@@ -57,9 +57,6 @@ class OccupancyMap:
             np.clip((np.asarray(y) / self.resolution_m).astype(int), 0, self.ny - 1),
         )
 
-    def to_world(self, ix, iy):
-        return ((ix + 0.5) * self.resolution_m, (iy + 0.5) * self.resolution_m)
-
     def integrate(self, obs: Observation, max_range_m: float) -> None:
         """Fold one ToF scan into the map."""
         origin = obs.pose.xy
@@ -114,10 +111,6 @@ class OccupancyMap:
         neighbour_unknown[:, :-1] |= unknown[:, 1:]
         neighbour_unknown[:, 1:] |= unknown[:, :-1]
         return np.argwhere(free & neighbour_unknown)
-
-    @property
-    def explored_fraction(self) -> float:
-        return float(self.observed.mean())
 
 
 @register_policy("frontier")

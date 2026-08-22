@@ -307,10 +307,6 @@ class Mission:
 
     # -- queries ----------------------------------------------------------------------------
 
-    @property
-    def serviced_ids(self) -> tuple[str, ...]:
-        return tuple(sorted(t for t, s in self.targets.items() if s.serviced))
-
     def summary(self) -> dict[str, Any]:
         return {
             target_id: {

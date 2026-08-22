@@ -60,11 +60,6 @@ class WorldScene:
     # -- the two scenes ------------------------------------------------------------------
 
     @property
-    def los_scene(self) -> RayScene:
-        """Structure only. This is the scene the scoring rules refer to."""
-        return self._structural
-
-    @property
     def static_sensing_scene(self) -> RayScene:
         """Structure plus mission markers, without live drone bodies."""
         return self._static_sensing
@@ -127,7 +122,3 @@ class WorldScene:
             circle_heights=z_centre + DRONE_BODY_HALF_HEIGHT_M,
             circle_z_min=z_centre - DRONE_BODY_HALF_HEIGHT_M,
         )
-
-    @property
-    def drone_ids(self) -> np.ndarray:
-        return self._drone_ids

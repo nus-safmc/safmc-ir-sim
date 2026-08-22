@@ -93,10 +93,6 @@ class ToFConfig:
         if self.noise_std_m < 0.0:
             raise ConfigError("noise_std_m must be >= 0")
 
-    @property
-    def n_zones(self) -> int:
-        return self.n_rangers * self.zones_per_ranger
-
 
 @dataclass(frozen=True)
 class ToFScan:

@@ -453,3 +453,41 @@ def test_pose_and_velocity_both_come_through_the_pose_source_seam():
     runner.pose_source = Sentinel()
     runner.run()
     assert {kind for kind, _ in seen} == {"pose", "velocity"}
+
+
+# -- the seam's worked example must actually work ---------------------------------------------
+
+
+def test_noisy_pose_drifts_and_is_reproducible():
+    """`NoisyPose` is the template a real odometry model gets written against.
+
+    It shipped untested, which is exactly the wrong state for the one class people will copy.
+    Three properties matter: drift accumulates rather than being white noise, velocity is
+    corrupted too (or a policy could integrate an exact signal to recover the true position),
+    and the whole thing is reproducible from its generator.
+    """
+    from safmc_sim.pose import NoisyPose
+
+    truth = np.array([[5.0], [5.0], [0.3], [0.5], [0.2], [-0.1]])
+
+    def walk(seed, n=400):
+        source = NoisyPose(np.random.default_rng(seed))
+        out = [source.pose_of("d0", truth, t) for t in range(n)]
+        return np.array([[p.x, p.y, p.theta] for p in out])
+
+    a, b, c = walk(1), walk(1), walk(2)
+    assert np.array_equal(a, b), "same seed must give the same drift"
+    assert not np.array_equal(a, c), "different seeds must differ"
+
+    # Drift is a random walk: later error is larger than early error, in expectation.
+    error = np.abs(a[:, :2] - truth[:2, 0])
+    assert error[-50:].mean() > error[:50].mean()
+
+    # Altitude is not corrupted -- the real system measures it directly, and the class says so.
+    source = NoisyPose(np.random.default_rng(0))
+    assert source.pose_of("d0", truth, 0).z == 0.5
+
+    # Velocity goes through the seam too.
+    vx, vy = source.velocity_of("d0", truth, 0)
+    assert (vx, vy) != (0.2, -0.1)
+    assert abs(vx - 0.2) < 0.5 and abs(vy + 0.1) < 0.5
