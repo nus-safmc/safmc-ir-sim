@@ -1,0 +1,783 @@
+"""Seeded generation and validation of SAFMC Category Swarm arenas.
+
+The rulebook makes randomisation mandatory, not optional. Verbatim from section 3.2 of the
+2026 Category Swarm Challenge Booklet:
+
+    "The layout is not drawn to scale."
+    "The placements of the inner walls will follow the diagram, but the exact positions and
+     dimensions will NOT be given."
+    "The layout within the Unknown Search Area is intentionally NOT shown."
+    "The placement and number of victims and fires shown are for illustration purposes only."
+
+A policy tuned against one hand-drawn map measures overfitting, so this module produces a
+*distribution* of arenas from a seed and refuses to emit one that violates a published
+constraint (R-WORLD-1, R-WORLD-3, R-WORLD-4).
+
+Published geometry that is *not* randomised, because it is given: the 20 x 20 m field, the
+20 x 6 m Start Area, the 10 x 10 m Unknown Search Area, wall and pillar heights, the minimum
+gaps, and the 1.4 m ceiling. See docs/01-competition.md.
+
+A finding that fell out of building this, and that matters strategically
+-----------------------------------------------------------------------
+Taken literally, the published constraints very nearly determine the arena.
+
+The Known Search Area is 14 m deep (assumption A-6; the 2026 table withdrew the figure) and
+the Unknown Search Area is 10 m, leaving **4 m of north-south slack in total** for a room that
+must clear the north perimeter by the published 2 m gap. The room's south side faces the Start
+Area boundary, which is a virtual line rather than a wall, so no gap rule applies there -- its
+position has roughly 1.9 m of freedom, no more.
+
+The consequence is what matters. Once the room is placed, the free space in the Known Search
+Area is a **corridor ring of about 2 m** around a central 10 x 10 m room, widening on one
+side. There is almost no room left for the free-standing maze walls the diagram depicts: any
+such wall must clear both the room and the perimeter by 2 m, and those constraints nearly
+exhaust the space. Empirically about one fits.
+
+Two things follow:
+
+1. **Search in the Known Search Area is closer to one-dimensional than two.** A ring corridor
+   rewards a very different policy from an open field -- coverage is nearly a traversal
+   problem, and the interesting decisions are which doorway to enter and when to commit.
+2. **Either A-6 is wrong or the 2 m gap is not an all-pairs constraint.** Both readings are
+   defensible and they produce materially different arenas. ``ArenaConfig.min_gap_wall_m``
+   and the target counts exist so the team can test the alternative once someone sees the real
+   field. Any result quoted from this simulator should say which reading it used.
+
+(An earlier version of this note claimed the room's north-south position was *forced*. That was
+wrong: it required a 2 m gap on the south side, where there is no wall to be 2 m from. The
+strategic conclusion survives; the geometry claim did not.)
+"""
+
+from __future__ import annotations
+
+import math
+from collections import deque
+from dataclasses import dataclass, field
+
+import numpy as np
+from shapely.geometry import Polygon, box
+from shapely.strtree import STRtree
+
+from ..constants import (
+    CEILING_M,
+    DRONE_RADIUS_M,
+    FIELD_DEPTH_M,
+    FIELD_WIDTH_M,
+    INNER_WALL_HEIGHT_M,
+    MARKER_FOOTPRINT_M,
+    MARKER_HEIGHT_M,
+    MIN_GAP_PILLAR_M,
+    MIN_GAP_WALL_TO_WALL_M,
+    N_BONUS_VICTIMS,
+    N_FIRES,
+    N_VICTIMS,
+    PERIMETER_WALL_HEIGHT_M,
+    PILLAR_DIAMETER_M,
+    PILLAR_HEIGHT_M,
+    SAFETY_NET_HEIGHT_M,
+    SCORE_RADIUS_M,
+    START_AREA_DEPTH_M,
+    UNKNOWN_AREA_DOORWAY_M,
+    UNKNOWN_AREA_DOORWAYS,
+    UNKNOWN_AREA_SIZE_M,
+    WALL_THICKNESS_M,
+)
+from ..errors import ArenaError, ConfigError
+from ..sensors.raycast import RayScene
+
+__all__ = [
+    "Wall",
+    "Pillar",
+    "Target",
+    "ArenaSpec",
+    "ArenaConfig",
+    "generate_arena",
+    "TARGET_KINDS",
+]
+
+TARGET_KINDS = ("victim", "bonus_victim", "fire")
+
+# Grid resolution for the connectivity check. Fine enough to find a 1 m doorway, coarse
+# enough that a 20 x 20 m field is a 200 x 200 flood fill.
+_CONNECTIVITY_RES_M = 0.10
+
+
+@dataclass(frozen=True)
+class Wall:
+    """A wall, described by its centre line and thickness.
+
+    Stored as a centre line rather than a polygon because that is how walls are actually laid
+    out at the venue, and because it maps directly onto ir-sim's origin-centred rectangle.
+    """
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    thickness_m: float = WALL_THICKNESS_M
+    height_m: float = INNER_WALL_HEIGHT_M
+    kind: str = "inner_wall"
+
+    @property
+    def length_m(self) -> float:
+        return math.hypot(self.x2 - self.x1, self.y2 - self.y1)
+
+    @property
+    def centre(self) -> tuple[float, float]:
+        return (0.5 * (self.x1 + self.x2), 0.5 * (self.y1 + self.y2))
+
+    @property
+    def angle_rad(self) -> float:
+        return math.atan2(self.y2 - self.y1, self.x2 - self.x1)
+
+    def corners(self) -> np.ndarray:
+        """The four corners, counter-clockwise. Shape (4, 2)."""
+        cx, cy = self.centre
+        half_l, half_t = self.length_m / 2.0, self.thickness_m / 2.0
+        ca, sa = math.cos(self.angle_rad), math.sin(self.angle_rad)
+        local = np.array(
+            [[-half_l, -half_t], [half_l, -half_t], [half_l, half_t], [-half_l, half_t]]
+        )
+        rot = np.array([[ca, -sa], [sa, ca]])
+        return local @ rot.T + np.array([cx, cy])
+
+    def segments(self) -> np.ndarray:
+        """The four edges as ray-castable segments. Shape (4, 4)."""
+        c = self.corners()
+        return np.stack([np.concatenate([c[i], c[(i + 1) % 4]]) for i in range(4)])
+
+    def polygon(self) -> Polygon:
+        return Polygon(self.corners())
+
+
+@dataclass(frozen=True)
+class Pillar:
+    x: float
+    y: float
+    radius_m: float = PILLAR_DIAMETER_M / 2.0
+    height_m: float = PILLAR_HEIGHT_M
+
+    def polygon(self) -> Polygon:
+        return Polygon(
+            [
+                (
+                    self.x + self.radius_m * math.cos(t),
+                    self.y + self.radius_m * math.sin(t),
+                )
+                for t in np.linspace(0, 2 * math.pi, 24, endpoint=False)
+            ]
+        )
+
+
+@dataclass(frozen=True)
+class Target:
+    """A mission marker: a victim, a bonus victim, or a fire.
+
+    Markers are *not* ir-sim obstacles. They occlude time-of-flight rays (1.0 m tall against a
+    0.5 m cruise altitude) but the rules are explicit that they do not block line of sight for
+    scoring, which mentions only "walls or pillars" (3.3.4 r.1). Keeping them out of the
+    line-of-sight scene is how that stays true by construction.
+    """
+
+    id: str
+    kind: str
+    x: float
+    y: float
+    radius_m: float = MARKER_FOOTPRINT_M / 2.0
+    height_m: float = MARKER_HEIGHT_M
+
+    def __post_init__(self) -> None:
+        if self.kind not in TARGET_KINDS:
+            raise ConfigError(f"unknown target kind {self.kind!r}, expected one of {TARGET_KINDS}")
+
+
+@dataclass(frozen=True)
+class ArenaConfig:
+    """Knobs for generation. Published values are not knobs and live in constants.py."""
+
+    n_inner_walls: int = 1
+    n_pillars_known: int = 6
+    n_unknown_walls: int = 2
+    n_pillars_unknown: int = 2
+    n_victims: int = N_VICTIMS
+    n_bonus_victims: int = N_BONUS_VICTIMS
+    n_fires: int = N_FIRES
+    inner_wall_length_range_m: tuple[float, float] = (2.0, 5.0)
+    max_placement_attempts: int = 4000
+    wall_thickness_m: float = WALL_THICKNESS_M
+    min_gap_wall_m: float = MIN_GAP_WALL_TO_WALL_M
+    min_gap_pillar_m: float = MIN_GAP_PILLAR_M
+    """Both gaps are published values, exposed here because they interact with the Unknown
+    Search Area's size in a way that nearly determines the layout -- see the module docstring.
+    Lower them only to explore alternative readings of the rulebook, and say so in results."""
+
+    def __post_init__(self) -> None:
+        if self.n_bonus_victims < 1 or self.n_fires < 1:
+            raise ConfigError(
+                "the rulebook guarantees the Unknown Search Area contains at least one bonus "
+                "victim and at least one fire (3.3.9 r.2), so both counts must be >= 1"
+            )
+        lo, hi = self.inner_wall_length_range_m
+        if not 0 < lo <= hi:
+            raise ConfigError(f"inner_wall_length_range_m must be 0 < lo <= hi, got {(lo, hi)}")
+
+
+@dataclass(frozen=True)
+class ArenaSpec:
+    """A fully resolved, validated arena. Immutable, serialisable, and the unit of a run."""
+
+    seed: int
+    width_m: float
+    depth_m: float
+    ceiling_m: float
+    start_area_depth_m: float
+    unknown_area: tuple[float, float, float, float]
+    walls: tuple[Wall, ...]
+    pillars: tuple[Pillar, ...]
+    targets: tuple[Target, ...]
+    config: ArenaConfig = field(default_factory=ArenaConfig)
+
+    # -- scenes ---------------------------------------------------------------------------
+
+    def structural_scene(self) -> RayScene:
+        """Walls and pillars only. Blocks both sensing and line of sight."""
+        segments = (
+            np.vstack([w.segments() for w in self.walls])
+            if self.walls
+            else np.zeros((0, 4))
+        )
+        seg_h = np.concatenate([np.full(4, w.height_m) for w in self.walls]) if self.walls else np.zeros(0)
+        circles = (
+            np.array([[p.x, p.y, p.radius_m] for p in self.pillars])
+            if self.pillars
+            else np.zeros((0, 3))
+        )
+        circ_h = np.array([p.height_m for p in self.pillars]) if self.pillars else np.zeros(0)
+        return RayScene(
+            circles=circles, circle_heights=circ_h, segments=segments, segment_heights=seg_h
+        )
+
+    def marker_scene(self) -> RayScene:
+        """Mission markers only. Blocks sensing; never line of sight (R-MISS-2)."""
+        if not self.targets:
+            return RayScene()
+        return RayScene(
+            circles=np.array([[t.x, t.y, t.radius_m] for t in self.targets]),
+            circle_heights=np.array([t.height_m for t in self.targets]),
+        )
+
+    # -- ir-sim bridge --------------------------------------------------------------------
+
+    def to_irsim_world(self, step_time: float) -> dict:
+        """The ``world:`` block of an ir-sim YAML config."""
+        return {
+            "width": self.width_m,
+            "height": self.depth_m,
+            "step_time": step_time,
+            "sample_time": step_time,
+            "offset": [0.0, 0.0],
+            "control_mode": "auto",
+            # Colliding drones freeze. This mirrors the target paper's setup and is the
+            # honest model of "a drone that hit a wall is out of the run" -- the rules allow
+            # no mid-run repair. The runner records it as CRASHED and stops commanding it.
+            "collision_mode": "stop",
+        }
+
+    def to_irsim_obstacles(self) -> list[dict]:
+        """The ``obstacle:`` block. Walls and pillars only -- markers are handled by us.
+
+        Markers stay out because ir-sim's collision is strictly 2D and would make a 1.0 m
+        marker impassable at every altitude, including altitudes at which a drone could
+        legally overfly it. The runner does a height-gated marker collision check instead.
+        """
+        items: list[dict] = []
+        for wall in self.walls:
+            cx, cy = wall.centre
+            items.append(
+                {
+                    "shape": {
+                        "name": "rectangle",
+                        "length": wall.length_m,
+                        "width": wall.thickness_m,
+                    },
+                    "state": [cx, cy, wall.angle_rad],
+                    "color": "dimgray",
+                }
+            )
+        for pillar in self.pillars:
+            items.append(
+                {
+                    "shape": {"name": "circle", "radius": pillar.radius_m},
+                    "state": [pillar.x, pillar.y, 0.0],
+                    "color": "slategray",
+                }
+            )
+        return items
+
+    # -- queries --------------------------------------------------------------------------
+
+    @property
+    def start_area(self) -> tuple[float, float, float, float]:
+        """``(x0, y0, x1, y1)`` of the Start Area: the full-width southern strip."""
+        return (0.0, 0.0, self.width_m, self.start_area_depth_m)
+
+    def in_start_area(self, x: float, y: float) -> bool:
+        x0, y0, x1, y1 = self.start_area
+        return x0 <= x <= x1 and y0 <= y <= y1
+
+    def in_unknown_area(self, x: float, y: float) -> bool:
+        x0, y0, x1, y1 = self.unknown_area
+        return x0 <= x <= x1 and y0 <= y <= y1
+
+    def targets_of(self, kind: str) -> tuple[Target, ...]:
+        return tuple(t for t in self.targets if t.kind == kind)
+
+    def obstacle_polygons(self) -> list[Polygon]:
+        return [w.polygon() for w in self.walls] + [p.polygon() for p in self.pillars]
+
+    def occupancy_grid(self, resolution_m: float, inflate_m: float = 0.0) -> np.ndarray:
+        """Rasterise obstacles to a boolean grid indexed ``[ix, iy]``. True means blocked.
+
+        Done analytically rather than with shapely per cell: a rotated rectangle is an
+        axis-aligned box in its own frame, and a circle is a distance test. That turns a
+        200 x 200 grid from tens of thousands of geometry calls into a handful of array ops.
+
+        ``inflate_m`` dilates every obstacle, which is how the connectivity check asks
+        "could a drone of this radius actually fit through here" rather than "is there a
+        mathematical gap".
+        """
+        if resolution_m <= 0:
+            raise ConfigError(f"resolution_m must be > 0, got {resolution_m}")
+        nx = int(math.ceil(self.width_m / resolution_m))
+        ny = int(math.ceil(self.depth_m / resolution_m))
+        xs = (np.arange(nx) + 0.5) * resolution_m
+        ys = (np.arange(ny) + 0.5) * resolution_m
+        gx, gy = np.meshgrid(xs, ys, indexing="ij")
+        grid = np.zeros((nx, ny), dtype=bool)
+
+        for wall in self.walls:
+            cx, cy = wall.centre
+            ca, sa = math.cos(-wall.angle_rad), math.sin(-wall.angle_rad)
+            dx, dy = gx - cx, gy - cy
+            lx = dx * ca - dy * sa
+            ly = dx * sa + dy * ca
+            grid |= (np.abs(lx) <= wall.length_m / 2.0 + inflate_m) & (
+                np.abs(ly) <= wall.thickness_m / 2.0 + inflate_m
+            )
+
+        for pillar in self.pillars:
+            grid |= (gx - pillar.x) ** 2 + (gy - pillar.y) ** 2 <= (
+                pillar.radius_m + inflate_m
+            ) ** 2
+
+        return grid
+
+
+# ------------------------------------------------------------------------------------------
+# Generation
+# ------------------------------------------------------------------------------------------
+
+
+def _far_enough(candidate: Polygon, existing: list[Polygon], min_gap: float) -> bool:
+    """True when ``candidate`` keeps at least ``min_gap`` clear of everything in ``existing``."""
+    if not existing:
+        return True
+    tree = STRtree(existing)
+    probe = candidate.buffer(min_gap)
+    for j in tree.query(probe):
+        if existing[j].distance(candidate) < min_gap:
+            return False
+    return True
+
+
+def _boundary_walls(width: float, depth: float, thickness: float) -> list[Wall]:
+    """The field boundary.
+
+    West, north and east are the published 1.5 m perimeter wall. The south edge has no
+    perimeter wall -- the rules say netting only -- but it still has to stop drones, because
+    ir-sim has no implicit world bounds and a robot silently leaves the world otherwise
+    (R-WORLD-6). It is modelled at the safety-net height and tagged ``net`` so that anything
+    reasoning about walls can tell the difference.
+    """
+    half = thickness / 2.0
+    return [
+        Wall(-half, 0.0, -half, depth, thickness, PERIMETER_WALL_HEIGHT_M, "perimeter_wall"),
+        Wall(0.0, depth + half, width, depth + half, thickness, PERIMETER_WALL_HEIGHT_M, "perimeter_wall"),
+        Wall(width + half, 0.0, width + half, depth, thickness, PERIMETER_WALL_HEIGHT_M, "perimeter_wall"),
+        Wall(0.0, -half, width, -half, thickness, SAFETY_NET_HEIGHT_M, "net"),
+    ]
+
+
+def _room_walls(
+    x0: float, y0: float, size: float, thickness: float, rng: np.random.Generator,
+    n_doorways: int, doorway_m: float,
+) -> list[Wall]:
+    """The Unknown Search Area: a walled room with open doorways.
+
+    The rulebook diagram shows gaps in its boundary, including one on the south face toward
+    the Start Area, but the layout is explicitly not to scale, so doorway count and width are
+    assumptions A-7. At least one doorway is always placed on the south face, otherwise the
+    room can be unreachable from the approach direction every drone actually takes.
+    """
+    x1, y1 = x0 + size, y0 + size
+    faces = [
+        ((x0, y0), (x1, y0)),  # south -- always gets a doorway
+        ((x1, y0), (x1, y1)),  # east
+        ((x1, y1), (x0, y1)),  # north
+        ((x0, y1), (x0, y0)),  # west
+    ]
+    chosen = {0}
+    while len(chosen) < min(n_doorways, len(faces)):
+        chosen.add(int(rng.integers(0, len(faces))))
+
+    walls: list[Wall] = []
+    for i, (a, b) in enumerate(faces):
+        if i not in chosen:
+            walls.append(Wall(a[0], a[1], b[0], b[1], thickness, INNER_WALL_HEIGHT_M, "unknown_wall"))
+            continue
+        # Cut a doorway at a random position along the face, leaving a solid stub each side.
+        margin = doorway_m
+        t = float(rng.uniform(margin / size, 1.0 - margin / size))
+        ax, ay = a
+        bx, by = b
+        dx, dy = bx - ax, by - ay
+        gap_half = doorway_m / 2.0 / size
+        for lo, hi in ((0.0, max(0.0, t - gap_half)), (min(1.0, t + gap_half), 1.0)):
+            if (hi - lo) * size < thickness:
+                continue
+            walls.append(
+                Wall(
+                    ax + dx * lo, ay + dy * lo, ax + dx * hi, ay + dy * hi,
+                    thickness, INNER_WALL_HEIGHT_M, "unknown_wall",
+                )
+            )
+    return walls
+
+
+def generate_arena(
+    seed: int, config: ArenaConfig | None = None, validate: bool = True
+) -> ArenaSpec:
+    """Build one arena from a seed. Deterministic: same seed, same arena.
+
+    Raises :class:`ArenaError` if a layout satisfying every published constraint could not be
+    found, rather than returning a degraded arena. An arena that violates its own constraints
+    would invalidate every run performed on it, so there is nothing useful to fall back to.
+    """
+    cfg = config or ArenaConfig()
+    rng = np.random.default_rng(seed)
+
+    width, depth = FIELD_WIDTH_M, FIELD_DEPTH_M
+    thickness = cfg.wall_thickness_m
+    walls = _boundary_walls(width, depth, thickness)
+    structure = [w.polygon() for w in walls]
+
+    # Gaps are measured between wall FACES, not centre lines. A wall centred on its line
+    # extends thickness/2 either side, so a room placed with its centre line min_gap from the
+    # perimeter leaves only min_gap - thickness/2 of actual air. Getting this wrong put the
+    # room's north face 1.95 m from the perimeter in every seed while validation passed.
+    half = thickness / 2.0
+    # North, west and east must clear the perimeter by the published gap. The room's SOUTH
+    # side faces the Start Area boundary, which is a virtual line rather than a wall
+    # (rulebook 3.2), so no wall-to-wall gap applies there -- only that the room stays out of
+    # the Start Area.
+    y_lo = START_AREA_DEPTH_M + half
+    y_hi = depth - cfg.min_gap_wall_m - UNKNOWN_AREA_SIZE_M - half
+    x_lo = cfg.min_gap_wall_m + half
+    x_hi = width - cfg.min_gap_wall_m - UNKNOWN_AREA_SIZE_M - half
+    if y_hi < y_lo - 1e-9 or x_hi < x_lo - 1e-9:
+        raise ArenaError(
+            f"a {UNKNOWN_AREA_SIZE_M} m Unknown Search Area with {cfg.min_gap_wall_m} m "
+            f"perimeter gaps and {thickness} m walls does not fit a "
+            f"{width} x {depth} m field with a {START_AREA_DEPTH_M} m Start Area"
+        )
+    room_y0 = float(rng.uniform(y_lo, max(y_hi, y_lo)))
+    room_x0 = float(rng.uniform(x_lo, max(x_hi, x_lo)))
+
+    room = _room_walls(
+        room_x0, room_y0, UNKNOWN_AREA_SIZE_M, thickness, rng,
+        UNKNOWN_AREA_DOORWAYS, UNKNOWN_AREA_DOORWAY_M,
+    )
+    walls.extend(room)
+    # Room walls are one structure; they meet at corners, so they are added together without
+    # mutual gap checks. Everything placed after this must clear them.
+    structure.extend(w.polygon() for w in room)
+
+    unknown_area = (room_x0, room_y0, room_x0 + UNKNOWN_AREA_SIZE_M, room_y0 + UNKNOWN_AREA_SIZE_M)
+
+    def _sample_wall(bounds, length_range) -> Wall | None:
+        bx0, by0, bx1, by1 = bounds
+        length = float(rng.uniform(*length_range))
+        angle = float(rng.choice([0.0, math.pi / 2.0])) if rng.random() < 0.75 else float(
+            rng.uniform(0, math.pi)
+        )
+        cx = float(rng.uniform(bx0, bx1))
+        cy = float(rng.uniform(by0, by1))
+        half = length / 2.0
+        return Wall(
+            cx - half * math.cos(angle), cy - half * math.sin(angle),
+            cx + half * math.cos(angle), cy + half * math.sin(angle),
+            thickness, INNER_WALL_HEIGHT_M, "inner_wall",
+        )
+
+    def _place_walls(n: int, bounds, forbid_room: bool) -> None:
+        placed = 0
+        for _ in range(cfg.max_placement_attempts):
+            if placed >= n:
+                return
+            wall = _sample_wall(bounds, cfg.inner_wall_length_range_m)
+            poly = wall.polygon()
+            bx0, by0, bx1, by1 = poly.bounds
+            if bx0 < 0 or by0 < 0 or bx1 > width or by1 > depth:
+                continue
+            if forbid_room and box(*unknown_area).intersects(poly.buffer(cfg.min_gap_wall_m)):
+                continue
+            if not _far_enough(poly, structure, cfg.min_gap_wall_m):
+                continue
+            walls.append(wall)
+            structure.append(poly)
+            placed += 1
+        if placed < n:
+            raise ArenaError(
+                f"could only place {placed} of {n} walls in {bounds} after "
+                f"{cfg.max_placement_attempts} attempts with a {cfg.min_gap_wall_m} m "
+                f"minimum gap. Reduce n_inner_walls or shorten inner_wall_length_range_m."
+            )
+
+    known_bounds = (1.0, START_AREA_DEPTH_M + 1.0, width - 1.0, depth - 1.0)
+    _place_walls(cfg.n_inner_walls, known_bounds, forbid_room=True)
+    inset = thickness + 0.5
+    _place_walls(
+        cfg.n_unknown_walls,
+        (unknown_area[0] + inset, unknown_area[1] + inset, unknown_area[2] - inset, unknown_area[3] - inset),
+        forbid_room=False,
+    )
+
+    pillars: list[Pillar] = []
+
+    def _place_pillars(n: int, bounds) -> None:
+        bx0, by0, bx1, by1 = bounds
+        placed = 0
+        for _ in range(cfg.max_placement_attempts):
+            if placed >= n:
+                return
+            pillar = Pillar(float(rng.uniform(bx0, bx1)), float(rng.uniform(by0, by1)))
+            poly = pillar.polygon()
+            if not _far_enough(poly, structure, cfg.min_gap_pillar_m):
+                continue
+            pillars.append(pillar)
+            structure.append(poly)
+            placed += 1
+        if placed < n:
+            raise ArenaError(
+                f"could only place {placed} of {n} pillars in {bounds} after "
+                f"{cfg.max_placement_attempts} attempts with a {cfg.min_gap_pillar_m} m gap"
+            )
+
+    _place_pillars(cfg.n_pillars_known, known_bounds)
+    _place_pillars(
+        cfg.n_pillars_unknown,
+        (unknown_area[0] + inset, unknown_area[1] + inset, unknown_area[2] - inset, unknown_area[3] - inset),
+    )
+
+    targets = _place_targets(rng, cfg, structure, unknown_area, width, depth)
+
+    spec = ArenaSpec(
+        seed=seed,
+        width_m=width,
+        depth_m=depth,
+        ceiling_m=CEILING_M,
+        start_area_depth_m=START_AREA_DEPTH_M,
+        unknown_area=unknown_area,
+        walls=tuple(walls),
+        pillars=tuple(pillars),
+        targets=tuple(targets),
+        config=cfg,
+    )
+    if validate:
+        validate_arena(spec)
+    return spec
+
+
+def _place_targets(rng, cfg, structure, unknown_area, width, depth) -> list[Target]:
+    """Place markers, honouring the rulebook's guarantees about where they can be.
+
+    Section 3.3.9 r.2 guarantees the Unknown Search Area contains bonus victim(s) and fire(s),
+    and 3.3.3 notes bonus victims "are likely to be placed in regions that are harder to
+    rescue" -- so one of each is forced into the room and the rest are sampled from the whole
+    Known Search Area. Nothing is placed in the Start Area.
+    """
+    ux0, uy0, ux1, uy1 = unknown_area
+    inset = 0.6
+    room_bounds = (ux0 + inset, uy0 + inset, ux1 - inset, uy1 - inset)
+    known_bounds = (0.6, START_AREA_DEPTH_M + 0.6, width - 0.6, depth - 0.6)
+    # A marker must leave room for a drone to land beside it, in line of sight.
+    clearance = DRONE_RADIUS_M + MARKER_FOOTPRINT_M / 2.0 + 0.15
+
+    targets: list[Target] = []
+    occupied: list[Polygon] = list(structure)
+
+    def _place(kind: str, index: int, bounds) -> None:
+        bx0, by0, bx1, by1 = bounds
+        for _ in range(cfg.max_placement_attempts):
+            x = float(rng.uniform(bx0, bx1))
+            y = float(rng.uniform(by0, by1))
+            target = Target(id=f"{kind}_{index}", kind=kind, x=x, y=y)
+            poly = target_polygon(target)
+            if not _far_enough(poly, occupied, clearance):
+                continue
+            targets.append(target)
+            occupied.append(poly)
+            return
+        raise ArenaError(
+            f"could not place {kind} #{index} after {cfg.max_placement_attempts} attempts; "
+            f"the arena is too cluttered for the requested target count"
+        )
+
+    # Forced into the Unknown Search Area by rule 3.3.9 r.2.
+    _place("bonus_victim", 0, room_bounds)
+    _place("fire", 0, room_bounds)
+    for i in range(1, cfg.n_bonus_victims):
+        _place("bonus_victim", i, known_bounds)
+    for i in range(1, cfg.n_fires):
+        _place("fire", i, known_bounds)
+    for i in range(cfg.n_victims):
+        _place("victim", i, known_bounds)
+    return targets
+
+
+def target_polygon(target: Target) -> Polygon:
+    return Polygon(
+        [
+            (target.x + target.radius_m * math.cos(t), target.y + target.radius_m * math.sin(t))
+            for t in np.linspace(0, 2 * math.pi, 16, endpoint=False)
+        ]
+    )
+
+
+# ------------------------------------------------------------------------------------------
+# Validation
+# ------------------------------------------------------------------------------------------
+
+
+def validate_arena(spec: ArenaSpec, drone_radius_m: float = DRONE_RADIUS_M) -> None:
+    """Assert every published constraint. Raises :class:`ArenaError` on the first violation.
+
+    Checks, in order of how badly a violation would corrupt results:
+
+    1. Every target is outside every obstacle.
+    2. Free space is connected from the Start Area to a landing spot for every target -- an
+       unreachable target silently caps the achievable score and would look like a policy
+       failure.
+    3. Published minimum gaps hold between independently placed obstacles.
+    """
+    _validate_targets_clear(spec)
+    _validate_reachability(spec, drone_radius_m)
+    _validate_gaps(spec)
+
+
+def _validate_targets_clear(spec: ArenaSpec) -> None:
+    obstacles = spec.obstacle_polygons()
+    if not obstacles:
+        return
+    tree = STRtree(obstacles)
+    for target in spec.targets:
+        poly = target_polygon(target)
+        for j in tree.query(poly):
+            if obstacles[j].intersects(poly):
+                raise ArenaError(
+                    f"target {target.id} at ({target.x:.2f}, {target.y:.2f}) overlaps an obstacle"
+                )
+
+
+def _validate_reachability(spec: ArenaSpec, drone_radius_m: float) -> None:
+    """Flood fill the drone-inflated free space from the Start Area."""
+    res = _CONNECTIVITY_RES_M
+    blocked = spec.occupancy_grid(res, inflate_m=drone_radius_m)
+    nx, ny = blocked.shape
+
+    reachable = np.zeros_like(blocked)
+    queue: deque[tuple[int, int]] = deque()
+    start_rows = int(spec.start_area_depth_m / res)
+    for ix in range(nx):
+        for iy in range(min(start_rows, ny)):
+            if not blocked[ix, iy] and not reachable[ix, iy]:
+                reachable[ix, iy] = True
+                queue.append((ix, iy))
+    if not queue:
+        raise ArenaError("the Start Area is entirely blocked")
+
+    while queue:
+        ix, iy = queue.popleft()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            jx, jy = ix + dx, iy + dy
+            if 0 <= jx < nx and 0 <= jy < ny and not blocked[jx, jy] and not reachable[jx, jy]:
+                reachable[jx, jy] = True
+                queue.append((jx, jy))
+
+    for target in spec.targets:
+        cx, cy = int(target.x / res), int(target.y / res)
+        radius_cells = int(math.ceil(SCORE_RADIUS_M / res))
+        window = reachable[
+            max(0, cx - radius_cells) : min(nx, cx + radius_cells + 1),
+            max(0, cy - radius_cells) : min(ny, cy + radius_cells + 1),
+        ]
+        if not window.any():
+            raise ArenaError(
+                f"target {target.id} at ({target.x:.2f}, {target.y:.2f}) has no reachable "
+                f"landing spot within {SCORE_RADIUS_M} m -- it is walled off from the Start Area"
+            )
+
+
+def _validate_gaps(spec: ArenaSpec) -> None:
+    min_gap_wall = spec.config.min_gap_wall_m
+    min_gap_pillar = spec.config.min_gap_pillar_m
+    """Minimum gaps, checked only between obstacles that were placed independently.
+
+    Walls belonging to one structure -- the field boundary, or the Unknown Search Area room --
+    meet at corners by design, so their mutual distance is zero and the rule does not apply to
+    them. The rule is about navigable gaps between separate obstacles.
+    """
+    groups: dict[str, list[Polygon]] = {}
+    for wall in spec.walls:
+        groups.setdefault(wall.kind, []).append(wall.polygon())
+
+    independent = [(p, "inner_wall") for p in groups.get("inner_wall", [])]
+    structural = [
+        (p, kind)
+        for kind in ("perimeter_wall", "unknown_wall", "net")
+        for p in groups.get(kind, [])
+    ]
+    for i, (poly, _) in enumerate(independent):
+        for other, kind in independent[i + 1 :] + structural:
+            gap = poly.distance(other)
+            if gap < min_gap_wall - 1e-6:
+                raise ArenaError(
+                    f"inner wall to {kind} gap {gap:.3f} m is below the published minimum of "
+                    f"{min_gap_wall} m"
+                )
+
+    # The Unknown Search Area room against the perimeter. These are two independently placed
+    # structures, so the gap rule applies between them -- and it was previously unchecked,
+    # which is how a systematic 1.95 m north gap survived in every seed. The room's south face
+    # is exempt: it looks at the Start Area boundary, which is a virtual line, not a wall.
+    room = groups.get("unknown_wall", [])
+    perimeter = groups.get("perimeter_wall", [])
+    for room_poly in room:
+        for wall_poly in perimeter:
+            gap = room_poly.distance(wall_poly)
+            if gap < min_gap_wall - 1e-6:
+                raise ArenaError(
+                    f"Unknown Search Area to perimeter gap {gap:.3f} m is below the published "
+                    f"minimum of {min_gap_wall} m"
+                )
+
+    pillar_polys = [p.polygon() for p in spec.pillars]
+    all_walls = [p for polys in groups.values() for p in polys]
+    for i, poly in enumerate(pillar_polys):
+        for other in pillar_polys[i + 1 :] + all_walls:
+            gap = poly.distance(other)
+            if gap < min_gap_pillar - 1e-6:
+                raise ArenaError(
+                    f"pillar gap {gap:.3f} m is below the published minimum of "
+                    f"{min_gap_pillar} m"
+                )

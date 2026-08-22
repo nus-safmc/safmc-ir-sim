@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safmc-sim"
+version = "0.1.0"
+description = "Lightweight 2.5D multi-drone sensing/search simulator for the SAFMC Category Swarm challenge, built on ir-sim."
+requires-python = ">=3.10"
+dependencies = [
+    # PINNED. ir-sim 2.9.0 and 2.10.2 differ materially (register_kinematics,
+    # fog map, planners). See docs/03-irsim.md "Version pin".
+    "ir-sim==2.10.2",
+    "numpy>=2.0",
+    "shapely>=2.1.2",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+safmc-run = "safmc_sim.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:safmc_sim.*"]
