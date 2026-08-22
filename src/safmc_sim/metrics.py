@@ -74,7 +74,6 @@ class RunMetrics:
     crashed_agents: int
     crash_events: int
     landed_agents: int
-    idle_agents: int
     rule_violations: int
 
     coverage_curve: tuple[tuple[float, float], ...] = field(repr=False, default=())
@@ -124,8 +123,11 @@ def compute_metrics(
     n_free = int(free.sum())
     nx, ny = free.shape
 
-    airborne_codes = {i for name, i in _codes().items() if name in Lifecycle.AIRBORNE}
-    airborne = np.isin(lifecycle, list(airborne_codes))
+    # "Live" means not yet terminal. There are no flight phases to distinguish any more:
+    # a drone sitting on the ground with its motors off looks the same as one in the air,
+    # because whether it is flying is a consequence of what its policy commanded.
+    active_code = _codes()[Lifecycle.ACTIVE]
+    airborne = lifecycle == active_code
     live_agent_seconds = float(airborne.sum() * dt)
 
     path_visited = np.zeros_like(free)
@@ -180,7 +182,6 @@ def compute_metrics(
         crashed_agents=sum(1 for s in lifecycles.values() if s == Lifecycle.CRASHED),
         crash_events=len(crash_events),
         landed_agents=sum(1 for s in lifecycles.values() if s == Lifecycle.LANDED),
-        idle_agents=sum(1 for s in lifecycles.values() if s == Lifecycle.IDLE),
         rule_violations=len(violations),
         coverage_curve=tuple(curve),
     )

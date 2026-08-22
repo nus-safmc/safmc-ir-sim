@@ -1,7 +1,7 @@
 """Command line entry point: run, sweep, replay.
 
-    safmc-run run     --policy frontier --drones 12 --seed 3
-    safmc-run sweep   --policy frontier sdlw --seeds 0-9 --drones 12
+    safmc-run run     --policy sdlw --drones 12 --seed 3
+    safmc-run sweep   --policy sdlw my_policy --seeds 0-9 --drones 12
     safmc-run replay  runs/my_run
     safmc-run policies
 
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--out", type=Path, default=Path("runs"))
 
     p_run = sub.add_parser("run", help="one run")
-    p_run.add_argument("--policy", default="frontier")
+    p_run.add_argument("--policy", default="sdlw")
     p_run.add_argument("--seed", type=int, default=0)
     common(p_run)
 

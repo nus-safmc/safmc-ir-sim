@@ -37,9 +37,7 @@ Two things follow:
 
 1. **Search in the Known Search Area is closer to one-dimensional than two.** A ring corridor
    rewards a very different policy from an open field -- coverage is nearly a traversal
-   problem, and the interesting decisions are which doorway to enter and when to commit. The
-   reference policies bear this out: ``wall_follow`` outscores both the map-based and the
-   published mapless policy by a wide margin.
+   problem, and the interesting decisions are which doorway to enter and when to commit.
 2. **Either A-6 is wrong or the 2 m gap is not an all-pairs constraint.** Both readings are
    defensible and they produce materially different arenas. ``ArenaConfig.min_gap_wall_m``
    and the target counts exist so the team can test the alternative once someone sees the real

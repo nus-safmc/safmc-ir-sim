@@ -2,7 +2,11 @@
 
 ## The layering rule
 
-> **ir-sim owns the world. We own the drone, the sensing, the policy and the mission.**
+> **ir-sim owns the world. We own the drone, the sensing and the mission. You own the policy.**
+
+The corollary is a hard rule: the simulator contains **no guidance, control or strategy**. One
+motion command (a velocity), one commitment (land), and nothing in between. Anything that
+decides *where to go* belongs to whoever is being measured.
 
 ir-sim is good at geometry, collision, fixed-step integration, scene description and drawing.
 It is not good at sparse ranging, and it has no opinion at all about altitude, mapping, comms,

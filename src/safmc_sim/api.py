@@ -1,42 +1,50 @@
 """The surface a policy author writes against. This is the stable part of the project.
 
-Everything else here can be rewritten; this file is a promise. A policy written today should
-keep working when pose noise, a lossy radio, or a ROS 2 backend appear behind the seams.
+The design rule is **primitives, not behaviour**. This package wraps ir-sim; it does not fly
+the drone for you. There is exactly one motion command -- a velocity -- and one mission
+command -- land. Guidance, obstacle avoidance, mapping, search strategy and coordination are
+all yours to write, because those are the things the simulator exists to let you compare.
+
+An earlier version shipped a ``SearchPolicy`` base class that took off, chose targets, claimed
+them over the blackboard and landed on them, leaving subclasses to supply only a wandering
+step. That was a strategy wearing scaffolding's clothes: anyone subclassing it inherited a set
+of mission decisions without noticing they had. It is gone. If you want that behaviour, write
+it, and then it is yours and it is visible.
 
 Writing a policy
 ----------------
 
-    from safmc_sim.api import Observation, Policy, VelocityBody, Land, register_policy
+    from safmc_sim.api import Observation, Policy, Velocity, Land, register_policy
 
-    @register_policy("wall_hugger")
-    class WallHugger(Policy):
+    @register_policy("hug_the_wall")
+    class HugTheWall(Policy):
         def reset(self):
-            self.turning = False
+            self.airborne = False
 
         def step(self, obs: Observation) -> Command:
-            if obs.tof.min_range_m < 0.5:
-                return VelocityBody(vx=0.0, yaw_rate=0.8)
-            if any(m.kind == "victim" and m.range_m < 0.8 for m in obs.markers):
-                return Land()
-            self.publish("heading", obs.pose.theta)      # visible to peers NEXT tick
-            return VelocityBody(vx=0.45)
+            if obs.pose.z < 0.5:                       # climb -- you decide how
+                return Velocity(vz=0.4)
+            left = obs.tof.ranges_m[2].min()           # ranger 2 points +90 deg
+            if left > 1.0:
+                return Velocity(vx=0.3, yaw_rate=0.5)
+            return Velocity(vx=0.4)
 
 Three rules the design enforces rather than requests
 ----------------------------------------------------
 
 **A policy can only see what a drone could see.** ``Observation`` is frozen and holds plain
 data. There is no route from it to the environment, the arena, the mission, or another agent's
-object, so "accidentally reading ground truth" is not a mistake that can be made (R-POL-3,
-R-POL-4). What it does hold is genuinely public: the drone's own state, its sensors, the
-published field dimensions, and whatever peers chose to broadcast.
+object, so "accidentally reading ground truth" is not a mistake that can be made.
 
 **Randomness is injected, never ambient.** Each policy is handed its own
-``numpy.random.Generator``. Touching ``numpy.random`` directly breaks seeded replay and is
-forbidden by R-DET-2.
+``numpy.random.Generator``. Touching ``numpy.random`` directly breaks seeded replay.
 
 **A policy that raises, aborts the run.** There is no catch-and-hover. A silently degraded
-agent produces a plausible-looking result that is wrong, which is worse than a stack trace
-(R-POL-9).
+agent produces a plausible-looking result that is wrong, which is worse than a stack trace.
+
+Optional building blocks live in :mod:`safmc_sim.toolbox` -- a body-to-world rotation, a
+sensor reduction, a log-odds occupancy grid. Nothing here imports them. They are examples to
+copy or replace, not part of the contract.
 """
 
 from __future__ import annotations
@@ -60,11 +68,7 @@ __all__ = [
     "Lifecycle",
     "Observation",
     "Command",
-    "Takeoff",
-    "VelocityBody",
-    "VelocityWorld",
-    "PositionWorld",
-    "Hold",
+    "Velocity",
     "Land",
     "Policy",
     "register_policy",
@@ -93,23 +97,25 @@ class Pose:
 
 
 class Lifecycle:
-    """Where a drone is in its one-way trip from the Start Area to the ground.
+    """Three states, and only the two terminal ones are the simulator's business.
 
-    ``LANDED`` is terminal and deliberate: the rules require a rescuing drone to stay "until
-    the end of the mission", so landing spends the drone. ``CRASHED`` is terminal too. Both
-    make the fleet a depleting resource, which is the actual strategic problem.
+    There is deliberately no ARMED, TAKEOFF or LANDING phase. Climbing and descending are
+    things a policy does with a velocity command, not modes the simulator puts a drone into --
+    modelling them as states meant the runner was choreographing manoeuvres, which is exactly
+    the kind of behaviour that belongs to whoever is writing the strategy.
+
+    ``LANDED`` and ``CRASHED`` are terminal, and both are permanent. Landing is a commitment:
+    the competition requires a rescuing drone to stay put until the end of the mission, which
+    makes the fleet a depleting resource and turns "how many drones do I spend, and when" into
+    the real strategic question.
     """
 
-    IDLE = "IDLE"
-    TAKEOFF = "TAKEOFF"
-    FLYING = "FLYING"
-    LANDING = "LANDING"
+    ACTIVE = "ACTIVE"
     LANDED = "LANDED"
     CRASHED = "CRASHED"
 
-    ALL = (IDLE, TAKEOFF, FLYING, LANDING, LANDED, CRASHED)
+    ALL = (ACTIVE, LANDED, CRASHED)
     TERMINAL = (LANDED, CRASHED)
-    AIRBORNE = (TAKEOFF, FLYING, LANDING)
 
 
 @dataclass(frozen=True)
@@ -166,22 +172,24 @@ class Observation:
 
 
 # ------------------------------------------------------------------------------------------
-# Commands -- exactly the real firmware's action set, and no more (R-POL-5)
+# Commands -- one motion primitive, one mission commitment
 # ------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class Takeoff:
-    """Arm, take off, and climb. Subject to the two-wave rule (R-MISS-6)."""
+class Velocity:
+    """The only motion command. ARENA-frame linear velocity plus a yaw rate.
 
-    altitude_m: float = CRUISE_ALT_M
+    World frame rather than body frame for two reasons: it is what the real drone's
+    ``mavlink_set_velocity_ned`` actually takes, and it is what our kinematics integrates, so
+    nothing is being converted behind your back. If you would rather think in body frame --
+    and reasoning from ToF ranges usually means you would -- rotate with
+    :func:`safmc_sim.toolbox.body_to_world`, which is four lines you can read.
 
-
-@dataclass(frozen=True)
-class VelocityBody:
-    """Body-frame velocity plus yaw rate. Nearest analogue to a reactive controller.
-
-    Maps to ``mavlink_set_velocity_ned`` after rotating into NED.
+    Values are clipped by the drone's own limits (speed, climb rate, yaw rate) and tracked
+    through a first-order lag. Nothing else happens to them: there is no controller here, no
+    setpoint tracking, no altitude hold. If you stop commanding ``vz``, the drone stops
+    climbing; it does not hold altitude for you.
     """
 
     vx: float = 0.0
@@ -191,45 +199,21 @@ class VelocityBody:
 
 
 @dataclass(frozen=True)
-class VelocityWorld:
-    """ARENA-frame horizontal velocity, held altitude, absolute yaw.
+class Land:
+    """Commit to the ground here, permanently.
 
-    Maps to ``mavlink_set_velocity_xy_position_z`` -- the workhorse the real nav loop uses for
-    cruise (nav_task.c:383).
+    Not a manoeuvre -- a decision. The drone stops where it is and is spent for the rest of the
+    run. This exists as a command rather than as "descend until z is zero" because under the
+    rules landing is a *scoring event* with consequences (the drone must stay until the end),
+    and because the runner needs an unambiguous moment at which to freeze the drone and latch
+    the score. Flying the descent yourself is fine too -- see
+    :func:`safmc_sim.toolbox.descend` -- but the commitment is this command.
     """
 
-    vx: float = 0.0
-    vy: float = 0.0
-    z: float = CRUISE_ALT_M
-    yaw: float | None = None
-    """``None`` holds the current heading. The firmware warns that commanding yaw 0.0 means
-    'face North', which is rarely what a caller means."""
 
+Command = Union[Velocity, Land]
 
-@dataclass(frozen=True)
-class PositionWorld:
-    """ARENA-frame position setpoint. Maps to ``mavlink_set_position_ned``."""
-
-    x: float
-    y: float
-    z: float = CRUISE_ALT_M
-    yaw: float | None = None
-    speed_ms: float = CRUISE_SPEED_MS
-
-
-@dataclass(frozen=True)
-class Hold:
-    """Stop and hold position. Maps to ``mavlink_set_hold``."""
-
-
-@dataclass(frozen=True)
-class Land:
-    """Descend and land here, permanently. This is how a drone scores -- and is spent."""
-
-
-Command = Union[Takeoff, VelocityBody, VelocityWorld, PositionWorld, Hold, Land]
-
-COMMAND_TYPES = (Takeoff, VelocityBody, VelocityWorld, PositionWorld, Hold, Land)
+COMMAND_TYPES = (Velocity, Land)
 
 
 # ------------------------------------------------------------------------------------------

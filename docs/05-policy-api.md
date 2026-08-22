@@ -7,7 +7,7 @@
 One class, one method. You get an `Observation` each tick, you return a `Command`.
 
 ```python
-from safmc_sim.api import Observation, Command, Policy, VelocityBody, Land, register_policy
+from safmc_sim.api import Observation, Command, Policy, Velocity, Land, register_policy
 
 @register_policy("my_strategy")
 class MyStrategy(Policy):
@@ -15,11 +15,11 @@ class MyStrategy(Policy):
         self.turning = False                    # per-episode state lives on self
 
     def step(self, obs: Observation) -> Command:
-        if obs.lifecycle == "IDLE":
-            return Takeoff()
+        if obs.pose.z < 0.5:                    # you decide when and how to climb
+            return Velocity(vz=0.4)
         if obs.tof.min_range_m < 0.5:
-            return VelocityBody(vx=0.0, yaw_rate=0.8)
-        return VelocityBody(vx=0.45)
+            return Velocity(yaw_rate=0.8)
+        return Velocity(vx=0.45)                # ARENA frame: +x is East
 ```
 
 Run it:
@@ -28,105 +28,105 @@ Run it:
 safmc-run run --policy my_strategy --drones 12 --seed 0 --duration 600
 ```
 
-Better: subclass `SearchPolicy`, which already handles take-off, spotting a marker, closing on
-it and landing, so you only write the search:
+## Two commands. That is the whole action space.
 
-```python
-from safmc_sim.policies.base import SearchPolicy
+| Command | Meaning |
+|---|---|
+| `Velocity(vx, vy, vz, yaw_rate)` | ARENA-frame linear velocity and yaw rate. Clipped by the drone's limits and tracked through a first-order lag. Nothing else happens to it |
+| `Land()` | Commit to the ground here, **permanently**. The drone is spent for the rest of the run |
 
-@register_policy("my_strategy")
-class MyStrategy(SearchPolicy):
-    def choose_motion(self, obs: Observation) -> Command:
-        return VelocityBody(vx=self.cruise_speed_ms)
-```
+That is deliberately austere. There is no `PositionWorld`, no `Hold`, no `Takeoff`.
+
+**Why:** an earlier version had six commands mirroring the firmware's MAVLink helpers. But
+those helpers are *guidance*, and copying them meant the simulator contained a path follower,
+a yaw controller and an altitude hold. Every policy inherited them without asking, and two
+policies being "compared" were mostly comparing the same borrowed controller. The firmware is
+the reference for what the drone **is** — sensors, geometry, limits, frames — not for how it
+flies.
+
+Practical consequences you will notice immediately:
+
+- **Nothing holds your altitude.** Stop commanding `vz` and you stop climbing; you do not
+  hover. If you want altitude hold, write it — it is three lines and now it is yours.
+- **There is no take-off.** A drone starts on the ground and flies when you command it up.
+- **Yaw is a rate, not a setpoint.** Turning to a heading is a control problem you own.
 
 ## What you get: `Observation`
 
 | Field | What it is |
 |---|---|
-| `pose` | `.x .y .z .theta` in ARENA metres/radians. **Ground truth in v0.1** — see the caveat below |
+| `pose` | `.x .y .z .theta` in ARENA metres/radians. **Ground truth in v0.1** |
 | `velocity_xy` | `(vx, vy)` in the ARENA frame |
-| `lifecycle` | `IDLE`, `TAKEOFF`, `FLYING`, `LANDING`, `LANDED`, `CRASHED` |
+| `lifecycle` | `ACTIVE`, `LANDED` or `CRASHED`. Both terminal states are permanent |
 | `tof` | The ring. `.ranges_m` is `(8, 8)`, `.collapsed_m` is the 64-bin scan, `.min_range_m` is the nearest return anywhere |
-| `markers` | Tuple of `(marker_id, kind, range_m, bearing_rad)` for what is visible right now |
+| `markers` | Tuple of `(marker_id, kind, range_m, bearing_rad)` currently visible |
 | `peers` | The blackboard, as of the **start** of this tick, keyed by agent id |
 | `arena` | Published field dimensions only — width, depth, ceiling, start-area depth, run duration |
 | `tick`, `sim_time_s` | Where you are |
-| `tof_stale_ticks`, `marker_stale_ticks` | Non-zero only if you decimated that sensor |
 
 Convenience: `obs.in_start_area`, `obs.time_remaining_s`, `obs.pose.xy`.
 
 **You cannot see the map, the obstacles, or where the targets are.** That is enforced
-structurally, not by convention: `Observation` is frozen and holds only plain data, with no
-reference to the environment, the arena, the mission, or another agent. If you find a way to
-reach ground truth from an `Observation`, that is a bug — please report it.
-
-## What you return: `Command`
-
-Exactly six, mirroring the real firmware's MAVLink API and nothing more.
-
-| Command | Meaning | Real equivalent |
-|---|---|---|
-| `Takeoff(altitude_m=0.5)` | Arm and climb. Subject to the two-wave rule | arm + offboard + climb |
-| `VelocityBody(vx, vy, vz, yaw_rate)` | Body-frame velocity | `mavlink_set_velocity_ned` |
-| `VelocityWorld(vx, vy, z, yaw)` | ARENA-frame velocity, held altitude, absolute yaw | `mavlink_set_velocity_xy_position_z` |
-| `PositionWorld(x, y, z, yaw, speed_ms)` | Fly to a point | `mavlink_set_position_ned` |
-| `Hold()` | Stop and hold | `mavlink_set_hold` |
-| `Land()` | Descend and land, **permanently** | `MAV_CMD_NAV_LAND` |
-
-`VelocityWorld.yaw=None` and `PositionWorld.yaw=None` hold the current heading. That is
-deliberate: the real firmware warns that commanding yaw `0.0` means "face North", which is
-almost never what a caller intended.
+structurally: `Observation` is frozen and holds only plain data, with no reference to the
+environment, the arena, the mission, or another agent. There is a test that walks everything
+reachable from an `Observation` and asserts none of those appear.
 
 ## Three rules that will bite you if you ignore them
 
-**Landing is irreversible and spends the drone.** The rules require a rescuing drone to stay
-"until the end of the mission". A `LANDED` drone never moves again. With up to 12 targets, a
-relay chain worth a 2x multiplier, and 10-25 drones, deciding *how many* drones to spend and
-*when* is the actual strategic problem. This is not a coverage benchmark.
+**Landing is irreversible and spends the drone.** A `LANDED` drone never moves again. With up
+to 12 targets, a relay chain worth a 2× multiplier, and 10–25 drones, deciding *how many*
+drones to spend and *when* is the actual strategic problem.
 
 **Randomness comes from `self.rng`.** Every policy gets its own `numpy.random.Generator`.
-Calling `numpy.random.uniform(...)` directly breaks seeded replay, and a run you cannot replay
-is a run you cannot debug.
+Calling `numpy.random.uniform(...)` directly breaks seeded replay.
 
 **Peer data is one tick old.** `self.publish(key, value)` becomes visible — to everyone,
 including you — on the *next* tick. That is not a latency model; it is what makes the result
-independent of the order agents happen to be indexed. Without it, agent 0's publication would
-reach agent 1 but not the reverse.
+independent of the order agents happen to be indexed.
 
 ## Coordinating a fleet
 
 `self.publish(key, value)` and `obs.peers` are the whole communication API.
 
 ```python
-def choose_motion(self, obs):
-    mine = self._pick_frontier(obs)
+def step(self, obs):
+    mine = self._pick_goal(obs)
     taken = {v.get("goal") for a, v in obs.peers.items() if a != self.agent_id}
     ...
-    self.publish("goal", mine.tolist())
+    self.publish("goal", mine)
 ```
 
-`SearchPolicy` already publishes `claimed_target` so two drones do not both land on the same
-victim — which would permanently waste one of them, since each target scores once.
+In v0.1 the blackboard is **perfect**: lossless, rangeless, instantaneous. Design as if
+bandwidth is scarce anyway — the day someone implements a lossy `Blackboard`, a policy that
+broadcasts its entire occupancy grid every tick will stop working and yours should not.
 
-In v0.1 the blackboard is **perfect**: lossless, rangeless, instantaneous. That is a
-simplification, recorded in [ADR-0003](adr/0003-ground-truth-pose-and-perfect-comms.md).
-Design as if bandwidth is scarce anyway; the day someone implements a lossy `Blackboard`, a
-policy that broadcasts its entire occupancy grid every tick will stop working and yours should
-not.
+## The toolbox — optional, and not part of the framework
+
+`safmc_sim.toolbox` holds building blocks. **Nothing in the framework imports it.** They are
+examples to copy, adapt, or ignore.
+
+| Helper | What it does |
+|---|---|
+| `body_to_world(vx, vy, theta)` | Rotate a body-frame velocity into the ARENA frame. Four lines, in the open |
+| `ring_quadrants(obs)` | Reduce the 8-ranger ring to front/left/right/back minima. Lossless in those directions |
+| `climb(obs, target_m)` | A `Velocity` that climbs, or `None` once there. A sign test, not a controller |
+| `descend(obs)` | A `Velocity` that descends. Pair with `Land()` at the bottom |
+| `OccupancyMap` | A textbook log-odds grid with frontier extraction |
+
+They live outside the platform on purpose: each encodes a choice the simulator exists to let
+you *compare*. If `OccupancyMap` were the mapper, nobody would ever measure a better one.
 
 ## The pose caveat, stated plainly
 
-`obs.pose` is **exact**. There is no drift, no noise, no estimator.
+`obs.pose` is **exact**. No drift, no noise, no estimator.
 
-That is a deliberate v0.1 scope decision, and it means an honest claim from a result here is
-*"strategy A beats strategy B, given perfect state"*. It is not a claim about the real flight.
-It matters most in the Unknown Search Area, where the rules forbid placing any navigation aid
-and forbid teams from ever entering — localisation there is dead reckoning plus onboard
-sensing, and the real firmware has no filter at all.
+That is a v0.1 scope decision, and it means an honest claim from a result here is *"strategy A
+beats strategy B, given perfect state"*. It matters most in the Unknown Search Area, where the
+rules forbid any navigation aid and forbid teams from ever entering — localisation there is
+dead reckoning plus onboard sensing.
 
-`PoseSource` is the seam. `NoisyPose` already exists as a worked example. When you want to
-know whether your strategy survives drift, swapping it in requires **no change to your policy**.
+`PoseSource` is the seam. `NoisyPose` already exists as a worked example. Swapping it in
+requires **no change to your policy**.
 
 ## Testing your policy
 
@@ -134,24 +134,20 @@ know whether your strategy survives drift, swapping it in requires **no change t
 def test_backs_off_from_a_wall():
     policy = MyStrategy("drone_00", {}, np.random.default_rng(0), arena_info)
     policy.reset()
-    obs = make_observation(front_range=0.3)          # see tests/test_tof_ring.py for helpers
-    assert isinstance(policy.step(obs), VelocityBody)
+    obs = make_observation(front_range=0.3)
+    assert policy.step(obs).vx < 0.1
 ```
 
 Policies are plain objects with injected dependencies, so they unit-test without a simulator.
-Use that: a full run is 12 000 ticks, and a bug in a corner case is far cheaper to find here.
+Use that: a full run is 12 000 ticks.
 
-## Reading the reference policies
+## The one reference policy
 
-In increasing order of complexity:
+`policies/sdlw.py` is a port of [arXiv:2607.25195](https://arxiv.org/abs/2607.25195) — an NUS
+paper accepted to IROS 2026. It is the only policy that ships, deliberately: a strategy written
+by whoever wrote the simulator is not a baseline, it is the simulator's own assumptions wearing
+a policy's clothes. SDLW is externally authored, externally published, and citable.
 
-1. `policies/simple.py` — `hold`, `random_walk`, `wall_follow`. Twenty lines each.
-2. `policies/sdlw.py` — a faithful port of arXiv:2607.25195. Mapless, stochastic, and the
-   published baseline to beat.
-3. `policies/frontier.py` — log-odds occupancy mapping, frontier selection, VFH avoidance.
-   The map-based counterpart.
-
-`policies/base.py` has two helpers worth knowing: `ring_quadrants(obs)` reduces the 8-ranger
-ring to the front/left/right/back minima that Crazyflie-style controllers expect, and
-`vfh_steer(obs, desired_bearing, clearance)` returns the nearest free bearing to a goal,
-shaped like the histogram the real firmware flies.
+Note it never lands — the paper's task is pure coverage — so it scores **zero** on the
+competition mission by design. It is a *search* baseline and a regression test that our sensor
+and kinematics semantics reproduce a published result.

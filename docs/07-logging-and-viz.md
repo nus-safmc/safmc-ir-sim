@@ -10,7 +10,7 @@ cannot re-score offline is a comparison you cannot check.
 One directory per run:
 
 ```
-runs/frontier_s3/
+runs/sdlw_s3/
 ├── run.jsonl      header (config + full arena + versions) · events · footer (score)
 ├── states.npz     per-tick pose, velocity, lifecycle, command
 ├── tof.npz        per-tick 64-bin collapsed scans
@@ -23,11 +23,11 @@ and does not depend on the generator producing the same arena again.
 
 ```python
 from safmc_sim.recorder import load_run, score_from_log
-run = load_run("runs/frontier_s3")
+run = load_run("runs/sdlw_s3")
 run["states"]["pose"]        # (T, N, 4) -> x, y, z, theta
 run["states"]["lifecycle"]   # (T, N) int codes
 run["tof"]["collapsed_m"]    # (T, N, 64)
-score_from_log("runs/frontier_s3")   # recomputed from the log alone
+score_from_log("runs/sdlw_s3")   # recomputed from the log alone
 ```
 
 Two properties the format is built for:
@@ -47,8 +47,8 @@ disabled (`record=False`) and is tested not to change simulation results.
 ## The replay viewer
 
 ```bash
-safmc-run replay runs/frontier_s3
-# or: python tools/viz.py runs/frontier_s3 --tof-every 10
+safmc-run replay runs/sdlw_s3
+# or: python tools/viz.py runs/sdlw_s3 --tof-every 10
 ```
 
 A single self-contained HTML file — no server, no dependencies, works from disk. It reads
@@ -68,7 +68,7 @@ the page so nothing silently misrepresents the sample rate.
 
 ```python
 from safmc_sim.metrics import compute_metrics, summarise
-m = compute_metrics("runs/frontier_s3")
+m = compute_metrics("runs/sdlw_s3")
 print(summarise([m1, m2, m3]))
 ```
 
@@ -85,31 +85,21 @@ Coverage is reported **two ways** because they measure different things:
 
 Under `collision_behaviour="stop"` a crashed drone contributes nothing for the rest of the
 episode, so raw coverage rewards *not crashing* as much as *searching well*. The obvious fix is
-to divide by live-agent-seconds. Measured on seed 3, 12 drones, 180 s:
+to divide by live-agent-seconds.
 
-| policy | mode | sensed | live agent-s | per live-minute | crashed | score |
-|---|---|---|---|---|---|---|
-| `frontier` | stop | 0.547 | 652 | **0.050** | 8 | 20 |
-| `frontier` | unobstructed | 0.875 | 1283 | **0.041** | 0 | 95 |
-| `sdlw` | stop | 0.528 | 1822 | 0.017 | 1 | 25 |
-| `sdlw` | unobstructed | 0.531 | 1870 | 0.017 | 0 | 25 |
-| `wall_follow` | stop | 0.525 | 824 | **0.038** | 7 | 20 |
-| `wall_follow` | unobstructed | 0.713 | 1456 | **0.029** | 0 | 60 |
-
-**The normalisation is not a clean fix.** For both crash-prone policies, dividing by
-live-agent-seconds makes the *crashing* run look better than the clean one — 0.050 against
-0.041 for `frontier` — because the denominator collapses while most of the coverage has already
-happened. It rewards dying early.
+**It is not a clean fix.** Measured on v0.1's reference policies, dividing by live-agent-seconds
+made the *crashing* run look better than the clean one — the denominator collapses while most
+of the coverage has already happened, so it rewards dying early.
 
 So: report raw coverage, per-live-minute **and** the crash count, and compare search strategies
 under `unobstructed` as the control. Use `stop` to ask a different question — whether the
-strategy is survivable. They are two experiments, not one, and on this evidence they give
-**opposite answers**: `frontier` sweeps 0.875 of the field and scores 95 when it cannot crash,
-and 0.547 for 20 when it can.
+strategy is survivable. They are two experiments, not one, and on v0.1's evidence they can give
+**opposite answers**.
 
-(`sdlw` is nearly identical in both modes because it rarely collides, which is a useful check
-that the two coincide when they should — and a reminder that its conservatism is a real
-property, not an artefact.)
+> The policies that produced that measurement have since been removed — they were written by
+> whoever wrote the simulator, which makes them assumptions rather than baselines. The
+> methodological point survives independently of them; the numbers are recorded in
+> [CHECKPOINTS.md](CHECKPOINTS.md) as history, not as a current claim.
 
 Also reported: `crashed_agents` **and** `crash_events` separately, because the target paper
 counts only distinct agents and therefore saturates at the fleet size — its k=12 figures are

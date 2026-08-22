@@ -34,6 +34,7 @@ import numpy as np
 
 from .constants import (
     FIRE_SUPPRESSION_RADIUS_M,
+    TAKEOFF_WAVE_WINDOW_S,
     POINTS_BONUS_VICTIM,
     POINTS_FIRE,
     POINTS_VICTIM,
@@ -45,7 +46,7 @@ from .errors import ConfigError
 from .sensors.raycast import segment_clear
 from .world.arena import ArenaSpec, Target
 
-__all__ = ["Event", "TargetState", "ScoreBreakdown", "Mission", "POINTS"]
+__all__ = ["Event", "TargetState", "ScoreBreakdown", "Mission", "POINTS", "takeoff_waves"]
 
 POINTS: Mapping[str, int] = {
     "victim": POINTS_VICTIM,
@@ -319,3 +320,30 @@ class Mission:
             }
             for target_id, state in self.targets.items()
         }
+
+
+def takeoff_waves(
+    departure_times_s, window_s: float = TAKEOFF_WAVE_WINDOW_S
+) -> list[list[float]]:
+    """Group departure times into take-off waves.
+
+    The rules define a "simultaneous take-off" as a group whose last drone leaves within 10 s
+    of its first, and allow at most two such groups (booklet 3.3.2). This is deliberately a
+    *pure function over recorded times* rather than something the runner enforces: the
+    simulator's job is to report what the fleet did, and whether that broke a rule is a
+    question about the run, answerable afterwards from the log. Enforcing it mid-flight made
+    the platform a referee and hid the violation from the policy that caused it.
+
+    Returns one list of times per wave. ``len(result) > MAX_TAKEOFF_WAVES`` is a rule
+    violation; the caller decides what that means for the score.
+    """
+    times = sorted(float(t) for t in departure_times_s)
+    if not times:
+        return []
+    waves: list[list[float]] = [[times[0]]]
+    for t in times[1:]:
+        if t - waves[-1][0] <= window_s:
+            waves[-1].append(t)
+        else:
+            waves.append([t])
+    return waves

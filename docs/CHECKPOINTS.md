@@ -261,3 +261,62 @@ clearance and re-run, not to pick a winner. Five seeds is also too few to publis
 that nothing prevents a policy calling `numpy.random` directly (`R-POL-7`), and that
 `R-DRONE-7`'s "cruise speed" is bound to a speed *cap*, which is a modelling decision rather
 than a test gap.
+
+---
+
+## C7 — strip the platform back to primitives
+
+**Why.** Review found policy baked into the framework. The old repos were reference for what
+the drone and the world *are* — ring geometry, zone layout, MAVLink action set, arena, frames —
+not for how the drone flies. I over-read them and ported the firmware's *navigation behaviour*
+into the platform, where every policy inherited it invisibly.
+
+**Five places it had leaked, all removed.**
+
+1. **`SearchPolicy`** — presented as scaffolding but actually a strategy: take off, land if a
+   marker is within 0.6 m, else claim it over the blackboard and approach, else defer to the
+   subclass. Every "policy" in the repo supplied only a wandering step; the mission decisions
+   were mine, in a base class.
+2. **`vfh_steer`** — a direct port of the firmware's `vfh.c`. Literally the old codebase's
+   obstacle-avoidance policy.
+3. **`PositionWorld`** — the runner computed bearings, set speed, pointed yaw along travel and
+   prevented overshoot. A path follower living in the simulator.
+4. **`VelocityWorld` / `Hold`** — proportional controllers on yaw and altitude, plus a
+   remembered target altitude.
+5. **`Takeoff` / `Land` as phases** — the runner flew the climb and descent itself.
+
+**What the action space is now.** `Velocity(vx, vy, vz, yaw_rate)` in the ARENA frame, and
+`Land()`. That is all. World frame because it is what `mavlink_set_velocity_ned` actually
+takes and what the kinematics already integrates, so nothing is converted behind the caller's
+back; body-frame thinking gets `toolbox.body_to_world`, four readable lines.
+
+**Lifecycle** went from six states to three: `ACTIVE`, `LANDED`, `CRASHED`. There are no flight
+phases because climbing is a velocity and when to stop climbing is a policy's decision.
+
+**The two-wave take-off rule** is no longer enforced. The runner emits `departed` events and
+`mission.takeoff_waves()` computes compliance from them. Enforcing it mid-flight made the
+platform a referee, hid the violation from the policy that caused it, and welded the runner to
+one year's rulebook.
+
+**`policies/` holds exactly one policy**: the arXiv:2607.25195 port, rewritten on primitives.
+A strategy written by whoever wrote the simulator is not a baseline — it is the simulator's own
+assumptions wearing a policy's clothes. SDLW is externally authored and citable. It never lands
+(the paper's task is pure coverage), so it scores zero on the mission by design; it is a
+*search* baseline and a regression test.
+
+**`toolbox.py`** holds the building blocks worth keeping — `body_to_world`, `ring_quadrants`,
+`climb`/`descend`, `OccupancyMap` — explicitly outside the framework. Two new requirements make
+the boundary auditable: **R-POL-10** (no guidance, control or strategy in the simulator) and
+**R-POL-11** (the framework may not import `policies` or `toolbox`), both with structural tests.
+
+**Verified — TESTED.** 595 tests. Two new guards: one walks every framework module's imports
+and fails if either opt-in package appears; one greps `runner.py` for the controller names that
+were removed.
+
+**Superseded.** The v0.1 comparative numbers (`frontier` 67.0 vs `sdlw` 19.0 in the control,
+reversed with crashes) were produced by policies that no longer exist. They stay recorded above
+as history and as the origin of the live-agent-seconds finding, which is about *metrics* and
+survives independently. They are **not** a current claim about anything.
+
+**Open.** Rebuild a comparison once the team has written its own policies — that is now the
+intended shape.

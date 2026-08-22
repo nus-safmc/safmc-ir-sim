@@ -9,15 +9,12 @@ from safmc_sim import api
 from safmc_sim.api import (
     ArenaInfo,
     COMMAND_TYPES,
-    Hold,
     Land,
+    Lifecycle,
     Observation,
     Policy,
-    PositionWorld,
     Pose,
-    Takeoff,
-    VelocityBody,
-    VelocityWorld,
+    Velocity,
     get_policy,
     register_policy,
 )
@@ -25,11 +22,27 @@ from safmc_sim.blackboard import PerfectBlackboard
 from safmc_sim.errors import ConfigError
 
 
-def test_command_set_is_exactly_the_firmware_action_set():
-    """R-POL-5. The real drone can do these six things (mavlink_task.h:73-89) and no others."""
-    assert {c.__name__ for c in COMMAND_TYPES} == {
-        "Takeoff", "VelocityBody", "VelocityWorld", "PositionWorld", "Hold", "Land",
-    }
+def test_command_set_is_one_motion_primitive_and_one_commitment():
+    """R-POL-5. Two commands, and no more.
+
+    The set was six, mirroring the firmware's MAVLink helpers. That was the wrong thing to
+    copy: those helpers are *guidance*, and reproducing them put a path follower and two
+    proportional controllers inside the simulator, where every policy inherited them
+    invisibly. A velocity is the primitive; everything above it is strategy.
+    """
+    assert {c.__name__ for c in COMMAND_TYPES} == {"Velocity", "Land"}
+
+
+def test_lifecycle_has_no_flight_phases():
+    """Climbing and descending are things a policy does, not modes the simulator imposes."""
+    assert set(Lifecycle.ALL) == {"ACTIVE", "LANDED", "CRASHED"}
+    assert set(Lifecycle.TERMINAL) == {"LANDED", "CRASHED"}
+
+
+def test_velocity_defaults_to_stationary():
+    """A bare Velocity() is a valid "do nothing" -- there is no separate Hold command."""
+    v = Velocity()
+    assert (v.vx, v.vy, v.vz, v.yaw_rate) == (0.0, 0.0, 0.0, 0.0)
 
 
 @pytest.mark.parametrize("cls", COMMAND_TYPES)
@@ -60,7 +73,7 @@ def test_observation_exposes_no_route_to_ground_truth():
     )
     obs = Observation(
         agent_id="drone_00", tick=0, sim_time_s=0.0,
-        pose=Pose(1.0, 2.0, 0.5, 0.0), velocity_xy=(0.0, 0.0), lifecycle="FLYING",
+        pose=Pose(1.0, 2.0, 0.5, 0.0), velocity_xy=(0.0, 0.0), lifecycle="ACTIVE",
         tof=scan, markers=(), peers={},
         arena=ArenaInfo(20.0, 20.0, 1.4, 6.0, 600.0),
     )
@@ -102,11 +115,11 @@ def test_registry_overwrites_with_a_warning_rather_than_raising():
 
     class A(Policy):
         def step(self, obs):
-            return Hold()
+            return Velocity()
 
     class B(Policy):
         def step(self, obs):
-            return Hold()
+            return Velocity()
 
     register_policy("_dupe_test")(A)
     with pytest.warns(UserWarning, match="re-registered"):
@@ -172,7 +185,7 @@ def test_reset_clears_everything():
 def test_policy_outbox_drains_once():
     class P(Policy):
         def step(self, obs):
-            return Hold()
+            return Velocity()
 
     policy = P("d0", {}, np.random.default_rng(0), ArenaInfo(20, 20, 1.4, 6, 600))
     policy.publish("k", 1)
@@ -183,7 +196,7 @@ def test_policy_outbox_drains_once():
 def test_policy_config_is_read_only():
     class P(Policy):
         def step(self, obs):
-            return Hold()
+            return Velocity()
 
     policy = P("d0", {"a": 1}, np.random.default_rng(0), ArenaInfo(20, 20, 1.4, 6, 600))
     with pytest.raises(TypeError):

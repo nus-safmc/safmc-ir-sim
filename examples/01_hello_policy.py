@@ -1,48 +1,50 @@
-"""The smallest useful policy, and how to look at what it did.
+"""The smallest useful policy, written entirely in primitives.
 
 Run:  .venv/bin/python examples/01_hello_policy.py
 """
 
 import numpy as np
 
-from safmc_sim.api import (
-    Command, Land, Observation, Policy, Takeoff, VelocityBody, register_policy,
-)
+from safmc_sim.api import Command, Land, Observation, Policy, Velocity, register_policy
 from safmc_sim.recorder import Recorder
 from safmc_sim.runner import RunConfig, run
+from safmc_sim.toolbox import body_to_world
+
+CRUISE_M = 0.5
 
 
 @register_policy("hello")
 class Hello(Policy):
-    """Fly forward, turn away from obstacles, land on the first marker it gets close to."""
+    """Climb, fly forward, turn away from what is ahead, land on the first marker it reaches."""
 
     def reset(self) -> None:
         self.turn_direction = 1.0 if self.rng.random() < 0.5 else -1.0
 
     def step(self, obs: Observation) -> Command:
-        if obs.lifecycle == "IDLE":
-            return Takeoff()
-        if obs.lifecycle != "FLYING":
-            return VelocityBody()
+        # Nothing holds altitude for you -- climbing is a velocity, and deciding when to stop
+        # is your call. `toolbox.climb` does exactly this if you would rather not write it.
+        if obs.pose.z < CRUISE_M - 0.02:
+            return Velocity(vz=0.4)
 
         # Landing is how you score -- and it spends the drone permanently.
         for marker in obs.markers:
             if marker.range_m < 0.6:
                 return Land()
-            # Steer at it: bearing is body-frame, CCW from the nose.
-            return VelocityBody(vx=0.3, yaw_rate=float(np.clip(2.0 * marker.bearing_rad, -1.5, 1.5)))
+            forward, lateral = 0.3, 0.0
+            return Velocity(
+                *body_to_world(forward, lateral, obs.pose.theta),
+                yaw_rate=float(np.clip(2.0 * marker.bearing_rad, -1.5, 1.5)),
+            )
 
-        # React only to what is AHEAD. Using obs.tof.min_range_m here instead would react to
-        # the whole 360-degree ring, including the wall behind you and the drone beside you --
-        # which makes a fleet turn on the spot forever without ever leaving the Start Area.
-        # ranges_m[0] is the forward ranger; inf means nothing in range.
+        # React only to what is AHEAD. Using obs.tof.min_range_m would react to the whole
+        # 360-degree ring -- including the wall behind you and the drone beside you -- which
+        # makes a fleet turn on the spot forever without leaving the Start Area.
         ahead = float(np.min(obs.tof.ranges_m[0]))
         if ahead < 0.8:
-            return VelocityBody(vx=0.05, yaw_rate=self.turn_direction * 1.2)
+            return Velocity(yaw_rate=self.turn_direction * 1.2)
 
-        # Tell the others roughly where we are. Visible to them next tick.
         self.publish("position", [round(obs.pose.x, 1), round(obs.pose.y, 1)])
-        return VelocityBody(vx=0.45)
+        return Velocity(*body_to_world(0.45, 0.0, obs.pose.theta))
 
 
 if __name__ == "__main__":

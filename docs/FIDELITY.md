@@ -87,3 +87,5 @@ Found during recon; recorded so nobody reintroduces them.
 | F-13 | Landing always succeeds, and takes a fixed descent at the climb-rate limit | Overstates landing reliability, which feeds straight into score |
 | F-14 | Yaw and altitude are tracked with proportional controllers in the runner, not by PX4's real control loops | No overshoot, no tracking error under aggressive commands |
 | F-15 | `collision_behaviour="stop"` freezes a drone permanently on any contact | Faithful to "no mid-run repair", but harsh: a graze is fatal. Use `unobstructed` as the control when comparing search strategies |
+| F-16 | `Land()` settles the drone to the floor in the tick it is issued | The descent is not modelled. A policy that wants a realistic approach can fly it with `Velocity(vz=...)` and issue `Land` at the bottom, but the commitment itself is instantaneous |
+| F-17 | No flight-phase model at all: no arming, no take-off sequence, no altitude hold | Deliberate. Those are guidance, and guidance belongs to the policy. It means a policy must climb before it can fly, and must hold its own altitude |

@@ -54,9 +54,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..api import Command, Observation, VelocityBody, register_policy
+from ..api import Command, Observation, Policy, Velocity, register_policy
 from ..frames import wrap_pi
-from .base import SearchPolicy, ring_quadrants
+from ..toolbox import body_to_world, climb, ring_quadrants
 
 __all__ = ["SDLW"]
 
@@ -64,12 +64,21 @@ _ROTATE, _MOVE = "ROTATE", "MOVE"
 
 
 @register_policy("sdlw")
-class SDLW(SearchPolicy):
-    """Sensor-driven Levy walk. ``variant="uhlw"`` gives the paper's uniform-heading baseline."""
+class SDLW(Policy):
+    """Sensor-driven Levy walk. ``variant="uhlw"`` gives the paper's uniform-heading baseline.
+
+    Written against the primitives only: it climbs to a working altitude with
+    :func:`~safmc_sim.toolbox.climb`, then emits ``Velocity`` every tick. It never lands --
+    the paper's task is pure coverage, with no targets to rescue -- so it scores zero on the
+    competition mission by design. That is correct, not a bug: it is here as a *search*
+    baseline and as a regression test that our sensor and kinematics semantics reproduce a
+    published result.
+    """
 
     def __init__(self, agent_id, config, rng, arena):
         super().__init__(agent_id, config, rng, arena)
         c = self.config
+        self.cruise_alt_m = float(c.get("cruise_alt_m", 0.5))
         self.variant = str(c.get("variant", "sdlw")).lower()
         if self.variant not in ("sdlw", "uhlw"):
             raise ValueError(f"variant must be 'sdlw' or 'uhlw', got {self.variant!r}")
@@ -108,7 +117,6 @@ class SDLW(SearchPolicy):
         self._last_xy: np.ndarray | None = None
 
     def reset(self) -> None:
-        super().reset()
         self.state = _ROTATE
         self.target_heading = 0.0
         self.target_distance = 0.0
@@ -156,7 +164,13 @@ class SDLW(SearchPolicy):
 
     # -- the controller -------------------------------------------------------------------------
 
-    def choose_motion(self, obs: Observation) -> Command:
+    def step(self, obs: Observation) -> Command:
+        # Get airborne first. The platform has no take-off command -- climbing is just a
+        # velocity, and deciding when to stop climbing is the policy's business.
+        rising = climb(obs, self.cruise_alt_m)
+        if rising is not None:
+            return rising
+
         psi = obs.pose.theta
         xy = obs.pose.xy
         if self._last_xy is not None:
@@ -179,18 +193,17 @@ class SDLW(SearchPolicy):
                 self.target_distance = self.sample_distance()
                 self.travelled = 0.0
                 self.state = _MOVE
-                return VelocityBody(vx=self.max_vel, vy=vy)
+                return Velocity(*body_to_world(self.max_vel, vy, psi))
             if quadrants["front"] < threshold:
                 vx = -self.nudge
             elif quadrants["back"] < threshold:
                 vx = self.nudge
-            return VelocityBody(
-                vx=vx, vy=vy, yaw_rate=float(np.sign(error) * self.max_yaw)
-            )
+            wx, wy = body_to_world(vx, vy, psi)
+            return Velocity(vx=wx, vy=wy, yaw_rate=float(np.sign(error) * self.max_yaw))
 
         if self.travelled >= self.target_distance or quadrants["front"] < threshold:
             self.target_heading = self.sample_heading(obs, psi)
             self.state = _ROTATE
-            return VelocityBody(vx=0.0, vy=vy)
+            return Velocity(*body_to_world(0.0, vy, psi))
 
-        return VelocityBody(vx=self.max_vel, vy=vy)
+        return Velocity(*body_to_world(self.max_vel, vy, psi))

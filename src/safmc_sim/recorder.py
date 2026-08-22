@@ -54,10 +54,7 @@ SCHEMA_VERSION = "safmc-sim/run/1"
 LIFECYCLE_CODES = {name: i for i, name in enumerate(Lifecycle.ALL)}
 LIFECYCLE_NAMES = {i: name for name, i in LIFECYCLE_CODES.items()}
 
-COMMAND_CODES = {
-    "Takeoff": 0, "VelocityBody": 1, "VelocityWorld": 2,
-    "PositionWorld": 3, "Hold": 4, "Land": 5,
-}
+COMMAND_CODES = {"Velocity": 0, "Land": 1}
 COMMAND_NAMES = {i: name for name, i in COMMAND_CODES.items()}
 
 
@@ -94,16 +91,8 @@ def _command_row(command) -> tuple[int, list[float]]:
     if code is None:
         raise LogFormatError(f"cannot record unknown command type {name}")
     nan = float("nan")
-    if name == "Takeoff":
-        return code, [command.altitude_m, nan, nan, nan]
-    if name == "VelocityBody":
+    if name == "Velocity":
         return code, [command.vx, command.vy, command.vz, command.yaw_rate]
-    if name == "VelocityWorld":
-        yaw = nan if command.yaw is None else command.yaw
-        return code, [command.vx, command.vy, command.z, yaw]
-    if name == "PositionWorld":
-        yaw = nan if command.yaw is None else command.yaw
-        return code, [command.x, command.y, command.z, yaw]
     return code, [nan, nan, nan, nan]
 
 

@@ -24,32 +24,36 @@ policy ships here as a reference implementation and a regression test.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/safmc-run run --policy frontier --drones 12 --seed 0 --duration 600
-.venv/bin/safmc-run replay runs/frontier_s0        # -> runs/frontier_s0/replay.html
+.venv/bin/safmc-run run --policy sdlw --drones 12 --seed 0 --duration 600
+.venv/bin/safmc-run replay runs/sdlw_s0            # -> runs/sdlw_s0/replay.html
 ```
 
 Compare strategies across seeds (one process per run — ir-sim's RNG is process-global):
 
 ```bash
-.venv/bin/safmc-run sweep --policy frontier sdlw random_walk --seeds 0-9 --drones 12
+.venv/bin/safmc-run sweep --policy sdlw my_strategy --seeds 0-9 --drones 12
 ```
 
 ## Writing a policy
 
-One class, one method. Full guide: [docs/05-policy-api.md](docs/05-policy-api.md).
+One class, one method, **two commands**. Full guide: [docs/05-policy-api.md](docs/05-policy-api.md).
 
 ```python
-from safmc_sim.api import Observation, Command, Policy, Takeoff, VelocityBody, register_policy
+from safmc_sim.api import Observation, Command, Policy, Velocity, register_policy
 
 @register_policy("my_strategy")
 class MyStrategy(Policy):
     def step(self, obs: Observation) -> Command:
-        if obs.lifecycle == "IDLE":
-            return Takeoff()
+        if obs.pose.z < 0.5:                 # you decide when and how to climb
+            return Velocity(vz=0.4)
         if obs.tof.min_range_m < 0.5:
-            return VelocityBody(vx=0.0, yaw_rate=0.8)
-        return VelocityBody(vx=0.45)
+            return Velocity(yaw_rate=0.8)
+        return Velocity(vx=0.45)
 ```
+
+`Velocity` and `Land` are the entire action space. There is no path following, no altitude
+hold, no take-off sequence and no obstacle avoidance anywhere in the simulator — those are
+strategy, and shipping them would mean every policy silently inherited the same ones.
 
 A policy sees only what a real drone could: its own pose and velocity, the ToF ring, marker
 detections, and whatever peers broadcast. It cannot reach the map, the obstacles or the target
@@ -61,8 +65,9 @@ from an `Observation` to prove it.
 | | |
 |---|---|
 | **Arena** | Seeded generation from the 2026 Category Swarm rulebook: 20 x 20 m, Start Area, a 10 x 10 m walled Unknown Search Area with doorways, pillars, randomised layout, self-validating |
-| **Drone** | 2.5D: `[x, y, theta, z, vx, vy]`, first-order velocity lag, 1.4 m ceiling, lifecycle from `IDLE` to `LANDED` or `CRASHED` |
+| **Drone** | 2.5D: `[x, y, theta, z, vx, vy]`, first-order velocity lag, 1.4 m ceiling, `ACTIVE` / `LANDED` / `CRASHED` |
 | **Sensing** | 8 x VL53L5CX ring, 8 zones each, reproducing the flown geometry and gating, plus the firmware's 64-bin collapsed scan. Height-gated occlusion |
+| **Toolbox** | Opt-in building blocks (frame rotation, sensor reduction, a log-odds grid) that the framework never imports |
 | **Mission** | Victims +5, bonus +15, fires +10, the 2.5 m fire-suppression coupling, and the relay's 2x multiplier evaluated as a real graph search |
 | **Rules** | Two take-off waves, 10-25 drones, 600 s runs, landing spends the drone permanently |
 
@@ -104,24 +109,14 @@ exactly.
 
 ## Status
 
-v0.1. Runs end to end; five reference policies; full logging and replay; 595 tests.
+v0.1. Runs end to end, 595 tests, audited adversarially against `SPEC.md`
+([report](docs/AUDIT-v0.1.md)).
 
-Audited adversarially against `SPEC.md` by seven independent agents, each attempting
-falsification, with every claim then handed to a skeptic to refute — 24 findings survived and
-were fixed. Report: [docs/AUDIT-v0.1.md](docs/AUDIT-v0.1.md).
+**One reference policy ships**: a port of arXiv:2607.25195, because a strategy written by
+whoever wrote the simulator is not a baseline. Everything else — guidance, avoidance, mapping,
+search, coordination — is yours to write, which is the point.
 
-**The first real measurement, and how to read it.** 12 drones, 180 s, seeds 0-4:
-
-| policy | `unobstructed` (isolates search strategy) | `stop` (includes crashes) |
-|---|---|---|
-| `frontier` (map-based) | **67.0** | 13.0 |
-| `wall_follow` | 50.0 | 15.0 |
-| `sdlw` (mapless, IROS 2026) | 19.0 | 17.0 |
-
-The two modes rank the policies in **opposite orders**, and both rankings are true — they
-answer different questions. The map-based policy has much the better search strategy and
-unusable obstacle-avoidance tuning. The honest next step is to fix its clearance and re-run,
-not to declare a winner. Five seeds is also far too few to publish.
-
-Open items are listed at the end of [docs/CHECKPOINTS.md](docs/CHECKPOINTS.md) and
-[docs/AUDIT-v0.1.md](docs/AUDIT-v0.1.md).
+Open questions are listed at the end of [docs/CHECKPOINTS.md](docs/CHECKPOINTS.md). The one
+worth doing first is measuring assumption **A-4**, marker detection range: it is a guess at
+3.0 m, nothing measures it, and it dominates every search comparison this simulator will
+produce.

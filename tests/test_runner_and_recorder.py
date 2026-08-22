@@ -2,6 +2,7 @@
 
 import filecmp
 import json
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -9,14 +10,31 @@ import pytest
 
 from safmc_sim import constants as K
 from safmc_sim import policies  # noqa: F401 -- registers built-ins
-from safmc_sim.api import (
-    Hold, Land, Policy, PositionWorld, Takeoff, VelocityBody, register_policy,
-)
+from safmc_sim.api import Land, Policy, Velocity, register_policy
 from safmc_sim.errors import ConfigError, LogFormatError, PolicyError
 from safmc_sim.recorder import Recorder, load_run, score_from_log
 from safmc_sim.runner import RunConfig, Runner, run
 
 SHORT = dict(n_drones=10, duration_s=8.0, record=False)
+
+CRUISE_M = 0.5
+
+
+def _climb_then(fly):
+    """Build a policy that climbs to cruise, then defers to ``fly(self, obs)``.
+
+    Every test that needs a flying drone now has to get it airborne itself, because the
+    platform has no take-off command. That is the point of the change, but it is repetitive in
+    tests, so it lives here once.
+    """
+
+    class Built(Policy):
+        def step(self, obs):
+            if obs.pose.z < CRUISE_M - 0.02:
+                return Velocity(vz=0.4)
+            return fly(self, obs)
+
+    return Built
 
 
 # -- configuration validation ---------------------------------------------------------------
@@ -38,11 +56,6 @@ def test_a_sensor_rate_that_does_not_divide_the_tick_rate_is_rejected():
     # 20 / 2 and 20 / 4 are exact, so these are fine.
     RunConfig(tick_hz=20.0, marker_rate_hz=2.0)
     RunConfig(tick_hz=20.0, tof_rate_hz=4.0)
-
-
-def test_cruise_altitude_above_the_ceiling_is_rejected():
-    with pytest.raises(ConfigError, match="cruise_alt_m"):
-        RunConfig(cruise_alt_m=K.CEILING_M + 0.1)
 
 
 def test_unknown_collision_behaviour_is_rejected():
@@ -75,7 +88,7 @@ def test_logs_of_identical_runs_differ_only_in_the_meta_block(tmp_path):
     """R-DET-1: wall-clock values are confined to one block."""
     for name in ("a", "b"):
         run(
-            RunConfig(seed=11, policy="frontier", n_drones=10, duration_s=8.0),
+            RunConfig(seed=11, policy="sdlw", n_drones=10, duration_s=8.0),
             recorder=Recorder(tmp_path / name),
         )
     assert filecmp.cmp(tmp_path / "a" / "states.npz", tmp_path / "b" / "states.npz", shallow=False)
@@ -116,7 +129,7 @@ def test_a_raising_policy_aborts_the_run_with_context():
         def step(self, obs):
             if obs.tick == 3:
                 raise ZeroDivisionError("deliberate")
-            return Hold()
+            return Velocity()
 
     with pytest.raises(PolicyError) as info:
         run(RunConfig(seed=0, policy="_boom", **SHORT))
@@ -144,7 +157,7 @@ def test_observations_are_consistent_within_a_tick():
             if obs.tick == 5:
                 seen.append(frozenset((a, tuple(sorted(v))) for a, v in obs.peers.items()))
             self.publish("mark", obs.tick)
-            return Takeoff() if obs.lifecycle == "IDLE" else Hold()
+            return Velocity(vz=0.4)
 
     run(RunConfig(seed=0, policy="_snapshot_probe", **SHORT))
     assert len(seen) == 10
@@ -157,38 +170,29 @@ def test_observations_are_consistent_within_a_tick():
 def test_landing_is_irreversible():
     """R-DRONE-10: a landed drone stays landed AND stops moving, for the rest of the run.
 
-    The previous version of this test was vacuous, which the v0.1 audit caught by mutation:
-    every drone landed on the same tick, the runner ended the run as soon as all agents were
-    terminal, and the "then try to take off again" branch never executed -- a full
-    drone-resurrection mutation passed all 533 tests. This version keeps one drone flying so
-    the run outlives the landings, and asserts on the recorded trajectory rather than the
-    final state.
+    The original version of this test was vacuous, which a mutation caught: every drone landed
+    on the same tick, the run ended, and the "try to fly again" branch never executed. This
+    version keeps one drone flying so the run outlives the landings, lands the rest *at cruise
+    speed* (landing from a hover slides ~0 mm and proves nothing), and asserts bit-identical
+    positions for every subsequent tick.
     """
 
     @register_policy("_land_then_fly")
     class LandThenFly(Policy):
         def step(self, obs):
-            if obs.lifecycle == "IDLE":
-                return Takeoff()
+            if obs.pose.z < CRUISE_M - 0.02:
+                return Velocity(vz=0.4)
             # drone_00 flies for the whole run so the others' landings are followed by many
             # more ticks in which they could misbehave.
             if self.agent_id == "drone_00":
-                return VelocityBody(vx=0.1) if obs.lifecycle == "FLYING" else Hold()
-            # Fly at cruise right up to the landing, so the drone is still MOVING when it
-            # touches down. Landing from a stationary hover slides ~0 mm and would make this
-            # test vacuous again -- verified by mutation.
+                return Velocity(vx=0.1)
             if obs.tick < 40:
-                return VelocityBody(vx=0.45)
-            # After landing, try every command that could possibly move it.
+                return Velocity(vx=0.45)      # still moving when it commits
             if obs.lifecycle == "LANDED":
-                return [Takeoff(), VelocityBody(vx=2.0), PositionWorld(x=10.0, y=10.0)][
-                    obs.tick % 3
-                ]
+                return Velocity(vx=2.0)       # try hard to move a landed drone
             return Land()
 
     from safmc_sim.recorder import LIFECYCLE_NAMES
-
-    import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
         result = run(
@@ -200,68 +204,80 @@ def test_landing_is_irreversible():
     landed_ids = [i for i, a in enumerate(result.lifecycles) if result.lifecycles[a] == "LANDED"]
     assert landed_ids, "no drone landed, so the test proves nothing"
 
-    lifecycle = states["lifecycle"]
-    pose = states["pose"]
     names = {code: name for code, name in LIFECYCLE_NAMES.items()}
-    checked = 0
     for i in landed_ids:
-        series = [names[int(c)] for c in lifecycle[:, i]]
+        series = [names[int(c)] for c in states["lifecycle"][:, i]]
         first = series.index("LANDED")
         assert first < len(series) - 20, "landing happened too late to prove anything"
-        # Never leaves LANDED, however hard the policy pushes.
         assert set(series[first:]) == {"LANDED"}
-        # And never moves again -- bit-identically.
-        assert np.array_equal(pose[first:, i, :2], np.broadcast_to(pose[first, i, :2], pose[first:, i, :2].shape))
-        checked += 1
-    assert checked
+        frozen = states["pose"][first:, i, :2]
+        assert np.array_equal(frozen, np.broadcast_to(frozen[0], frozen.shape))
 
 
-def test_only_two_takeoff_waves_are_admitted():
-    """R-MISS-6: a third wave is refused and recorded, not raised."""
+def test_departures_are_recorded_not_refused():
+    """The two-wave take-off rule is scored after the fact, not enforced mid-flight.
 
-    @register_policy("_three_waves")
-    class ThreeWaves(Policy):
+    The platform used to refuse a third take-off. That made the simulator a referee, which is
+    the wrong job: a run that breaks a competition rule is a run whose *score* should reflect
+    it, and a policy that never learns it broke the rule cannot be debugged. Departures are
+    emitted as events and the wave analysis reads them.
+    """
+
+    @register_policy("_staggered")
+    class Staggered(Policy):
         def step(self, obs):
             index = int(self.agent_id.split("_")[1])
-            # A wave stays open for 10 s from its first departure, so these three groups are
-            # three distinct waves: t=0, t=12 (wave 1 has closed), t=25 (wave 2 has closed).
             due = 0.0 if index < 3 else (12.0 if index < 6 else 25.0)
-            if obs.lifecycle == "IDLE" and obs.sim_time_s >= due:
-                return Takeoff()
-            return Hold()
+            if obs.sim_time_s < due:
+                return Velocity()
+            if obs.pose.z < CRUISE_M - 0.02:
+                return Velocity(vz=0.4)
+            return Velocity(vy=0.45)      # +y is North, out of the Start Area
 
-    result = run(RunConfig(seed=0, policy="_three_waves", n_drones=10, duration_s=30.0,
+    result = run(RunConfig(seed=0, policy="_staggered", n_drones=10, duration_s=40.0,
                            record=False))
-    waves = [e for e in result.events if e.kind == "wave_opened"]
-    violations = [e for e in result.events if e.kind == "rule_violation"]
-    assert len(waves) == K.MAX_TAKEOFF_WAVES
-    assert violations and violations[0].detail["rule"] == "max_takeoff_waves"
-    # The refused drones never left the ground.
-    refused = {e.agent_id for e in violations}
-    assert all(result.lifecycles[a] == "IDLE" for a in refused)
+    departures = [e for e in result.events if e.kind == "departed"]
+    assert departures, "no drone left the Start Area"
+    # Nothing was refused: every drone that tried to leave, left.
+    assert not [e for e in result.events if e.kind == "rule_violation"]
+
+    from safmc_sim.mission import takeoff_waves
+
+    waves = takeoff_waves([e.sim_time_s for e in departures])
+    assert len(waves) >= 1
 
 
 def test_mission_start_is_the_first_exit_from_the_start_area():
-    result = run(RunConfig(seed=1, policy="frontier", n_drones=10, duration_s=30.0,
+    result = run(RunConfig(seed=1, policy="sdlw", n_drones=10, duration_s=30.0,
                            record=False))
     started = [e for e in result.events if e.kind == "mission_started"]
     assert len(started) == 1
     assert result.mission_started_tick == started[0].tick
 
 
-def test_a_grounded_drone_cannot_be_moved_by_a_velocity_command():
-    from safmc_sim.api import VelocityBody
+def test_a_velocity_command_moves_the_drone_with_nothing_in_between():
+    """The runner is a pass-through: what a policy commands is what the kinematics receives.
 
-    @register_policy("_ground_dash")
-    class GroundDash(Policy):
+    Guards against a controller creeping back in. If anything sat between the command and the
+    drone -- a path follower, an altitude hold, a yaw servo -- the drone would not track a
+    constant velocity to within its own first-order lag.
+    """
+
+    @register_policy("_constant_velocity")
+    class ConstantVelocity(Policy):
         def step(self, obs):
-            return VelocityBody(vx=2.0)
+            return Velocity(vx=0.3, vz=0.2)
 
-    runner = Runner(RunConfig(seed=0, n_drones=10, duration_s=4.0, policy="_ground_dash"))
+    runner = Runner(RunConfig(seed=0, n_drones=10, duration_s=6.0, policy="_constant_velocity",
+                              record=False))
     runner.build()
-    before = np.array([a.xy for a in runner.agents])
+    start = np.array([a.xy for a in runner.agents])
     runner.run()
-    assert np.allclose(before, np.array([a.xy for a in runner.agents]))
+    moved = np.array([a.xy for a in runner.agents]) - start
+    # Straight along +x, nothing along +y, and airborne.
+    assert np.all(moved[:, 0] > 1.0)
+    assert np.allclose(moved[:, 1], 0.0, atol=1e-6)
+    assert all(a.z > 0.5 for a in runner.agents)
 
 
 # -- recording ---------------------------------------------------------------------------------
@@ -269,9 +285,9 @@ def test_a_grounded_drone_cannot_be_moved_by_a_velocity_command():
 
 def test_recording_does_not_change_the_simulation(tmp_path):
     """R-OBS-4."""
-    quiet = run(RunConfig(seed=5, policy="frontier", n_drones=10, duration_s=15.0, record=False))
+    quiet = run(RunConfig(seed=5, policy="sdlw", n_drones=10, duration_s=15.0, record=False))
     loud = run(
-        RunConfig(seed=5, policy="frontier", n_drones=10, duration_s=15.0),
+        RunConfig(seed=5, policy="sdlw", n_drones=10, duration_s=15.0),
         recorder=Recorder(tmp_path / "loud"),
     )
     assert quiet.score.total == loud.score.total
@@ -284,7 +300,7 @@ def test_offline_rescoring_matches_the_online_score_exactly(tmp_path):
     for seed in (1, 2, 3):
         directory = tmp_path / f"s{seed}"
         result = run(
-            RunConfig(seed=seed, policy="frontier", n_drones=10, duration_s=40.0),
+            RunConfig(seed=seed, policy="sdlw", n_drones=10, duration_s=40.0),
             recorder=Recorder(directory),
         )
         offline = score_from_log(directory)
@@ -297,7 +313,7 @@ def test_offline_rescoring_matches_the_online_score_exactly(tmp_path):
 def test_log_contains_everything_the_spec_requires(tmp_path):
     """R-OBS-2."""
     result = run(
-        RunConfig(seed=1, policy="frontier", n_drones=10, duration_s=20.0),
+        RunConfig(seed=1, policy="sdlw", n_drones=10, duration_s=20.0),
         recorder=Recorder(tmp_path / "r"),
     )
     log = load_run(tmp_path / "r")
@@ -316,13 +332,13 @@ def test_log_contains_everything_the_spec_requires(tmp_path):
     assert log["tof"]["collapsed_m"].shape == (n_ticks, 10, 64)
 
     kinds = {e["kind"] for e in log["events"]}
-    assert {"wave_opened", "airborne"} <= kinds
+    assert {"departed", "mission_started"} <= kinds
     assert log["footer"]["score"]["total"] == result.score.total
 
 
 def test_reading_a_log_with_the_wrong_schema_fails_loudly(tmp_path):
     directory = tmp_path / "bad"
-    run(RunConfig(seed=1, policy="hold", n_drones=10, duration_s=4.0),
+    run(RunConfig(seed=1, policy="sdlw", n_drones=10, duration_s=4.0),
         recorder=Recorder(directory))
     path = directory / "run.jsonl"
     lines = path.read_text().splitlines()
@@ -369,7 +385,7 @@ def test_the_fleet_actually_leaves_the_start_area():
     never left the Start Area -- which looks exactly like a bad strategy and is in fact a
     simulator artefact. Both distances are now named constants with margins.
     """
-    for policy in ("random_walk", "sdlw", "wall_follow", "frontier"):
+    for policy in ("sdlw",):
         result = run(
             RunConfig(seed=0, n_drones=12, policy=policy, duration_s=45.0, record=False)
         )
@@ -381,7 +397,7 @@ def test_start_formation_keeps_clear_of_walls_and_of_itself():
     from safmc_sim import constants as K
 
     for n in (K.FLEET_MIN, 18, K.FLEET_MAX):
-        runner = Runner(RunConfig(n_drones=n, policy="hold"))
+        runner = Runner(RunConfig(n_drones=n, policy="sdlw"))
         states = runner._start_positions()
         xy = states[:, :2]
         assert len(xy) == n
@@ -404,4 +420,4 @@ def test_an_impossible_start_spacing_is_rejected():
     with pytest.raises(ConfigError, match="start_spacing_m"):
         RunConfig(start_spacing_m=2 * K.DRONE_RADIUS_M)
     with pytest.raises(ConfigError, match="Start Area depth"):
-        Runner(RunConfig(n_drones=25, start_spacing_m=3.0, policy="hold"))._start_positions()
+        Runner(RunConfig(n_drones=25, start_spacing_m=3.0, policy="sdlw"))._start_positions()

@@ -14,10 +14,7 @@ import pytest
 
 from safmc_sim import constants as K
 from safmc_sim import policies  # noqa: F401
-from safmc_sim.api import (
-    ArenaInfo, Hold, Land, Lifecycle, Policy, PositionWorld, Takeoff, VelocityBody,
-    register_policy,
-)
+from safmc_sim.api import ArenaInfo, Land, Lifecycle, Policy, Velocity, register_policy
 from safmc_sim.blackboard import PerfectBlackboard
 from safmc_sim.errors import ArenaError, ConfigError, PolicyError
 from safmc_sim.frames import wrap_pi
@@ -97,31 +94,55 @@ def test_validation_catches_a_room_placed_too_close_to_the_perimeter():
 # -- R-DRONE-9 --------------------------------------------------------------------------------
 
 
-def test_an_unhandled_lifecycle_raises_instead_of_being_flown():
-    """Transitions must be total. The if-chain used to fall through to the flying branch."""
-    runner = Runner(RunConfig(seed=0, n_drones=10, policy="hold")).build()
+def test_an_unhandled_command_raises_instead_of_being_ignored():
+    """The resolver is total: anything it does not recognise raises rather than doing nothing."""
+    runner = Runner(RunConfig(seed=0, n_drones=10, policy="sdlw")).build()
     try:
         agent = runner.agents[0]
-        agent.lifecycle = "SOMETHING_ELSE"
-        with pytest.raises(ConfigError, match="unhandled lifecycle"):
-            runner._resolve(agent, Hold(), 0, 0.0)
+        with pytest.raises(PolicyError, match="unhandled command"):
+            runner._resolve(agent, object(), 0, 0.0)
     finally:
         runner._teardown()
 
 
 def test_lifecycle_set_matches_the_spec():
-    assert set(Lifecycle.ALL) == {
-        "IDLE", "TAKEOFF", "FLYING", "LANDING", "LANDED", "CRASHED",
-    }
+    assert set(Lifecycle.ALL) == {"ACTIVE", "LANDED", "CRASHED"}
 
 
 # -- R-DRONE-10 / R-MISS-8 --------------------------------------------------------------------
 
 
 def test_a_crashed_drone_is_also_frozen():
-    result = run(RunConfig(seed=1, n_drones=12, policy="frontier", duration_s=60.0,
-                           record=False))
-    assert result.crashed or result.landed  # the run has to have produced a terminal agent
+    """A crash freezes the drone in state, not just its command -- same fix as landing."""
+
+    @register_policy("_into_the_wall")
+    class IntoTheWall(Policy):
+        def step(self, obs):
+            if obs.pose.z < 0.48:
+                return Velocity(vz=0.4)
+            return Velocity(vy=-0.45)      # due South, into the field boundary
+
+    import tempfile as _tempfile
+
+    with _tempfile.TemporaryDirectory() as tmp:
+        result = run(
+            RunConfig(seed=1, n_drones=10, policy="_into_the_wall", duration_s=40.0),
+            recorder=Recorder(tmp),
+        )
+        states = load_run(tmp)["states"]
+
+    assert result.crashed, "nobody crashed, so the test proves nothing"
+    names = {code: name for code, name in
+             __import__("safmc_sim.recorder", fromlist=["x"]).LIFECYCLE_NAMES.items()}
+    for i, agent in enumerate(result.lifecycles):
+        if result.lifecycles[agent] != "CRASHED":
+            continue
+        series = [names[int(c)] for c in states["lifecycle"][:, i]]
+        first = series.index("CRASHED")
+        if first >= len(series) - 5:
+            continue
+        frozen = states["pose"][first:, i, :2]
+        assert np.array_equal(frozen, np.broadcast_to(frozen[0], frozen.shape))
 
 
 def test_mission_servicing_is_latched_and_never_revoked():
@@ -145,15 +166,15 @@ def test_offline_rescoring_survives_a_landing_at_speed():
     @register_policy("_land_at_speed")
     class LandAtSpeed(Policy):
         def step(self, obs):
-            if obs.lifecycle == "IDLE":
-                return Takeoff()
-            if obs.lifecycle != "FLYING":
-                return Hold()
+            if obs.pose.z < 0.48:
+                return Velocity(vz=0.4)
             if obs.markers and min(m.range_m for m in obs.markers) < 0.9:
                 return Land()          # commanded at cruise speed, never slowing first
+            from safmc_sim.toolbox import body_to_world
+
             if obs.tof.ranges_m[0].min() < 0.7:
-                return VelocityBody(vx=0.0, yaw_rate=1.0)
-            return VelocityBody(vx=0.45)
+                return Velocity(yaw_rate=1.0)
+            return Velocity(*body_to_world(0.45, 0.0, obs.pose.theta))
 
     for seed in (2, 5, 8):
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,7 +192,7 @@ def test_offline_rescoring_survives_a_landing_at_speed():
 
 def test_a_policy_cannot_re_aim_the_ring_it_is_handed():
     """The frozen dataclass blocked rebinding but not in-place writes into a shared array."""
-    runner = Runner(RunConfig(seed=0, n_drones=10, policy="hold")).build()
+    runner = Runner(RunConfig(seed=0, n_drones=10, policy="sdlw")).build()
     try:
         sensor = runner.agents[0].robot.sensors[0]
         scan = sensor.step(runner.agents[0].state[0:3])
@@ -215,10 +236,10 @@ def test_nested_published_containers_are_also_isolated():
 @pytest.mark.parametrize(
     "index,command",
     list(enumerate([
-        VelocityBody(vx=float("nan")),
-        VelocityBody(yaw_rate=float("inf")),
-        PositionWorld(x=float("nan"), y=1.0),
-        Takeoff(altitude_m=float("inf")),
+        Velocity(vx=float("nan")),
+        Velocity(yaw_rate=float("inf")),
+        Velocity(vy=float("nan"), vz=1.0),
+        Velocity(vz=float("inf")),
     ])),
 )
 def test_a_non_finite_command_is_rejected_with_a_useful_error(index, command):
@@ -228,9 +249,7 @@ def test_a_non_finite_command_is_rejected_with_a_useful_error(index, command):
     @register_policy(name)
     class NonFinite(Policy):
         def step(self, obs):
-            if obs.lifecycle == "IDLE":
-                return Takeoff()
-            return command if obs.tick == 20 else Hold()
+            return command if obs.tick == 20 else Velocity()
 
     with pytest.raises(PolicyError) as info:
         run(RunConfig(seed=0, n_drones=10, policy=name, duration_s=8.0, record=False))
@@ -245,7 +264,7 @@ def test_unobstructed_is_a_real_control_with_no_crashes():
     """Markers used to stay lethal in 'unobstructed', so the control mode was not a control."""
     for seed in (0, 3):
         result = run(
-            RunConfig(seed=seed, n_drones=12, policy="frontier", duration_s=120.0,
+            RunConfig(seed=seed, n_drones=12, policy="sdlw", duration_s=120.0,
                       collision_behaviour="unobstructed", record=False)
         )
         assert not result.crashed, f"seed {seed} crashed in unobstructed mode: {result.crashed}"
@@ -257,14 +276,7 @@ def test_a_drone_cannot_leave_the_field_even_unobstructed():
     @register_policy("_escape")
     class Escape(Policy):
         def step(self, obs):
-            if obs.lifecycle == "IDLE":
-                return Takeoff()
-            return VelocityWorldNorth()
-
-    from safmc_sim.api import VelocityWorld
-
-    def VelocityWorldNorth():
-        return VelocityWorld(vx=0.0, vy=5.0)
+            return Velocity(vy=5.0)         # due North, straight out of the field
 
     result = run(
         RunConfig(seed=0, n_drones=10, policy="_escape", duration_s=120.0,
@@ -310,7 +322,7 @@ def _reject_constant(name):
 def test_recorded_pose_is_double_precision():
     """float32 quantises a 20 m coordinate enough to flip a 1 m scoring decision."""
     with tempfile.TemporaryDirectory() as tmp:
-        run(RunConfig(seed=1, n_drones=10, policy="hold", duration_s=6.0), recorder=Recorder(tmp))
+        run(RunConfig(seed=1, n_drones=10, policy="sdlw", duration_s=6.0), recorder=Recorder(tmp))
         states = load_run(tmp)["states"]
         assert states["pose"].dtype == np.float64
         assert states["time_s"].dtype == np.float64
@@ -319,7 +331,7 @@ def test_recorded_pose_is_double_precision():
 def test_the_log_carries_its_own_codebook():
     """states.npz is a wall of integers without it."""
     with tempfile.TemporaryDirectory() as tmp:
-        run(RunConfig(seed=1, n_drones=10, policy="hold", duration_s=6.0), recorder=Recorder(tmp))
+        run(RunConfig(seed=1, n_drones=10, policy="sdlw", duration_s=6.0), recorder=Recorder(tmp))
         codebook = load_run(tmp)["header"]["codebook"]
         assert set(codebook["lifecycle"].values()) == set(Lifecycle.ALL)
         assert "Land" in codebook["command"].values()
@@ -328,13 +340,13 @@ def test_the_log_carries_its_own_codebook():
 
 def test_a_recorder_with_record_disabled_is_a_configuration_error():
     with pytest.raises(ConfigError, match="record"):
-        Runner(RunConfig(seed=0, n_drones=10, policy="hold", record=False), recorder=Recorder("/tmp/x"))
+        Runner(RunConfig(seed=0, n_drones=10, policy="sdlw", record=False), recorder=Recorder("/tmp/x"))
 
 
 def test_reported_sim_time_matches_the_log():
     with tempfile.TemporaryDirectory() as tmp:
         result = run(
-            RunConfig(seed=1, n_drones=10, policy="hold", duration_s=6.0), recorder=Recorder(tmp)
+            RunConfig(seed=1, n_drones=10, policy="sdlw", duration_s=6.0), recorder=Recorder(tmp)
         )
         times = load_run(tmp)["states"]["time_s"]
         assert result.ticks == len(times)
@@ -367,7 +379,7 @@ def test_published_and_hardware_defaults_have_regression_barriers():
     """R-TIME-1, R-DRONE-6/7/8, R-MISS-5. Each was correct but nothing would catch a change."""
     assert K.DEFAULT_TICK_HZ == K.NAV_RATE_HZ == 20.0
     assert RunConfig().tick_hz == 20.0 and RunConfig().dt == 0.05
-    assert K.CRUISE_ALT_M == 0.5 and RunConfig().cruise_alt_m == 0.5
+    assert K.CRUISE_ALT_M == 0.5
     assert K.CRUISE_SPEED_MS == 0.45
     assert K.DRONE_RADIUS_M == 0.18
     assert K.RUN_DURATION_S == 600.0 and RunConfig().duration_s == 600.0
@@ -415,7 +427,7 @@ def test_each_drone_carries_exactly_one_tof_sensor():
     """R-SENS-1. A return to per-ranger Lidar2D instances would be a silent 14-31x slowdown."""
     from safmc_sim.sensors.tof_ring import ToFRing
 
-    runner = Runner(RunConfig(seed=0, n_drones=10, policy="hold")).build()
+    runner = Runner(RunConfig(seed=0, n_drones=10, policy="sdlw")).build()
     try:
         for agent in runner.agents:
             assert len(agent.robot.sensors) == 1
@@ -445,7 +457,7 @@ def test_pose_and_velocity_both_come_through_the_pose_source_seam():
         def step(self, obs):
             assert obs.pose.x == 1.0 and obs.pose.y == 2.0
             assert obs.velocity_xy == (9.0, 9.0)
-            return Hold()
+            return Velocity()
 
     runner = Runner(RunConfig(seed=0, n_drones=10, policy="_seam_probe", duration_s=2.0,
                               record=False))
@@ -491,3 +503,48 @@ def test_noisy_pose_drifts_and_is_reproducible():
     vx, vy = source.velocity_of("d0", truth, 0)
     assert (vx, vy) != (0.2, -0.1)
     assert abs(vx - 0.2) < 0.5 and abs(vy + 0.1) < 0.5
+
+
+# -- the primitive boundary -------------------------------------------------------------------
+
+
+def test_the_framework_never_imports_policies_or_toolbox():
+    """R-POL-11. The boundary is only real if it is checked.
+
+    `toolbox` is opt-in example code and `policies` holds one external baseline. If either
+    became a framework dependency, the choices they encode -- how to reduce the sensor, how to
+    map, how fast to climb -- would silently become everyone's choices again, which is the
+    exact failure this refactor removed.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src" / "safmc_sim"
+    offenders = []
+    for path in root.rglob("*.py"):
+        rel = path.relative_to(root)
+        if rel.parts[0] in ("policies", "toolbox.py"):
+            continue
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if "policies" in node.module or "toolbox" in node.module:
+                    offenders.append(f"{rel}:{node.lineno} imports {node.module}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if "policies" in alias.name or "toolbox" in alias.name:
+                        offenders.append(f"{rel}:{node.lineno} imports {alias.name}")
+    assert not offenders, "framework imports opt-in code: " + "; ".join(offenders)
+
+
+def test_the_runner_contains_no_controller():
+    """R-POL-10. A commanded velocity reaches the kinematics unmodified.
+
+    Structural guard rather than behavioural: the words below are the names the controllers
+    had, and their return would be the regression.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "src" / "safmc_sim" / "runner.py").read_text()
+    for banned in ("_alt_rate", "_yaw_rate", "_flying_action", "_YAW_GAIN", "_ALT_GAIN"):
+        assert banned not in source, f"runner.py reintroduced {banned}"

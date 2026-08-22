@@ -143,24 +143,19 @@ constant `tau`, default 0.35 s. **[ASSUMPTION]**
 `climb_rate_max`, default 0.5 m/s **[ASSUMPTION]**, and clamped to `[0, ceiling_m]` where
 `ceiling_m` defaults to 1.4 m [src: rulebook §3.3.1 r.13].
 
-**R-DRONE-6** Default cruise altitude MUST be 0.5 m, matching firmware `CRUISE_ALT_M`
-[src: esp-everything/main/wifi_task.c:29].
-
 **R-DRONE-7** Default cruise speed MUST be 0.45 m/s [src: esp-everything/main/nav_task.h:24].
 
 **R-DRONE-8** The drone collision radius MUST default to 0.18 m
 [src: esp-everything/main/vfh.h:43].
 
-**R-DRONE-9** Drone lifecycle MUST be an explicit state machine over
-`{IDLE, TAKEOFF, FLYING, LANDING, LANDED, CRASHED}`. Transitions MUST be total: an unhandled
-lifecycle value raises rather than falling through to a default.
+**R-DRONE-9** Drone lifecycle MUST be exactly `{ACTIVE, LANDED, CRASHED}`, with both terminal
+states permanent. The simulator MUST NOT model flight phases.
 
-> Amended after the v0.1 audit. The original set included `ARMED`. There is no command that
-> arms without taking off -- the firmware's arm, offboard-mode and climb sequence is atomic
-> from a policy's point of view -- so `ARMED` was a state nothing could observe or act on. It
-> was specified and never implemented, which the audit correctly flagged. Removed rather than
-> added, because adding it would have created a state with no transitions in or out that a
-> policy could distinguish.
+> Amended twice. The original set included `ARMED`, which nothing implemented. The set then
+> still carried `TAKEOFF` and `LANDING`, which turned out to be worse: they were *modes the
+> runner flew*, choreographing a climb and a descent at a fixed rate and deciding when each
+> was complete. Climbing is a velocity command; when to stop climbing is a policy's decision.
+> Removing the phases removed the choreography.
 
 **R-DRONE-10** A `LANDED` drone MUST be permanently immobile for the remainder of the run. The
 rules require a rescuing drone to remain "until the end of the mission"
@@ -237,9 +232,22 @@ positions) MUST NOT be reachable from `Observation`.
 public attribute reachable from an `Observation` and find no reference to the environment, the
 arena, the mission, or another agent's object.
 
-**R-POL-5** `Command` MUST cover exactly the real firmware's action set
-[src: esp-everything/main/mavlink_task.h:73-89]: `VelocityBody`, `VelocityWorld`, `PositionWorld`,
-`Hold`, `Land`, and `Takeoff`. No other command types.
+**R-POL-5** `Command` MUST be exactly two types: `Velocity` (ARENA-frame linear velocity plus a
+yaw rate) and `Land`. No others.
+
+> Amended after v0.1. The original requirement mirrored the firmware's six MAVLink helpers,
+> which was the wrong thing to copy: those helpers are *guidance*, and reproducing them put a
+> path follower and two proportional controllers inside the simulator, where every policy
+> inherited them invisibly. The firmware remains the reference for what the drone **is** — its
+> sensors, geometry, limits and frames — not for how it flies.
+
+**R-POL-10** The simulator MUST NOT contain guidance, control or strategy. Specifically it MUST
+NOT implement path following, setpoint tracking, altitude or heading hold, obstacle avoidance,
+mapping, target selection, or inter-agent coordination. A commanded velocity MUST reach the
+kinematics handler unmodified apart from the drone's own limits and lag.
+
+**R-POL-11** No module under `safmc_sim/` outside `policies/` and `toolbox/` may import from
+either. `toolbox` is opt-in example code and MUST NOT be imported by the framework.
 
 **R-POL-6** Policies MUST be registered by string name only, decoupled from the kinematics model.
 Re-registering a name MUST overwrite with a warning, not raise, so that notebook reloads work.

@@ -20,7 +20,8 @@ Gazebo. No PX4. See [related work](09-related-work.md).
 Four questions, in priority order:
 
 1. **Search policy.** Mapless (reactive, Lévy-walk-like) versus map-based (frontier, coverage
-   planning). Which finds more targets in 600 seconds?
+   planning). Which finds more targets in 600 seconds? Both are yours to write -- the
+   simulator ships one external baseline and no strategy of its own.
 2. **Resource allocation.** Landing on a victim consumes that drone permanently. With up to 12
    targets, a relay chain worth a 2x multiplier, and 10-25 drones, *how many* to spend and *when*
    is a real optimisation problem — and it is pure geometry.

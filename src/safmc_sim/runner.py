@@ -1,5 +1,13 @@
 """The tick loop: builds a run, drives it, and returns a result.
 
+This is a **thin wrapper over ir-sim**, and thin is a requirement rather than an aspiration.
+The runner resolves a policy's command into an ir-sim action, steps the world, observes what
+happened, and records it. It contains no guidance, no controllers, no manoeuvre choreography
+and no altitude hold. An earlier version had all four -- a path follower behind a "go to (x,y)"
+command, proportional controllers on yaw and altitude, and canned take-off and landing
+sequences the runner flew itself. All of it was strategy living in the platform, and all of it
+is gone.
+
 A run is fully specified by ``(scenario, seed, policy, policy_config)`` and nothing else
 (R-DET-1). Given the same four, the recorded log is byte-identical.
 
@@ -32,15 +40,11 @@ from . import constants as K
 from .api import (
     ArenaInfo,
     Command,
-    Hold,
     Land,
     Lifecycle,
     Observation,
-    PositionWorld,
     Pose,
-    Takeoff,
-    VelocityBody,
-    VelocityWorld,
+    Velocity,
     get_policy,
 )
 from .blackboard import Blackboard, PerfectBlackboard
@@ -57,13 +61,9 @@ from .world.arena import ArenaConfig, ArenaSpec, generate_arena
 
 __all__ = ["RunConfig", "RunResult", "AgentView", "Runner", "run"]
 
-# Proportional gain on yaw error, in 1/s. High enough to be effectively bang-bang against the
-# rate limit for large errors, low enough not to chatter near the setpoint.
-_YAW_GAIN = 4.0
-# Proportional gain on altitude error, in 1/s.
-_ALT_GAIN = 3.0
-_TAKEOFF_TOLERANCE_M = 0.03
-_LANDED_TOLERANCE_M = 0.02
+# The action for a drone that is not going anywhere.
+_STOP = [0.0, 0.0, 0.0, 0.0]
+
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,6 @@ class RunConfig:
 
     tick_hz: float = K.DEFAULT_TICK_HZ
     duration_s: float = K.RUN_DURATION_S
-    cruise_alt_m: float = K.CRUISE_ALT_M
 
     arena_config: ArenaConfig = field(default_factory=ArenaConfig)
     quad_params: QuadParams = field(default_factory=QuadParams)
@@ -134,10 +133,6 @@ class RunConfig:
                 f"collision_behaviour must be 'stop' or 'unobstructed', "
                 f"got {self.collision_behaviour!r}"
             )
-        if self.cruise_alt_m <= 0 or self.cruise_alt_m > self.quad_params.ceiling_m:
-            raise ConfigError(
-                f"cruise_alt_m {self.cruise_alt_m} must be in (0, {self.quad_params.ceiling_m}]"
-            )
         if self.sample_hz is not None and self.sample_hz > self.tick_hz:
             raise ConfigError(
                 f"sample_hz {self.sample_hz} exceeds tick_hz {self.tick_hz}. ir-sim computes "
@@ -180,11 +175,8 @@ class AgentView:
     agent_id: str
     robot: Any
     policy: Any
-    lifecycle: str = Lifecycle.IDLE
-    wave: int | None = None
-    takeoff_tick: int | None = None
-    target_alt_m: float = K.CRUISE_ALT_M
-    last_command: Command = field(default_factory=Hold)
+    lifecycle: str = Lifecycle.ACTIVE
+    last_command: Command = field(default_factory=Velocity)
     last_scan: ToFScan | None = None
     last_scan_tick: int = -1
     last_markers: tuple = ()
@@ -268,7 +260,6 @@ class Runner:
         self.env = None
         self.agents: list[AgentView] = []
         self.events: list[Event] = []
-        self._waves: list[float] = []
         self._mission_started_tick: int | None = None
         self._tick = 0
 
@@ -372,7 +363,6 @@ class Runner:
                     agent_id=agent_id,
                     robot=robot,
                     policy=policy,
-                    target_alt_m=self.config.cruise_alt_m,
                 )
             )
         return self
@@ -431,7 +421,7 @@ class Runner:
         for agent in self.agents:
             obs = self._observe(agent, tick, sim_time, snapshot_by_agent[agent.agent_id])
             if agent.terminal:
-                commands.append(Hold())
+                commands.append(Velocity())
                 continue
             try:
                 command = agent.policy.step(obs)
@@ -504,150 +494,48 @@ class Runner:
     # -- command resolution ---------------------------------------------------------------------
 
     def _resolve(self, agent: AgentView, command: Command, tick: int, sim_time: float):
+        """Turn a command into an ir-sim action. That is the whole job.
+
+        A velocity passes straight through; the drone's own limits and first-order lag are
+        applied by the kinematics handler, which is where they belong. ``Land`` is a state
+        transition, not a manoeuvre.
+        """
         agent.last_command = command
         if agent.terminal:
-            return [0.0, 0.0, 0.0, 0.0]
+            return _STOP
 
-        params = self.config.quad_params
+        if isinstance(command, Velocity):
+            return [command.vx, command.vy, command.vz, command.yaw_rate]
 
-        if isinstance(command, Takeoff):
-            if agent.lifecycle == Lifecycle.IDLE:
-                if self._admit_takeoff(agent, tick, sim_time):
-                    agent.lifecycle = Lifecycle.TAKEOFF
-                    agent.target_alt_m = float(
-                        np.clip(command.altitude_m, 0.05, params.ceiling_m)
-                    )
-                    agent.takeoff_tick = tick
-                else:
-                    return [0.0, 0.0, 0.0, 0.0]
-            # fall through so a TAKEOFF drone keeps climbing
-
-        if agent.lifecycle == Lifecycle.IDLE:
-            # Not airborne, and this was not a Takeoff. Nothing else can move a grounded drone.
-            return [0.0, 0.0, 0.0, 0.0]
-
-        if isinstance(command, Land) and agent.lifecycle in (Lifecycle.FLYING, Lifecycle.TAKEOFF):
-            agent.lifecycle = Lifecycle.LANDING
-            self._emit(tick, sim_time, "land_commanded", agent.agent_id, {})
-
-        if agent.lifecycle == Lifecycle.TAKEOFF:
-            return [0.0, 0.0, params.climb_rate_max_ms, 0.0]
-
-        if agent.lifecycle == Lifecycle.LANDING:
-            return [0.0, 0.0, -params.climb_rate_max_ms, 0.0]
-
-        if agent.lifecycle != Lifecycle.FLYING:
-            # Total by construction (R-DRONE-9): an unrecognised lifecycle must not fall
-            # through to the flying branch, where it would be silently commanded to fly.
-            raise ConfigError(
-                f"{agent.agent_id} is in unhandled lifecycle {agent.lifecycle!r}; "
-                f"expected one of {Lifecycle.ALL}"
-            )
-        return self._flying_action(agent, command)
-
-    def _flying_action(self, agent: AgentView, command: Command) -> list[float]:
-        theta = float(agent.state[2, 0])
-        z = agent.z
-
-        if isinstance(command, (Hold, Takeoff)):
-            return [0.0, 0.0, self._alt_rate(z, agent.target_alt_m), 0.0]
-
-        if isinstance(command, VelocityBody):
-            cos_t, sin_t = np.cos(theta), np.sin(theta)
-            return [
-                command.vx * cos_t - command.vy * sin_t,
-                command.vx * sin_t + command.vy * cos_t,
-                command.vz,
-                command.yaw_rate,
-            ]
-
-        if isinstance(command, VelocityWorld):
-            return [
-                command.vx,
-                command.vy,
-                self._alt_rate(z, command.z),
-                self._yaw_rate(theta, command.yaw),
-            ]
-
-        if isinstance(command, PositionWorld):
-            delta = np.array([command.x, command.y]) - agent.xy
-            distance = float(np.linalg.norm(delta))
-            if distance < 1e-9:
-                vx = vy = 0.0
-                heading = command.yaw
-            else:
-                # Do not overshoot: never command more than the remaining distance per tick.
-                speed = min(command.speed_ms, distance / self.config.dt)
-                vx, vy = (delta / distance * speed).tolist()
-                heading = command.yaw if command.yaw is not None else float(
-                    np.arctan2(delta[1], delta[0])
-                )
-            return [vx, vy, self._alt_rate(z, command.z), self._yaw_rate(theta, heading)]
+        if isinstance(command, Land):
+            self._land(agent, tick, sim_time)
+            return _STOP
 
         raise PolicyError(f"unhandled command type {type(command).__name__}")
 
-    def _alt_rate(self, z: float, target: float) -> float:
-        params = self.config.quad_params
-        return float(
-            np.clip(_ALT_GAIN * (target - z), -params.climb_rate_max_ms, params.climb_rate_max_ms)
-        )
+    def _land(self, agent: AgentView, tick: int, sim_time: float) -> None:
+        """Put a drone on the ground here, permanently.
 
-    def _yaw_rate(self, theta: float, target: float | None) -> float:
-        if target is None:
-            return 0.0
-        params = self.config.quad_params
-        return float(
-            np.clip(_YAW_GAIN * wrap_pi(target - theta), -params.yaw_rate_max_rads, params.yaw_rate_max_rads)
-        )
-
-    # -- rules ------------------------------------------------------------------------------------
-
-    def _admit_takeoff(self, agent: AgentView, tick: int, sim_time: float) -> bool:
-        """The two-wave rule (R-MISS-6, rulebook 3.3.2).
-
-        A wave is a group whose last departure falls within 10 s of its first. At most two
-        waves exist; a third is refused and recorded, not raised -- the run continues and the
-        violation shows up in the log, which is what an evaluator needs to see.
+        The descent is not modelled -- the drone settles to the floor in the tick it commits
+        (divergence F-13). A policy that wants to fly its own approach can descend with
+        ``Velocity(vz=...)`` first and issue ``Land`` at the bottom; the commitment is this
+        call either way.
         """
-        if self._waves and sim_time - self._waves[-1] <= K.TAKEOFF_WAVE_WINDOW_S:
-            agent.wave = len(self._waves)
-            return True
-        if len(self._waves) >= K.MAX_TAKEOFF_WAVES:
-            self._emit(
-                tick, sim_time, "rule_violation", agent.agent_id,
-                {
-                    "rule": "max_takeoff_waves",
-                    "detail": (
-                        f"take-off refused: {K.MAX_TAKEOFF_WAVES} waves already used and this "
-                        f"request is {sim_time - self._waves[-1]:.1f}s after wave "
-                        f"{len(self._waves)} opened (window is {K.TAKEOFF_WAVE_WINDOW_S}s)"
-                    ),
-                },
-            )
-            return False
-        self._waves.append(sim_time)
-        agent.wave = len(self._waves)
-        self._emit(tick, sim_time, "wave_opened", agent.agent_id, {"wave": len(self._waves)})
-        return True
+        self._freeze(agent)
+        agent.robot._state[3, 0] = 0.0
+        agent.lifecycle = Lifecycle.LANDED
+        self._emit(
+            tick, sim_time, "landed", agent.agent_id,
+            {"x": float(agent.xy[0]), "y": float(agent.xy[1])},
+        )
+
+    # -- observation ------------------------------------------------------------------------------
 
     # -- post-step --------------------------------------------------------------------------------
 
     def _post_step(self, tick: int, sim_time: float) -> None:
         for agent in self.agents:
             if agent.terminal:
-                continue
-
-            if agent.lifecycle == Lifecycle.TAKEOFF and agent.z >= agent.target_alt_m - _TAKEOFF_TOLERANCE_M:
-                agent.lifecycle = Lifecycle.FLYING
-                self._emit(tick, sim_time, "airborne", agent.agent_id, {"z": agent.z})
-
-            if agent.lifecycle == Lifecycle.LANDING and agent.z <= _LANDED_TOLERANCE_M:
-                self._freeze(agent)
-                agent.lifecycle = Lifecycle.LANDED
-                self._emit(
-                    tick, sim_time, "landed", agent.agent_id,
-                    {"x": float(agent.xy[0]), "y": float(agent.xy[1])},
-                )
                 continue
 
             reason = self._collision_reason(agent)
@@ -672,8 +560,13 @@ class Runner:
                 )
                 continue
 
+            # Departures are *recorded*, never refused. The two-wave take-off rule is a
+            # competition rule, so it is scored from these events after the fact rather than
+            # enforced by the platform -- the simulator's job is to report what the fleet did,
+            # not to referee it mid-flight.
             if not agent.left_start_area and not self.arena.in_start_area(*agent.xy):
                 agent.left_start_area = True
+                self._emit(tick, sim_time, "departed", agent.agent_id, {})
                 if self._mission_started_tick is None:
                     self._mission_started_tick = tick
                     self._emit(
@@ -713,13 +606,12 @@ class Runner:
 
         # Mission markers are not ir-sim obstacles, because ir-sim's collision is strictly 2D
         # and would make a 1.0 m marker impassable at every altitude. Height-gated here instead.
-        if agent.lifecycle in Lifecycle.AIRBORNE or agent.lifecycle == Lifecycle.LANDED:
-            for target in self.arena.targets:
-                if agent.z >= target.height_m:
-                    continue
-                reach = K.DRONE_RADIUS_M + target.radius_m
-                if float(np.hypot(agent.xy[0] - target.x, agent.xy[1] - target.y)) < reach:
-                    return f"struck marker {target.id}"
+        for target in self.arena.targets:
+            if agent.z >= target.height_m:
+                continue
+            reach = K.DRONE_RADIUS_M + target.radius_m
+            if float(np.hypot(agent.xy[0] - target.x, agent.xy[1] - target.y)) < reach:
+                return f"struck marker {target.id}"
         return None
 
     def _out_of_bounds(self, agent: AgentView) -> bool:
@@ -766,14 +658,10 @@ class Runner:
             self.env = None
 
 
-_COMMAND_TYPES = (Takeoff, VelocityBody, VelocityWorld, PositionWorld, Hold, Land)
+_COMMAND_TYPES = (Velocity, Land)
 
 _COMMAND_FLOAT_FIELDS = {
-    Takeoff: ("altitude_m",),
-    VelocityBody: ("vx", "vy", "vz", "yaw_rate"),
-    VelocityWorld: ("vx", "vy", "z", "yaw"),
-    PositionWorld: ("x", "y", "z", "yaw", "speed_ms"),
-    Hold: (),
+    Velocity: ("vx", "vy", "vz", "yaw_rate"),
     Land: (),
 }
 
