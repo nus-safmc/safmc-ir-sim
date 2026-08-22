@@ -24,15 +24,24 @@ policy ships here as a reference implementation and a regression test.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/safmc-run run --policy sdlw --drones 12 --seed 0 --duration 600
-.venv/bin/safmc-run replay runs/sdlw_s0            # -> runs/sdlw_s0/replay.html
+.venv/bin/python examples/01_hello_policy.py
+.venv/bin/safmc-run replay runs/hello            # -> runs/hello/replay.html, open it
 ```
 
-Compare strategies across seeds (one process per run — ir-sim's RNG is process-global):
+Then run **your own** policy. Your file registers itself when imported, and nothing imports it
+unless you say so — that is what `--import` is for:
 
 ```bash
-.venv/bin/safmc-run sweep --policy sdlw my_strategy --seeds 0-9 --drones 12
+.venv/bin/safmc-run run --import my_search.py --policy my_search --drones 12 --duration 600
+.venv/bin/safmc-run sweep --import my_search.py --policy my_search sdlw --seeds 0-9
 ```
+
+> The one shipped policy, `sdlw`, **scores zero on purpose** — it is a pure *coverage* baseline
+> from a published paper and never lands, and landing is how you score. Compare it on
+> `sensed_coverage`, not on score. If your quick start prints `score 0`, nothing is broken.
+
+**New to the codebase?** [ARCHITECTURE.md](ARCHITECTURE.md) is the map — what the pieces are,
+which ones you touch, and what happens when you press run. Four diagrams, no jargon.
 
 ## Writing a policy
 
@@ -89,6 +98,7 @@ quoting a number.
 
 | | |
 |---|---|
+| [**ARCHITECTURE.md**](ARCHITECTURE.md) | **The map of the codebase — start here to understand it** |
 | [docs/](docs/README.md) | Index and reading order |
 | [**docs/05-policy-api.md**](docs/05-policy-api.md) | **Start here to write a policy** |
 | [docs/SPEC.md](docs/SPEC.md) | The numbered, auditable contract |

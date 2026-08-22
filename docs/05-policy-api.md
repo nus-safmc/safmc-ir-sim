@@ -22,11 +22,14 @@ class MyStrategy(Policy):
         return Velocity(vx=0.45)                # ARENA frame: +x is East
 ```
 
-Run it:
+Run it. **`--import` is not optional** — your policy registers itself when its file is
+imported, and nothing imports your file unless you say so:
 
 ```bash
-safmc-run run --policy my_strategy --drones 12 --seed 0 --duration 600
+safmc-run run --import my_strategy.py --policy my_strategy --drones 12 --duration 600
 ```
+
+Without it you get `unknown policy 'my_strategy'. Registered: ['sdlw']`.
 
 ## Two commands. That is the whole action space.
 
@@ -66,10 +69,33 @@ Practical consequences you will notice immediately:
 
 Convenience: `obs.in_start_area`, `obs.time_remaining_s`, `obs.pose.xy`.
 
+Facts you will want and would otherwise have to dig for:
+
+- **The tick rate is 20 Hz**, so `dt` is 0.05 s. `yaw_rate=1.2` turns 0.06 rad per tick.
+- **Marker kinds** are exactly `"victim"`, `"bonus_victim"` and `"fire"`.
+- **Rangers are numbered anticlockwise from the nose**: `ranges_m[0]` is forward, `[2]` is
+  your left, `[4]` is behind, `[6]` is your right.
+- **Your drone index** is not part of the contract. If you need to differentiate drones, use
+  `self.rng` — every policy instance gets its own seeded generator.
+
 **You cannot see the map, the obstacles, or where the targets are.** That is enforced
 structurally: `Observation` is frozen and holds only plain data, with no reference to the
 environment, the arena, the mission, or another agent. There is a test that walks everything
 reachable from an `Observation` and asserts none of those appear.
+
+## What actually kills you
+
+Crashing will dominate your score before anything clever does, so know the rules:
+
+- **Collision is 2D.** Two drones at *any* altitudes collide if their footprints overlap.
+  Altitude is **not** a deconfliction axis — flying higher does not let you pass over a
+  teammate.
+- **What can kill you is what you can see.** Other drones occlude your ring at every altitude,
+  matching the collision model. If your ring is clear, you are clear.
+- **Walls and pillars are taller than the ceiling**, so they always block and always hurt.
+- **`collision_behaviour="stop"`** (the default) means one touch ends that drone's run — there
+  is no repair. `--collision unobstructed` turns collisions off entirely, and is the right
+  control when you want to compare *search strategy* without crash rate confounding it.
 
 ## Three rules that will bite you if you ignore them
 
@@ -131,19 +157,23 @@ requires **no change to your policy**.
 ## Testing your policy
 
 ```python
+import numpy as np
+from safmc_sim.testing import make_observation
+
 def test_backs_off_from_a_wall():
-    policy = MyStrategy("drone_00", {}, np.random.default_rng(0), arena_info)
+    policy = MyStrategy("drone_00", {}, np.random.default_rng(0), make_observation().arena)
     policy.reset()
-    obs = make_observation(front_range=0.3)
-    assert policy.step(obs).vx < 0.1
+    blocked = make_observation(front_range_m=0.3)
+    assert policy.step(blocked).vx < 0.1
 ```
 
-Policies are plain objects with injected dependencies, so they unit-test without a simulator.
-Use that: a full run is 12 000 ticks.
+`safmc_sim.testing.make_observation()` builds a plausible `Observation` with everything clear,
+and lets you set individual ranges. Policies are plain objects with injected dependencies, so
+they unit-test without a simulator. Use that — a full run is 12 000 ticks.
 
 ## The one reference policy
 
-`policies/sdlw.py` is a port of [arXiv:2607.25195](https://arxiv.org/abs/2607.25195) — an NUS
+`src/safmc_sim/policies/sdlw.py` is a port of [arXiv:2607.25195](https://arxiv.org/abs/2607.25195) — an NUS
 paper accepted to IROS 2026. It is the only policy that ships, deliberately: a strategy written
 by whoever wrote the simulator is not a baseline, it is the simulator's own assumptions wearing
 a policy's clothes. SDLW is externally authored, externally published, and citable.

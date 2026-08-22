@@ -568,3 +568,32 @@ def test_the_runner_contains_no_controller():
     source = (Path(__file__).resolve().parents[1] / "src" / "safmc_sim" / "runner.py").read_text()
     for banned in ("_alt_rate", "_yaw_rate", "_flying_action", "_YAW_GAIN", "_ALT_GAIN"):
         assert banned not in source, f"runner.py reintroduced {banned}"
+
+
+def test_the_documented_testing_helper_works():
+    """docs/05-policy-api.md shows this; it used to reference a function that did not exist."""
+    from safmc_sim.testing import make_observation
+
+    clear = make_observation()
+    assert np.isinf(clear.tof.min_range_m)
+    assert clear.lifecycle == "ACTIVE"
+
+    blocked = make_observation(front_range_m=0.3, left=1.2)
+    assert blocked.tof.ranges_m[0].min() == pytest.approx(0.3)
+    assert blocked.tof.ranges_m[2].min() == pytest.approx(1.2)
+    assert np.isinf(blocked.tof.ranges_m[4]).all()
+
+    with pytest.raises(ValueError, match="unknown ranger"):
+        make_observation(sideways=1.0)
+
+
+def test_a_policy_can_be_unit_tested_without_a_simulator():
+    """The whole point of the helper: no Runner, no ir-sim, no arena."""
+    from safmc_sim.policies.sdlw import SDLW
+    from safmc_sim.testing import make_observation
+
+    obs = make_observation(z=0.5)
+    policy = SDLW("drone_00", {}, np.random.default_rng(0), obs.arena)
+    policy.reset()
+    command = policy.step(obs)
+    assert isinstance(command, (Velocity, Land))
