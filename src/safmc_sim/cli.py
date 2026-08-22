@@ -1,6 +1,7 @@
 """Command line entry point: run, sweep, replay.
 
     safmc-run run     --policy sdlw --drones 12 --seed 3
+    safmc-run run     --import my_search.py --policy my_search --drones 12
     safmc-run sweep   --policy sdlw my_policy --seeds 0-9 --drones 12
     safmc-run replay  runs/my_run
     safmc-run policies
@@ -13,6 +14,8 @@ process cannot have independent seeded streams (R-DET-4).
 from __future__ import annotations
 
 import argparse
+import importlib
+import importlib.util
 import json
 import sys
 from concurrent.futures import ProcessPoolExecutor
@@ -25,6 +28,31 @@ from .recorder import Recorder
 from .runner import RunConfig, run as run_once
 
 __all__ = ["main"]
+
+
+def load_policy_module(target: str) -> None:
+    """Import a file or module so that its ``@register_policy`` decorators run.
+
+    Without this there is no way to run a policy you wrote: the registry is populated by
+    import side-effect, and nothing imports your file. Accepts either a path to a .py file or
+    a dotted module name, because both are things people reasonably try.
+    """
+    path = Path(target)
+    if path.suffix == ".py":
+        if not path.exists():
+            raise SystemExit(f"no such file: {path}")
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[path.stem] = module
+        spec.loader.exec_module(module)
+        return
+    try:
+        importlib.import_module(target)
+    except ImportError as exc:
+        raise SystemExit(
+            f"could not import {target!r}: {exc}. Pass a path to a .py file, or a module "
+            f"name that is importable from the current directory."
+        ) from exc
 
 
 def _parse_seeds(text: str) -> list[int]:
@@ -81,12 +109,24 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p):
-        p.add_argument("--drones", type=int, default=12)
-        p.add_argument("--duration", type=float, default=600.0)
-        p.add_argument("--collision", choices=("stop", "unobstructed"), default="stop")
-        p.add_argument("--policy-config", default=None, help="JSON object")
-        p.add_argument("--no-record", action="store_true")
-        p.add_argument("--out", type=Path, default=Path("runs"))
+        p.add_argument(
+            "--import", dest="import_", action="append", default=[], metavar="FILE_OR_MODULE",
+            help="import a .py file or module so its @register_policy runs. Repeatable.",
+        )
+        p.add_argument("--drones", type=int, default=12,
+                       help="fleet size, 10-25 (default: %(default)s)")
+        p.add_argument("--duration", type=float, default=600.0,
+                       help="simulated seconds (default: %(default)s)")
+        p.add_argument(
+            "--collision", choices=("stop", "unobstructed"), default="stop",
+            help="stop: a collision ends that drone's run (default). unobstructed: nothing "
+                 "can crash -- use this as the control when comparing search strategies.",
+        )
+        p.add_argument("--policy-config", default=None,
+                       help='JSON object passed to the policy, e.g. \'{"speed": 0.3}\'')
+        p.add_argument("--no-record", action="store_true", help="do not write a log")
+        p.add_argument("--out", type=Path, default=Path("runs"),
+                       help="where logs go (default: %(default)s)")
 
     p_run = sub.add_parser("run", help="one run")
     p_run.add_argument("--policy", default="sdlw")
@@ -101,10 +141,21 @@ def main(argv: list[str] | None = None) -> int:
 
     p_replay = sub.add_parser("replay", help="build an HTML replay from a recorded run")
     p_replay.add_argument("run_dir", type=Path)
+    p_replay.add_argument("--pose-every", type=int, default=1,
+                          help="keep every Nth tick; raise it for long runs (default: 1)")
+    p_replay.add_argument("--tof-every", type=int, default=10,
+                          help="keep every Nth ToF frame (default: 10)")
 
-    sub.add_parser("policies", help="list registered policies")
+    p_pol = sub.add_parser("policies", help="list registered policies")
+    p_pol.add_argument(
+        "--import", dest="import_", action="append", default=[], metavar="FILE_OR_MODULE",
+        help="import a .py file or module first, to check it registers",
+    )
 
     args = parser.parse_args(argv)
+
+    for target in getattr(args, "import_", []):
+        load_policy_module(target)
 
     if args.command == "policies":
         for name in policy_names():
@@ -115,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
         import viz
 
-        payload = viz.build_payload(args.run_dir)
+        payload = viz.build_payload(args.run_dir, args.tof_every, args.pose_every)
         output = args.run_dir / "replay.html"
         output.write_text(
             viz.TEMPLATE.replace("__PAYLOAD__", json.dumps(payload, separators=(",", ":"))),

@@ -34,6 +34,8 @@ import numpy as np
 
 from .api import Lifecycle
 from .constants import DRONE_RADIUS_M
+from .constants import MAX_TAKEOFF_WAVES
+from .mission import takeoff_waves
 from .recorder import LIFECYCLE_NAMES, load_run
 from .sensors.raycast import RayScene, cast_rays
 from .world.arena import ArenaConfig, ArenaSpec, Pillar, Target, Wall
@@ -63,9 +65,8 @@ class RunMetrics:
     live_agent_seconds: float
     """Sum over drones of the time each spent airborne. The denominator that matters."""
 
-    path_coverage: float
     sensed_coverage: float
-    sensed_coverage_per_live_minute: float
+    sensed_coverage_per_live_minute: float | None
 
     time_to_first_target_s: float | None
     time_to_last_target_s: float | None
@@ -80,25 +81,9 @@ class RunMetrics:
     """``(sim_time_s, sensed_coverage)`` samples, for plotting."""
 
 
-def arena_from_log(header: Mapping[str, Any]) -> ArenaSpec:
-    """Rebuild the arena from the recorded geometry, not from the seed.
-
-    Regenerating from the seed would test the generator's determinism rather than reading what
-    was actually simulated, and would hide a divergence between the two.
-    """
-    spec = header["arena"]
-    return ArenaSpec(
-        seed=spec["seed"],
-        width_m=spec["width_m"],
-        depth_m=spec["depth_m"],
-        ceiling_m=spec["ceiling_m"],
-        start_area_depth_m=spec["start_area_depth_m"],
-        unknown_area=tuple(spec["unknown_area"]),
-        walls=tuple(Wall(**w) for w in spec["walls"]),
-        pillars=tuple(Pillar(**p) for p in spec["pillars"]),
-        targets=tuple(Target(**t) for t in spec["targets"]),
-        config=ArenaConfig(),
-    )
+# Re-exported from recorder so there is exactly one deserialiser. Two copies of this is how
+# offline re-scoring and offline metrics quietly drift apart.
+from .recorder import arena_from_log  # noqa: E402
 
 
 def compute_metrics(
@@ -154,7 +139,11 @@ def compute_metrics(
 
     serviced = [e for e in events if e["kind"] == "target_serviced"]
     crash_events = [e for e in events if e["kind"] == "crashed"]
-    violations = [e for e in events if e["kind"] == "rule_violation"]
+    # The two-wave take-off rule, computed from what actually happened. Nothing emits a
+    # "rule_violation" event -- the simulator does not referee -- so this is the only place
+    # the rule is checked, and reporting a hardcoded zero here would read as "compliant".
+    waves = takeoff_waves([e["sim_time_s"] for e in events if e["kind"] == "departed"])
+    violations = max(0, len(waves) - MAX_TAKEOFF_WAVES)
 
     half = next((t for t, c in curve if c >= 0.5 * sensed_coverage and sensed_coverage > 0), None)
     lifecycles = footer["lifecycles"]
@@ -171,10 +160,9 @@ def compute_metrics(
         targets_total=len(footer["mission_summary"]),
         sim_time_s=float(times[-1]) if n_ticks else 0.0,
         live_agent_seconds=live_agent_seconds,
-        path_coverage=path_coverage,
         sensed_coverage=sensed_coverage,
         sensed_coverage_per_live_minute=(
-            sensed_coverage / live_minutes if live_minutes > 0 else 0.0
+            sensed_coverage / live_minutes if live_minutes > 0 else None
         ),
         time_to_first_target_s=serviced[0]["sim_time_s"] if serviced else None,
         time_to_last_target_s=serviced[-1]["sim_time_s"] if serviced else None,
@@ -182,7 +170,7 @@ def compute_metrics(
         crashed_agents=sum(1 for s in lifecycles.values() if s == Lifecycle.CRASHED),
         crash_events=len(crash_events),
         landed_agents=sum(1 for s in lifecycles.values() if s == Lifecycle.LANDED),
-        rule_violations=len(violations),
+        rule_violations=violations,
         coverage_curve=tuple(curve),
     )
 

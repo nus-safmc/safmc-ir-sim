@@ -52,11 +52,10 @@ from .errors import ConfigError, PolicyError
 from .frames import wrap_pi
 from .kinematics import KINEMATICS_NAME, QuadParams, configure_robots
 from .mission import Event, Mission, ScoreBreakdown
-from .pose import GroundTruthPose, PoseSource
+from .pose import POSE_SOURCES, PoseSource
 from .sensors.marker_cam import MarkerCam, MarkerCamConfig
 from .sensors.scene import WorldScene
-from .sensors.tof_ring import ToFConfig, ToFScan
-from .sensors import tof_ring as tof_ring_module
+from .sensors.tof_ring import ToFConfig, ToFRing, ToFScan
 from .world.arena import ArenaConfig, ArenaSpec, generate_arena
 
 __all__ = ["RunConfig", "RunResult", "AgentView", "Runner", "run"]
@@ -72,7 +71,7 @@ class RunConfig:
 
     seed: int = K.DEFAULT_SEED
     n_drones: int = K.FLEET_MIN
-    policy: str = "hold"
+    policy: str = "sdlw"
     policy_config: Mapping[str, Any] = field(default_factory=dict)
 
     tick_hz: float = K.DEFAULT_TICK_HZ
@@ -83,23 +82,17 @@ class RunConfig:
     tof_config: ToFConfig = field(default_factory=ToFConfig)
     marker_config: MarkerCamConfig = field(default_factory=MarkerCamConfig)
 
-    tof_rate_hz: float | None = None
-    """``None`` samples every tick. Otherwise must divide ``tick_hz`` exactly (R-TIME-3).
-
-    The real ring runs at 15 Hz round-robin with up to 64 ms of skew across sensors
-    (assumption A-8); v0.1 samples it synchronously."""
-
     marker_rate_hz: float = K.MARKER_RATE_HZ
     """Default 2 Hz, the measured AprilTag rate on the real hardware."""
-
-    sample_hz: float | None = None
-    """Render sampling rate. ``None`` means every tick. Must not exceed ``tick_hz``: ir-sim
-    computes ``int(sample_time / step_time)`` and divides by it, so a faster sample rate
-    produces a bare ZeroDivisionError from inside its world step (R-TIME-4)."""
 
     start_spacing_m: float = K.START_SPACING_M
     """Take-off grid spacing. See constants.START_SPACING_M -- too small deadlocks reactive
     policies against their own neighbours before anyone leaves the Start Area."""
+
+    pose_source: str = "ground_truth"
+    """Which :mod:`safmc_sim.pose` implementation to use. Recorded in the log header, because
+    a run flown on a noisy pose source would otherwise be indistinguishable from a
+    ground-truth one -- and the whole point of the seam is that the difference matters."""
 
     collision_behaviour: str = "stop"
     """``stop`` freezes a colliding drone permanently, which is faithful -- the rules allow no
@@ -123,23 +116,25 @@ class RunConfig:
             raise ConfigError(f"tick_hz must be > 0, got {self.tick_hz}")
         if self.duration_s <= 0:
             raise ConfigError(f"duration_s must be > 0, got {self.duration_s}")
+        if round(self.duration_s * self.tick_hz) < 1:
+            raise ConfigError(
+                f"duration_s={self.duration_s} at tick_hz={self.tick_hz} is less than one "
+                f"tick. The loop would never run and the result would still look complete."
+            )
         if self.start_spacing_m <= 2.0 * K.DRONE_RADIUS_M:
             raise ConfigError(
                 f"start_spacing_m {self.start_spacing_m} must exceed the drone diameter "
                 f"{2 * K.DRONE_RADIUS_M}; drones would start overlapping"
+            )
+        if self.pose_source not in POSE_SOURCES:
+            raise ConfigError(
+                f"pose_source must be one of {sorted(POSE_SOURCES)}, got {self.pose_source!r}"
             )
         if self.collision_behaviour not in ("stop", "unobstructed"):
             raise ConfigError(
                 f"collision_behaviour must be 'stop' or 'unobstructed', "
                 f"got {self.collision_behaviour!r}"
             )
-        if self.sample_hz is not None and self.sample_hz > self.tick_hz:
-            raise ConfigError(
-                f"sample_hz {self.sample_hz} exceeds tick_hz {self.tick_hz}. ir-sim computes "
-                f"int(sample_time / step_time) and would raise an opaque ZeroDivisionError "
-                f"deep inside world.step() (world.py:171)."
-            )
-        _decimation(self.tof_rate_hz, self.tick_hz, "tof_rate_hz")
         _decimation(self.marker_rate_hz, self.tick_hz, "marker_rate_hz")
 
     @property
@@ -177,8 +172,8 @@ class AgentView:
     policy: Any
     lifecycle: str = Lifecycle.ACTIVE
     last_command: Command = field(default_factory=Velocity)
+    ring: ToFRing | None = None
     last_scan: ToFScan | None = None
-    last_scan_tick: int = -1
     last_markers: tuple = ()
     last_marker_tick: int = -1
     crash_reason: str | None = None
@@ -240,11 +235,12 @@ class Runner:
         self.arena = generate_arena(config.seed, config.arena_config)
         self.mission = Mission(self.arena)
         self.blackboard: Blackboard = PerfectBlackboard()
-        self.pose_source: PoseSource = GroundTruthPose()
+        self.pose_source: PoseSource = POSE_SOURCES[config.pose_source](
+            np.random.default_rng(self._seeds[3])
+        )
         self.world_scene = WorldScene(self.arena.structural_scene(), self.arena.marker_scene())
         self.marker_cam = MarkerCam(config.marker_config)
 
-        self._tof_decimation = _decimation(config.tof_rate_hz, config.tick_hz, "tof_rate_hz")
         self._marker_decimation = _decimation(
             config.marker_rate_hz, config.tick_hz, "marker_rate_hz"
         )
@@ -258,6 +254,7 @@ class Runner:
         )
 
         self.env = None
+        self._spent = False
         self.agents: list[AgentView] = []
         self.events: list[Event] = []
         self._mission_started_tick: int | None = None
@@ -300,11 +297,7 @@ class Runner:
     def build(self) -> "Runner":
         import irsim
 
-        tof_ring_module.install()
-
         world = self.arena.to_irsim_world(self.config.dt)
-        if self.config.sample_hz is not None:
-            world["sample_time"] = 1.0 / self.config.sample_hz
         world["collision_mode"] = (
             "stop" if self.config.collision_behaviour == "stop" else "unobstructed"
         )
@@ -316,7 +309,6 @@ class Runner:
                     "kinematics": {"name": KINEMATICS_NAME},
                     "shape": {"name": "circle", "radius": K.DRONE_RADIUS_M},
                     "state": self._start_positions().tolist(),
-                    "sensors": [{"name": tof_ring_module.SENSOR_TYPE}],
                 }
             ],
             "obstacle": self.arena.to_irsim_obstacles(),
@@ -348,9 +340,12 @@ class Runner:
 
         for i, robot in enumerate(self.env.robot_list):
             agent_id = f"drone_{i:02d}"
-            for sensor in robot.sensors:
-                sensor.config = replace(self.config.tof_config)
-                sensor.attach(self.world_scene, np.random.default_rng(sensor_seeds[i]))
+            ring = ToFRing(
+                config=replace(self.config.tof_config),
+                world_scene=self.world_scene,
+                rng=np.random.default_rng(sensor_seeds[i]),
+                object_id=robot.id,
+            )
             policy = policy_cls(
                 agent_id=agent_id,
                 config=self.config.policy_config,
@@ -363,6 +358,7 @@ class Runner:
                     agent_id=agent_id,
                     robot=robot,
                     policy=policy,
+                    ring=ring,
                 )
             )
         return self
@@ -370,12 +366,22 @@ class Runner:
     # -- the loop ------------------------------------------------------------------------------
 
     def run(self) -> RunResult:
+        if self._spent:
+            raise ConfigError(
+                "this Runner has already been used. Build a new one -- reusing it appended a "
+                "second set of agents holding references to the destroyed environment, and "
+                "silently dropped half the fleet from the result."
+            )
         if self.env is None:
             self.build()
+        self._spent = True
         started = time.perf_counter()
 
         if self._recorder is not None:
-            self._recorder.begin(self.config, self.arena, [a.agent_id for a in self.agents])
+            self._recorder.begin(
+                self.config, self.arena, [a.agent_id for a in self.agents],
+                zone_bearings_rad=self.agents[0].ring._zone_bearings,
+            )
 
         try:
             for tick in range(self.config.max_ticks):
@@ -445,6 +451,16 @@ class Runner:
 
         self.env.step(actions, action_id=[a.robot.id for a in self.agents])
 
+        # Sensors sample AFTER motion, so every scan sees the same post-move world and no
+        # agent is measured against a staler snapshot than another. ir-sim guarantees the same
+        # ordering for its own sensors; we do it explicitly because the ring is ours.
+        # A terminal drone stops sensing -- recording its frozen scan every tick afterwards
+        # would put stale readings in the log dressed as current data.
+        self.world_scene.refresh_drones(self.env.robot_list, tick)
+        for agent in self.agents:
+            if not agent.terminal:
+                self._sample_ring(agent)
+
         self._post_step(tick, sim_time + dt)
 
         if self._recorder is not None:
@@ -457,16 +473,8 @@ class Runner:
     # -- observation ---------------------------------------------------------------------------
 
     def _observe(self, agent: AgentView, tick: int, sim_time: float, peers) -> Observation:
-        sensor = agent.robot.sensors[0]
-        if tick % self._tof_decimation == 0 and not agent.terminal:
-            # On tick 0 no env.step() has happened, so no sensor has sampled yet. Sample it
-            # directly rather than handing the policy a placeholder for its first decision.
-            scan = sensor.latest_scan
-            agent.last_scan = scan if scan is not None else sensor.step(agent.state[0:3])
-            agent.last_scan_tick = tick
-        elif agent.last_scan is None:
-            agent.last_scan = sensor.step(agent.state[0:3])
-            agent.last_scan_tick = tick
+        if agent.last_scan is None:
+            self._sample_ring(agent)
 
         if tick % self._marker_decimation == 0 and not agent.terminal:
             agent.last_markers = self.marker_cam.detect(
@@ -487,8 +495,13 @@ class Runner:
             markers=agent.last_markers,
             peers=peers,
             arena=self.arena_info,
-            tof_stale_ticks=tick - agent.last_scan_tick,
             marker_stale_ticks=tick - agent.last_marker_tick,
+        )
+
+    def _sample_ring(self, agent: AgentView) -> None:
+        state = agent.state
+        agent.last_scan = agent.ring.step(
+            float(state[0, 0]), float(state[1, 0]), float(state[2, 0]), float(state[3, 0])
         )
 
     # -- command resolution ---------------------------------------------------------------------
@@ -550,15 +563,21 @@ class Runner:
                 continue
 
             if self._out_of_bounds(agent):
-                self._freeze(agent)
-                agent.lifecycle = Lifecycle.CRASHED
-                agent.crash_reason = "left the field"
-                self._emit(
-                    tick, sim_time, "crashed", agent.agent_id,
-                    {"reason": "left the field", "x": float(agent.xy[0]),
-                     "y": float(agent.xy[1])},
-                )
-                continue
+                if self.config.collision_behaviour == "stop":
+                    self._freeze(agent)
+                    agent.lifecycle = Lifecycle.CRASHED
+                    agent.crash_reason = "left the field"
+                    self._emit(
+                        tick, sim_time, "crashed", agent.agent_id,
+                        {"reason": "left the field", "x": float(agent.xy[0]),
+                         "y": float(agent.xy[1])},
+                    )
+                    continue
+                # 'unobstructed' means no crashes, full stop -- otherwise whether the control
+                # mode is actually a control depends on whether the policy under test happens
+                # to stay inside the field, which is not a property you can assume of a policy
+                # you are evaluating. Clamp to the boundary instead and keep flying.
+                self._clamp_to_field(agent)
 
             # Departures are *recorded*, never refused. The two-wave take-off rule is a
             # competition rule, so it is scored from these events after the fact rather than
@@ -571,7 +590,7 @@ class Runner:
                     self._mission_started_tick = tick
                     self._emit(
                         tick, sim_time, "mission_started", agent.agent_id,
-                        {"note": "first drone left the Start Area; the run clock starts here"},
+                        {"note": "first drone left the Start Area"},
                     )
 
         self.events.extend(self.mission.update(tick, sim_time, self._landed_positions()))
@@ -593,8 +612,11 @@ class Runner:
         agent.robot._velocity = np.zeros_like(agent.robot._velocity)
 
     def _collision_reason(self, agent: AgentView) -> str | None:
-        if self.config.collision_behaviour == "stop" and bool(getattr(agent.robot, "collision", False)):
-            other = getattr(agent.robot, "collision_obj", None)
+        # Plain attribute access: ir-sim is pinned, `collision` is a documented property, and
+        # a getattr default here would silently turn every collision off -- which is the single
+        # most consequential confound in any comparison this simulator produces.
+        if self.config.collision_behaviour == "stop" and bool(agent.robot.collision):
+            other = agent.robot.collision_obj
             name = getattr(other[0], "name", "obstacle") if other else "obstacle"
             return f"collided with {name}"
 
@@ -627,6 +649,15 @@ class Runner:
         return not (
             -margin <= x <= self.arena.width_m + margin
             and -margin <= y <= self.arena.depth_m + margin
+        )
+
+    def _clamp_to_field(self, agent: AgentView) -> None:
+        margin = K.DRONE_RADIUS_M
+        agent.robot._state[0, 0] = float(
+            np.clip(agent.xy[0], -margin, self.arena.width_m + margin)
+        )
+        agent.robot._state[1, 0] = float(
+            np.clip(agent.xy[1], -margin, self.arena.depth_m + margin)
         )
 
     def _landed_positions(self) -> dict[str, np.ndarray]:

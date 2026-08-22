@@ -46,8 +46,8 @@ import numpy as np
 from .api import Lifecycle
 from .errors import LogFormatError
 
-__all__ = ["SCHEMA_VERSION", "Recorder", "load_run", "score_from_log", "LIFECYCLE_CODES",
-           "COMMAND_CODES"]
+__all__ = ["SCHEMA_VERSION", "Recorder", "load_run", "score_from_log", "arena_from_log",
+           "LIFECYCLE_CODES", "COMMAND_CODES"]
 
 SCHEMA_VERSION = "safmc-sim/run/1"
 
@@ -70,18 +70,21 @@ def _jsonable(value: Any) -> Any:
         return value.tolist()
     if isinstance(value, (np.integer,)):
         return int(value)
-    if isinstance(value, (np.floating,)):
-        return float(value)
     if isinstance(value, (np.bool_,)):
         return bool(value)
-    if isinstance(value, float):
+    if isinstance(value, (float, np.floating)):
+        value = float(value)
         # json.dumps writes bare Infinity/NaN, which is NOT valid JSON: every strict parser
         # rejects it, including JSON.parse in the replay page, which then renders blank. The
         # log carries inf legitimately (a ToF no-return), so it has to be encoded, not banned.
         return value if math.isfinite(value) else None
     if value is None or isinstance(value, (str, int, bool)):
         return value
-    return repr(value)
+    raise LogFormatError(
+        f"cannot record a {type(value).__name__} in the log. Earlier this fell back to "
+        f"repr(), which embeds a memory address and silently broke the guarantee that two "
+        f"identical runs produce byte-identical logs."
+    )
 
 
 def _command_row(command) -> tuple[int, list[float]]:
@@ -99,14 +102,15 @@ def _command_row(command) -> tuple[int, list[float]]:
 class Recorder:
     """Writes one run to a directory."""
 
-    def __init__(self, directory: str | Path, record_tof: bool = True, tof_every: int = 1) -> None:
+    def __init__(self, directory: str | Path, record_tof: bool = True, tof_every: int = 1,
+                 overwrite: bool = False) -> None:
         self.directory = Path(directory)
+        self.overwrite = overwrite
         self.record_tof = record_tof
         self.tof_every = max(int(tof_every), 1)
         self._agents: list[str] = []
         self._times: list[float] = []
         self._pose: list[np.ndarray] = []
-        self._velocity: list[np.ndarray] = []
         self._lifecycle: list[np.ndarray] = []
         self._command_kind: list[np.ndarray] = []
         self._command_args: list[np.ndarray] = []
@@ -116,8 +120,12 @@ class Recorder:
 
     # -- lifecycle ---------------------------------------------------------------------------
 
-    def begin(self, config, arena, agent_ids: Sequence[str]) -> None:
+    def begin(self, config, arena, agent_ids: Sequence[str], zone_bearings_rad=None) -> None:
         self._agents = list(agent_ids)
+        self._zone_bearings = (
+            np.zeros(0) if zone_bearings_rad is None
+            else np.asarray(zone_bearings_rad, dtype=np.float64).reshape(-1)
+        )
         self._header = {
             "schema": SCHEMA_VERSION,
             "record": "header",
@@ -174,12 +182,6 @@ class Recorder:
                 dtype=np.float64,
             )
         )
-        self._velocity.append(
-            np.array(
-                [[float(a.state[4, 0]), float(a.state[5, 0])] for a in agents],
-                dtype=np.float32,
-            )
-        )
         self._lifecycle.append(
             np.array([LIFECYCLE_CODES[a.lifecycle] for a in agents], dtype=np.int8)
         )
@@ -191,11 +193,7 @@ class Recorder:
             self._tof_ticks.append(tick)
             self._tof.append(
                 np.array(
-                    [
-                        a.last_scan.collapsed_m if a.last_scan is not None
-                        else np.full(64, np.inf)
-                        for a in agents
-                    ],
+                    [a.last_scan.ranges_m.reshape(-1) for a in agents],
                     dtype=np.float32,
                 )
             )
@@ -203,6 +201,16 @@ class Recorder:
     def finish(self, result) -> str:
         if self._header is None:
             raise LogFormatError("finish() called before begin()")
+        if not self._pose:
+            raise LogFormatError(
+                "no ticks were recorded, so there is nothing to write. A log of nothing still "
+                "loads and still produces a complete-looking metrics row."
+            )
+        if (self.directory / "run.jsonl").exists() and not self.overwrite:
+            raise LogFormatError(
+                f"{self.directory} already holds a run. Refusing to overwrite it -- pick "
+                f"another directory, or pass overwrite=True if you meant to replace it."
+            )
         self.directory.mkdir(parents=True, exist_ok=True)
 
         with (self.directory / "run.jsonl").open("w") as handle:
@@ -234,7 +242,6 @@ class Recorder:
             self.directory / "states.npz",
             time_s=np.array(self._times, dtype=np.float64),
             pose=np.stack(self._pose) if self._pose else np.zeros((0, 0, 4), np.float64),
-            velocity=np.stack(self._velocity) if self._velocity else np.zeros((0, 0, 2), np.float32),
             lifecycle=np.stack(self._lifecycle) if self._lifecycle else np.zeros((0, 0), np.int8),
             command_kind=np.stack(self._command_kind) if self._command_kind else np.zeros((0, 0), np.int8),
             command_args=np.stack(self._command_args) if self._command_args else np.zeros((0, 0, 4), np.float32),
@@ -243,7 +250,10 @@ class Recorder:
             np.savez_compressed(
                 self.directory / "tof.npz",
                 ticks=np.array(self._tof_ticks, dtype=np.int32),
-                collapsed_m=np.stack(self._tof),
+                ranges_m=np.stack(self._tof),
+                # Constant for the run, but the replay needs them to draw a ray, and a log
+                # that cannot be drawn without the simulator is not self-contained.
+                zone_bearings_rad=self._zone_bearings,
             )
         return str(self.directory)
 
@@ -251,13 +261,11 @@ class Recorder:
 def _package_versions() -> dict[str, str]:
     import importlib.metadata as metadata
 
-    out = {}
-    for name in ("ir-sim", "numpy", "shapely", "matplotlib", "pyyaml"):
-        try:
-            out[name] = metadata.version(name)
-        except Exception:  # noqa: BLE001 -- a missing optional package is not a log failure
-            out[name] = "unknown"
-    return out
+    # All five are hard dependencies. If one is missing the environment is broken and the
+    # log's provenance -- the point of this block, given ir-sim==2.10.2 is a load-bearing
+    # pin -- would be a lie. Let it raise.
+    return {name: metadata.version(name)
+            for name in ("ir-sim", "numpy", "shapely", "matplotlib", "pyyaml")}
 
 
 # ------------------------------------------------------------------------------------------
@@ -310,19 +318,16 @@ def load_run(directory: str | Path) -> dict[str, Any]:
     return out
 
 
-def score_from_log(directory: str | Path):
-    """Recompute the score from the log alone. Must equal the online result exactly (R-MISS-8).
+def arena_from_log(header: Mapping[str, Any]):
+    """Rebuild the arena from the recorded geometry, not from the seed.
 
-    Rebuilds the arena from the recorded geometry rather than regenerating it from the seed --
-    otherwise this would test the generator's determinism rather than the scoring, and would
-    silently pass if the recorded arena and the simulated one had diverged.
+    Regenerating from the seed would test the generator's determinism rather than reading what
+    was actually simulated, and would hide a divergence between the two.
     """
-    from .mission import Mission
     from .world.arena import ArenaConfig, ArenaSpec, Pillar, Target, Wall
 
-    run = load_run(directory)
-    spec = run["header"]["arena"]
-    arena = ArenaSpec(
+    spec = header["arena"]
+    return ArenaSpec(
         seed=spec["seed"],
         width_m=spec["width_m"],
         depth_m=spec["depth_m"],
@@ -334,6 +339,19 @@ def score_from_log(directory: str | Path):
         targets=tuple(Target(**t) for t in spec["targets"]),
         config=ArenaConfig(),
     )
+
+
+def score_from_log(directory: str | Path):
+    """Recompute the score from the log alone. Must equal the online result exactly (R-MISS-8).
+
+    Rebuilds the arena from the recorded geometry rather than regenerating it from the seed --
+    otherwise this would test the generator's determinism rather than the scoring, and would
+    silently pass if the recorded arena and the simulated one had diverged.
+    """
+    from .mission import Mission
+
+    run = load_run(directory)
+    arena = arena_from_log(run["header"])
     mission = Mission(arena)
 
     states = run.get("states")

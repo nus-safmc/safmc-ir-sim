@@ -27,11 +27,7 @@ from ..constants import DRONE_RADIUS_M
 from ..errors import ConfigError
 from .raycast import RayScene
 
-__all__ = ["WorldScene", "DRONE_BODY_HALF_HEIGHT_M"]
-
-# Vertical half-extent of a drone body for occlusion purposes. A quadrotor is a thin disc;
-# this is what stops a drone at 0.8 m from occluding a ray cast at 0.5 m.
-DRONE_BODY_HALF_HEIGHT_M = 0.05
+__all__ = ["WorldScene"]
 
 
 class WorldScene:
@@ -105,20 +101,25 @@ class WorldScene:
 
         ids = np.empty(n, dtype=int)
         circles = np.empty((n, 3), dtype=float)
-        z_centre = np.empty(n, dtype=float)
         for i, robot in enumerate(robots):
             state = robot.state
             ids[i] = robot.id
             circles[i, 0] = float(state[0, 0])
             circles[i, 1] = float(state[1, 0])
             circles[i, 2] = self._drone_radius_m
-            # Row 3 is altitude in our Quad25D state. A robot that is not running Quad25D has
-            # no altitude, which configure_robots() has already made impossible.
-            z_centre[i] = float(state[3, 0]) if state.shape[0] > 3 else 0.0
 
         self._drone_ids = ids
+        # Drones occlude each other at EVERY altitude, deliberately.
+        #
+        # An earlier version gave each drone a +/-5 cm vertical band, so a drone at 0.8 m did
+        # not occlude a ray cast at 0.5 m. That was internally consistent and externally a
+        # trap: collision is ir-sim's and strictly 2D, so two drones 0.7 m apart vertically
+        # were mutually invisible on the ring and still collided. A new user reasonably read
+        # altitude as a deconfliction axis and lost most of a fleet to it.
+        #
+        # What can kill you must be what you can see. Since collision is 2D, sensing of other
+        # drones is 2D too. Markers keep their height gate because their collision is ours and
+        # is height-gated to match.
         self._drone_scene = RayScene(
-            circles=circles,
-            circle_heights=z_centre + DRONE_BODY_HALF_HEIGHT_M,
-            circle_z_min=z_centre - DRONE_BODY_HALF_HEIGHT_M,
+            circles=circles, circle_heights=np.full(n, np.inf)
         )

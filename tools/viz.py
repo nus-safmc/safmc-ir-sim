@@ -45,14 +45,15 @@ def build_payload(directory: Path, tof_every: int = 10, pose_every: int = 1) -> 
     kinds = states["command_kind"][::pose_every]
 
     tof = run.get("tof")
-    tof_frames, tof_ticks = [], []
+    tof_frames, tof_ticks, zone_bearings = [], [], []
     if tof is not None:
         stride = max(tof_every // pose_every, 1)
-        sampled = tof["collapsed_m"][::stride]
+        sampled = tof["ranges_m"][::stride]
         tof_ticks = (tof["ticks"][::stride] // pose_every).astype(int).tolist()
         # inf does not survive JSON; -1 is the agreed "no return" sentinel on the JS side.
         clean = np.where(np.isfinite(sampled), sampled, -1.0)
         tof_frames = _round(clean, 2)
+        zone_bearings = _round(np.asarray(tof["zone_bearings_rad"]).reshape(-1), 4)
 
     return {
         "arena": header["arena"],
@@ -72,6 +73,7 @@ def build_payload(directory: Path, tof_every: int = 10, pose_every: int = 1) -> 
         "events": events,
         "tofTicks": tof_ticks,
         "tof": tof_frames,
+        "zoneBearings": zone_bearings,
     }
 
 
@@ -266,11 +268,11 @@ function draw(f){
   if(scan){
     for(let i=0;i<N;i++){
       const name=D.lifecycleNames[L[i]];
-      if(name==='IDLE'||name==='CRASHED') continue;
+      if(name!=='ACTIVE') continue;
       const [x,y,,th]=P[i], bins=scan[i]; if(!bins) continue;
       for(let b=0;b<bins.length;b++){
         const r=bins[b]; if(r<0) continue;              // -1 is the no-return sentinel
-        const bearing = th - (b+0.5)*(2*Math.PI/bins.length);  // bins are clockwise
+        const bearing = th + D.zoneBearings[b];         // body-frame, CCW from the nose
         tofLayer.appendChild(el('line',{x1:sx(x),y1:sy(y),
           x2:sx(x+r*Math.cos(bearing)),y2:sy(y+r*Math.sin(bearing))}));
       }

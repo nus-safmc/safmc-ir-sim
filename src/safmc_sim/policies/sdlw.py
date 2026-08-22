@@ -55,6 +55,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..api import Command, Observation, Policy, Velocity, register_policy
+from ..errors import ConfigError
 from ..frames import wrap_pi
 from ..toolbox import body_to_world, climb, ring_quadrants
 
@@ -81,7 +82,7 @@ class SDLW(Policy):
         self.cruise_alt_m = float(c.get("cruise_alt_m", 0.5))
         self.variant = str(c.get("variant", "sdlw")).lower()
         if self.variant not in ("sdlw", "uhlw"):
-            raise ValueError(f"variant must be 'sdlw' or 'uhlw', got {self.variant!r}")
+            raise ConfigError(f"variant must be 'sdlw' or 'uhlw', got {self.variant!r}")
 
         self.max_vel = float(c.get("max_vel", 0.5))
         self.max_yaw = float(c.get("max_yaw", 0.5))
@@ -104,7 +105,7 @@ class SDLW(Policy):
             int(np.ceil(self.d_min)), int(np.floor(self.d_max)) + 1, dtype=float
         )
         if not len(self._support):
-            raise ValueError(
+            raise ConfigError(
                 f"empty Levy support: ceil({self.d_min}) > floor({self.d_max})"
             )
         weights = self._support ** (-self.alpha)

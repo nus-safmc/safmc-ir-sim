@@ -64,6 +64,11 @@ def ring_quadrants(obs: Observation) -> dict[str, float]:
     """
     ranges = obs.tof.ranges_m
     n = ranges.shape[0]
+    if n < 4:
+        raise ValueError(
+            f"ring has {n} rangers; quadrants need at least 4. With fewer, `n // 4` is 0 and "
+            f"all four directions silently return the same ranger."
+        )
     quarter = n // 4
     return {
         "front": float(np.min(ranges[0])),

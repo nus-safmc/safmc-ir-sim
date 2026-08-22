@@ -19,13 +19,18 @@ def test_wrap_pi_uses_half_open_interval():
     assert wrap_pi(wrap_pi(-np.pi)) == pytest.approx(wrap_pi(-np.pi))
 
 
-@pytest.mark.parametrize("angle", np.linspace(-20.0, 20.0, 401))
-def test_wrap_pi_in_range_and_congruent(angle):
-    w = wrap_pi(angle)
-    assert -np.pi < w <= np.pi + 1e-12
-    assert np.isclose((w - angle) % (2 * np.pi), 0.0, atol=1e-9) or np.isclose(
-        (w - angle) % (2 * np.pi), 2 * np.pi, atol=1e-9
-    )
+def test_wrap_pi_in_range_and_congruent():
+    """One vectorised assertion over the same 401 angles.
+
+    This was a `parametrize` producing 401 separate test cases, which inflated the suite's
+    headline count by 68% and told you nothing a single array assertion does not. The function
+    under test is vectorised; the test should be too.
+    """
+    angles = np.linspace(-20.0, 20.0, 401)
+    wrapped = wrap_pi(angles)
+    assert np.all(wrapped > -np.pi) and np.all(wrapped <= np.pi + 1e-12)
+    residual = (wrapped - angles) % (2 * np.pi)
+    assert np.all(np.isclose(residual, 0.0, atol=1e-9) | np.isclose(residual, 2 * np.pi, atol=1e-9))
 
 
 def test_cardinal_headings_match_the_firmware_convention():

@@ -67,8 +67,8 @@ def test_observation_exposes_no_route_to_ground_truth():
     from safmc_sim.sensors.tof_ring import ToFScan
 
     scan = ToFScan(
-        ranges_m=np.full((8, 8), np.inf), status=np.full((8, 8), 255, np.uint8),
-        collapsed_m=np.full(64, np.inf), zone_bearings_rad=np.zeros((8, 8)),
+        ranges_m=np.full((8, 8), np.inf),
+        zone_bearings_rad=np.zeros((8, 8)),
         ranger_bearings_rad=np.zeros(8),
     )
     obs = Observation(

@@ -23,7 +23,7 @@ import numpy as np
 from .api import Pose
 from .frames import wrap_pi
 
-__all__ = ["PoseSource", "GroundTruthPose", "NoisyPose"]
+__all__ = ["PoseSource", "GroundTruthPose", "POSE_SOURCES"]
 
 
 class PoseSource(ABC):
@@ -45,7 +45,7 @@ class PoseSource(ABC):
 
 
 class GroundTruthPose(PoseSource):
-    """Exact pose. The v0.1 default."""
+    """Exact pose. The only implementation today."""
 
     def pose_of(self, agent_id: str, state: np.ndarray, tick: int) -> Pose:
         return Pose(
@@ -56,47 +56,7 @@ class GroundTruthPose(PoseSource):
         )
 
 
-class NoisyPose(PoseSource):
-    """A random-walk drift model, provided as the worked example of the seam.
-
-    Deliberately simple and deliberately **not** the default: it is a placeholder for a real
-    odometry model, not a claim about the airframe. Drift accumulates per agent as a random
-    walk in position and heading, which is the qualitative behaviour of integrating optical
-    flow without loop closure -- unbounded, and worse the longer you fly.
-
-    Do not quote numbers from this without measuring the real drift first (see A-2, A-4).
-    """
-
-    def __init__(
-        self,
-        rng: np.random.Generator,
-        position_drift_ms: float = 0.01,
-        heading_drift_rads: float = 0.002,
-        tick_s: float = 0.05,
-    ) -> None:
-        self._rng = rng
-        self._pos_sigma = position_drift_ms * np.sqrt(tick_s)
-        self._yaw_sigma = heading_drift_rads * np.sqrt(tick_s)
-        self._drift: dict[str, np.ndarray] = {}
-
-    def reset(self) -> None:
-        self._drift.clear()
-
-    def velocity_of(self, agent_id, state, tick):
-        noise = self._rng.normal(0.0, self._pos_sigma, 2)
-        return (float(state[4, 0]) + noise[0], float(state[5, 0]) + noise[1])
-
-    def pose_of(self, agent_id: str, state: np.ndarray, tick: int) -> Pose:
-        drift = self._drift.get(agent_id)
-        if drift is None:
-            drift = np.zeros(3)
-            self._drift[agent_id] = drift
-        drift += self._rng.normal(
-            0.0, [self._pos_sigma, self._pos_sigma, self._yaw_sigma]
-        )
-        return Pose(
-            x=float(state[0, 0]) + drift[0],
-            y=float(state[1, 0]) + drift[1],
-            z=float(state[3, 0]),
-            theta=wrap_pi(float(state[2, 0]) + drift[2]),
-        )
+# Selected by name from RunConfig, so the choice lands in the recorded log header. Adding a
+# drifting implementation means writing one class and adding one line here -- that is the
+# whole of the seam ADR-0003 promises.
+POSE_SOURCES = {"ground_truth": lambda rng: GroundTruthPose()}
