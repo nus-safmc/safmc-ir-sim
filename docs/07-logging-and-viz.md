@@ -24,11 +24,18 @@ and does not depend on the generator producing the same arena again.
 ```python
 from safmc_sim.recorder import load_run, score_from_log
 run = load_run("runs/sdlw_s3")
-run["states"]["pose"]        # (T, N, 4) -> x, y, z, theta
-run["states"]["lifecycle"]   # (T, N) int codes
-run["tof"]["collapsed_m"]    # (T, N, 64)
-score_from_log("runs/sdlw_s3")   # recomputed from the log alone
+run["states"]["pose"]              # (T, N, 4) -> x, y, z, theta
+run["states"]["lifecycle"]         # (T, N) int codes
+run["tof"]["ranges_m"]             # (T, N, 64) flattened (ranger, zone), CCW from the nose
+run["tof"]["zone_bearings_rad"]    # (64,) the bearing of each column. Use it -- see below.
+score_from_log("runs/sdlw_s3")     # recomputed from the log alone
 ```
+
+> **`ranges_m` columns are not firmware bin indices.** They are `(ranger, zone)` order,
+> anticlockwise from the nose; the firmware's `tof_scan_collapsed_t` holds the same 64 values
+> indexed by absolute *clockwise* bearing. The two are a permutation of each other. Always map
+> through `zone_bearings_rad`, stored in the same file — see
+> [06-sensors.md](06-sensors.md#if-you-need-firmware-index-order).
 
 Two properties the format is built for:
 

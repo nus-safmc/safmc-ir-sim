@@ -388,7 +388,13 @@ def test_an_aborted_run_does_not_leak_figures():
 
 
 def test_published_and_hardware_defaults_have_regression_barriers():
-    """R-TIME-1, R-DRONE-6/7/8, R-MISS-5. Each was correct but nothing would catch a change."""
+    """R-TIME-1, R-DRONE-7/8, R-MISS-5. Each was correct but nothing would catch a change.
+
+    ``CRUISE_ALT_M`` is guarded here too, but is no longer a requirement: R-DRONE-6 mandated a
+    0.5 m default cruise altitude and was withdrawn in ``f7a2283`` because altitude holding is
+    guidance, and guidance belongs to the policy. The constant survives as the firmware value
+    (``wifi_task.c:29``) that a policy may want to fly to, so a silent change still matters.
+    """
     assert K.DEFAULT_TICK_HZ == K.NAV_RATE_HZ == 20.0
     assert RunConfig().tick_hz == 20.0 and RunConfig().dt == 0.05
     assert K.CRUISE_ALT_M == 0.5

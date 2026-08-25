@@ -28,6 +28,10 @@ decide whether a strategy works.
 - [FIDELITY.md](FIDELITY.md) — every known divergence from reality, and every assumption.
 - [CHECKPOINTS.md](CHECKPOINTS.md) — what was built at each commit, and what was verified.
 - [adr/](adr/) — decision records: what we chose, what we rejected, and why.
+- [AUDIT-v0.1.md](AUDIT-v0.1.md) — the adversarial spec audit, and the defects it forced.
+- [AUDIT-v0.1.1-docs-code-divergence.md](AUDIT-v0.1.1-docs-code-divergence.md) — external review
+  of the merged PR against the booklet and the firmware. No behavioural defects; four documents
+  describing a removed API.
 
 ## Provenance
 

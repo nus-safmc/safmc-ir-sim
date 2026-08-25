@@ -165,11 +165,19 @@ rules require a rescuing drone to remain "until the end of the mission"
 
 ## 7. Sensors
 
-**R-SENS-1** The ToF ring MUST be a **single** ir-sim sensor object per drone that computes all
-rangers in one vectorised numpy raycast. It MUST NOT be implemented as N instances of ir-sim's
-`Lidar2D`. Justification: `Lidar2D` cost is dominated by fixed per-sensor GEOS overhead, measured
-at 14-31x a vectorised numpy raycaster for sparse beams [src: recon benchmark], and its
-`angle_list` is a contiguous fan that cannot express a ring of separated rangers.
+**R-SENS-1** *(amended in `50e2643`)* The ToF ring MUST compute all rangers in one vectorised
+numpy raycast, and MUST NOT be implemented as N instances of ir-sim's `Lidar2D`. Justification:
+`Lidar2D` cost is dominated by fixed per-sensor GEOS overhead, measured at 14-31x a vectorised
+numpy raycaster for sparse beams [src: recon benchmark], and its `angle_list` is a contiguous fan
+that cannot express a ring of separated rangers.
+
+> The original wording required the ring to be *an ir-sim sensor object*. It is deliberately no
+> longer one: registering it needed a monkeypatch of `SensorFactory.create_sensor` (ir-sim has no
+> sensor registry) and dragged in a dead plotting path, a walk to the parent for altitude, and
+> arithmetic to recover the tick from ir-sim's clock — all of which the runner already has. The
+> performance requirement, which is the part that mattered, is unchanged and still met.
+> `tests/test_audit_regressions.py::test_each_drone_carries_exactly_one_ring_owned_by_the_runner`
+> asserts the current design.
 
 **R-SENS-2** The default ring MUST reproduce the flown hardware: **8 rangers at 45 degree spacing**
 covering 360 degrees, each with a 45 degree horizontal field of view sampled at **8 zones**
@@ -180,15 +188,33 @@ covering 360 degrees, each with a 45 degree horizontal field of view sampled at 
 `TOF_MAX_VALID_MM = 3000` [src: esp-everything/main/tof_task.h:16-18]. The physical sensor
 maximum of 4.0 m MUST be configurable separately from the firmware's gate.
 
-**R-SENS-4** Each zone MUST report `(range_m, status)` where status uses the VL53L5CX encoding
-the firmware relies on: `5` = valid, `9` = valid-weak, `255` = no return
-[src: esp-everything/main/tof_task.c:266-277]. A zone beyond the gate MUST report status `255`
-and range `inf`, never a fabricated number.
+**R-SENS-4** *(withdrawn in `50e2643`)* A zone with no valid return MUST report `inf`, never a
+fabricated number such as the gate limit. "Nothing there" and "a surface at exactly max range"
+are different facts and MUST stay distinguishable.
 
-**R-SENS-5** The sensor MUST also expose the firmware's derived product: a **64-bin collapsed
-scan**, index 0 straight ahead, clockwise, 5.625 degrees per bin, min-pooled, `inf` for empty
-bins. This is the only form the real navigation stack consumes
-[src: esp-everything/main/tof_task.h:99-103, tof_task.c:243-293].
+> The original wording also required a per-zone `status` field carrying the VL53L5CX encoding
+> (`5` valid, `9` valid-weak, `255` no return)
+> [src: esp-everything/main/tof_task.c:266-277]. It was dropped: the simulator only ever emitted
+> `5` or `255`, and both are recoverable from the range alone (`isfinite` ⇔ `5`). It never
+> modelled the firmware's *third* case — an unreliable return substituted with a hard-coded
+> 0.40 m — so the field carried no information a policy could not derive. That remaining gap is
+> tracked as divergence **F-3** in [FIDELITY.md](FIDELITY.md), not as a spec requirement.
+
+**R-SENS-5** *(withdrawn in `50e2643`)* No requirement. The ring exposes `ranges_m` shaped
+`(n_rangers, zones_per_ranger)` plus the matching `zone_bearings_rad`.
+
+> The original wording required a second, "collapsed" 64-bin view indexed by absolute clockwise
+> bearing, mirroring the firmware's `tof_scan_collapsed_t`
+> [src: esp-everything/main/tof_task.h:99-103, tof_task.c:243-293]. It was withdrawn because the
+> two are a **permutation of each other, carrying identical information**: with the flown
+> geometry the 64 zones map onto the 64 bins one-to-one, so the firmware's min-pool pools
+> nothing and the collapsed scan is `ranges_m` reordered. Verified numerically — the simulator's
+> zone bearings match the firmware's `tof_task.c:258` formula to **0.0e+00 degrees**, and both
+> tile bins 0-63 with no collisions and no gaps.
+>
+> A policy that wants firmware index order can reconstruct it in four lines from
+> `zone_bearings_rad`; see [docs/06-sensors.md](06-sensors.md). Do **not** assume `tof.npz`
+> columns are firmware bin indices — they are not.
 
 **R-SENS-6** Raycasting MUST be **height-gated**: a ray at drone altitude `z` is occluded by an
 obstacle only if `obstacle.height_m > z`. This is the operative 2.5D effect — mission markers are

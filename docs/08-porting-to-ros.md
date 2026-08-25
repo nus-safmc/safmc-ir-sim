@@ -112,8 +112,12 @@ tick will work here and fail there. Design against the budget above.
 ## What a port does not have to reimplement
 
 - **Frames** — one tested function each way.
-- **The ToF product** — `collapsed_m` is already `tof_scan_collapsed_t`, same 64 bins, same
-  clockwise ordering, same `inf` semantics.
+- **The ToF product** — the same 64 values as `tof_scan_collapsed_t`, and the same `inf`
+  semantics, but **not in the same order**. `ranges_m` is `(ranger, zone)`, anticlockwise from
+  the nose; the firmware indexes by absolute *clockwise* bearing. They are a permutation of each
+  other, so the conversion is four lines of reindexing off `zone_bearings_rad` — but it is not a
+  no-op, and assuming it is gives you a rotated scan that will look plausible and be wrong. The
+  recipe is in [06-sensors.md](06-sensors.md#if-you-need-firmware-index-order).
 - **Scoring** — `mission.py` is pure geometry over landed positions; it runs anywhere, and is
   useful on real flight logs for asking "what would that run have scored".
 - **The log format** — `recorder.py` writes plain JSONL and NPZ. A ROS 2 node writing the same

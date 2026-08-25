@@ -16,8 +16,15 @@ Layout, per run directory:
     Dense per-tick arrays: time, pose, velocity, lifecycle, and the command each agent was
     issued, with its arguments.
 ``tof.npz``
-    The 64-bin collapsed scans. Separate because it dominates size and is only needed when
-    debugging sensing.
+    Per-tick ring ranges, shaped ``(ticks, agents, n_rangers * zones_per_ranger)`` -- the
+    flattened ``ToFScan.ranges_m``, in ``(ranger, zone)`` order, anticlockwise from the nose.
+    ``zone_bearings_rad`` is stored alongside and is the only safe way to map a column back
+    to a direction.
+
+    Not to be confused with the firmware's ``tof_scan_collapsed_t``, which holds the same 64
+    values indexed by *absolute clockwise bearing*. The two are a permutation of each other,
+    not the same array -- see ``docs/06-sensors.md``. Separate file because it dominates size
+    and is only needed when debugging sensing.
 
 Two properties the format is built for:
 

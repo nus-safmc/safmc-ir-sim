@@ -729,14 +729,14 @@ def _validate_reachability(spec: ArenaSpec, drone_radius_m: float) -> None:
 
 
 def _validate_gaps(spec: ArenaSpec) -> None:
-    min_gap_wall = spec.config.min_gap_wall_m
-    min_gap_pillar = spec.config.min_gap_pillar_m
     """Minimum gaps, checked only between obstacles that were placed independently.
 
     Walls belonging to one structure -- the field boundary, or the Unknown Search Area room --
     meet at corners by design, so their mutual distance is zero and the rule does not apply to
     them. The rule is about navigable gaps between separate obstacles.
     """
+    min_gap_wall = spec.config.min_gap_wall_m
+    min_gap_pillar = spec.config.min_gap_pillar_m
     groups: dict[str, list[Polygon]] = {}
     for wall in spec.walls:
         groups.setdefault(wall.kind, []).append(wall.polygon())

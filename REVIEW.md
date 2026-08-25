@@ -14,10 +14,13 @@ In this order. Each step should either satisfy you or produce a question.
 **1. Does it run?**
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest tests -q        # expect: 193 passed, ~37 s
-.venv/bin/python examples/01_hello_policy.py
-.venv/bin/safmc-run replay runs/hello      # open runs/hello/replay.html
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+
+python -m pytest tests -q        # expect: 193 passed (~37 s Linux, 2-6 min Windows)
+python examples/01_hello_policy.py
+safmc-run replay runs/hello      # open runs/hello/replay.html
 ```
 
 Watch the replay. You should see drones fan out, sweep, and a couple land on markers. If that
@@ -92,7 +95,10 @@ purpose and check the test fails. If a test matters to you, try that.
 ## 4. What four blind reviewers found
 
 I ran three blind code reviewers and one junior-dev agent who tried to use the thing from the
-README. Full context is in [docs/AUDIT-v0.1.md](docs/AUDIT-v0.1.md) for the earlier spec audit.
+README. Full context is in [docs/AUDIT-v0.1.md](docs/AUDIT-v0.1.md) for the earlier spec audit,
+and [docs/AUDIT-v0.1.1-docs-code-divergence.md](docs/AUDIT-v0.1.1-docs-code-divergence.md) for the
+external review of the merged PR — which found no behavioural defects, but did find that this
+round's own `collapsed_m` removal left four documents describing an API that no longer existed.
 The recent round found, and I fixed:
 
 - **You could not run your own policy.** The docs taught a command that could not work.
@@ -131,7 +137,9 @@ targets did you find" is what a strategy comparison needs. Your call — you kno
 **C. Is `cruise speed` a target or a cap?** The spec says 0.45 m/s cruise; the code binds it to
 a speed *limit*. Those are different models and I could not tell which you meant.
 
-**D. Docs volume.** ~2,900 lines of markdown against ~2,600 of simulator. Some of it is recon
+**D. Docs volume.** 3,083 lines of markdown against 4,838 of simulator — a ratio of 0.64:1.
+(An earlier draft of this section said "~2,600 of simulator", which understated the code by 86%
+and made the doc burden look worse than it is. Measured figures.) Some of it is recon
 digest (the competition, the hardware, ir-sim's landmines) that is reference material rather
 than instructions. Tell me if any of it is noise for your team.
 
