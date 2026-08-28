@@ -63,7 +63,9 @@ TOF_SENSOR_COUNT = 8            # tof_task.h:10
 TOF_ZONES_PER_SENSOR = 8        # tof_task.c:109, VL53L5CX_RESOLUTION_8X8, one row used
 TOF_SENSOR_SPACING_RAD = np.deg2rad(45.0)  # tof_task.c:183, 8 x 45 deg = 360 deg
 TOF_ZONE_WIDTH_RAD = np.deg2rad(45.0 / 8.0)  # 5.625 deg per column, tof_task.c:258
-TOF_MOUNT_RADIUS_M = 0.040      # safmc-ros/safmc_mapping/urdf/robot.urdf, cardinal sensors
+TOF_MOUNT_RADIUS_M = 0.040      # urdf robot.urdf, the four CARDINAL sensors (tof_n/e/s/w)
+TOF_MOUNT_RADIUS_DIAGONAL_M = 0.034  # urdf: the diagonals sit at (0.02404, 0.02404), i.e.
+                                # 34.0 mm -- the PCB is rectangular, so they are closer in
 TOF_MIN_VALID_M = 0.050         # tof_task.h:18, TOF_MIN_VALID_MM = 50
 TOF_MAX_VALID_M = 3.000         # tof_task.h:17, TOF_MAX_VALID_MM = 3000 (firmware gate)
 TOF_SENSOR_MAX_RANGE_M = 4.000  # VL53L5CX physical maximum, above the firmware gate

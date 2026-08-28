@@ -20,6 +20,7 @@ import numpy as np
 
 from ..constants import (
     TOF_MAX_VALID_M,
+    TOF_MOUNT_RADIUS_DIAGONAL_M,
     TOF_MIN_VALID_M,
     TOF_MOUNT_RADIUS_M,
     TOF_SENSOR_COUNT,
@@ -48,6 +49,11 @@ class ToFConfig:
     spacing_rad: float = TOF_SENSOR_SPACING_RAD
     zone_width_rad: float = TOF_ZONE_WIDTH_RAD
     mount_radius_m: float = TOF_MOUNT_RADIUS_M
+    mount_radius_diagonal_m: float = TOF_MOUNT_RADIUS_DIAGONAL_M
+    """The ring is not a circle. In the URDF the four cardinal sensors sit 40 mm out and the
+    four diagonals only 34 mm, because the PCB is rectangular. A single radius put the
+    diagonals 6 mm too far out -- far too small to change any result at a 3 m gate, but the
+    URDF is the source of truth and it is cheaper to match it than to explain why we don't."""
     front_index: int = 0
     """Which ranger points forward. Set per airframe via TOF_FRONT_SENSOR_IDX in menuconfig."""
 
@@ -131,6 +137,19 @@ def _ranger_bearings(cfg: ToFConfig) -> np.ndarray:
     return wrap_pi((idx - cfg.front_index) * cfg.spacing_rad)
 
 
+def _mount_radii(cfg: ToFConfig) -> np.ndarray:
+    """How far out each ranger sits. Cardinals and diagonals differ; see the URDF.
+
+    Only meaningful for the real 8-sensor ring, where rangers alternate cardinal, diagonal,
+    cardinal... Any other count gets a uniform radius, because there is no hardware to be
+    faithful to.
+    """
+    if cfg.n_rangers != 8:
+        return np.full(cfg.n_rangers, cfg.mount_radius_m)
+    is_diagonal = (np.arange(8) - cfg.front_index) % 2 == 1
+    return np.where(is_diagonal, cfg.mount_radius_diagonal_m, cfg.mount_radius_m)
+
+
 def _zone_offsets(cfg: ToFConfig) -> np.ndarray:
     """Per-column offsets from a ranger's axis, CCW.
 
@@ -152,6 +171,7 @@ class ToFRing:
         self._object_id = object_id
 
         self._ranger_bearings = _ranger_bearings(config)
+        self._mount_radii = _mount_radii(config)
         self._zone_offsets = _zone_offsets(config)
         # (n_rangers, zones) body-frame bearing of every zone. Constant for the run.
         self._zone_bearings = wrap_pi(
@@ -170,8 +190,8 @@ class ToFRing:
         # Each ranger sits on the mount circle, pointing radially outward.
         origins = np.repeat(
             np.stack(
-                (x + cfg.mount_radius_m * np.cos(world_ranger),
-                 y + cfg.mount_radius_m * np.sin(world_ranger)),
+                (x + self._mount_radii * np.cos(world_ranger),
+                 y + self._mount_radii * np.sin(world_ranger)),
                 axis=1,
             ),
             cfg.zones_per_ranger,
