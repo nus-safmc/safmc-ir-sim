@@ -20,17 +20,24 @@ detection and the competition's scoring — the things that decide whether a str
 ## Quick start
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python examples/01_hello_policy.py
-.venv/bin/safmc-run replay runs/hello        # writes runs/hello/replay.html — open it
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+
+python examples/01_hello_policy.py
+safmc-run replay runs/hello      # writes runs/hello/replay.html — open it
 ```
+
+Every command below assumes that activated environment. If you would rather not activate, prefix
+with `.venv/bin/` on macOS and Linux, or `.venv\Scripts\` on Windows — the layout differs by
+platform, which is why these examples activate instead.
 
 Now run your own. Your file registers itself when imported, and nothing imports it unless you
 say so — that is what `--import` is for:
 
 ```bash
-.venv/bin/safmc-run run   --import my_search.py --policy my_search --drones 12 --duration 600
-.venv/bin/safmc-run sweep --import my_search.py --policy my_search sdlw --seeds 0-9
+safmc-run run   --import my_search.py --policy my_search --drones 12 --duration 600
+safmc-run sweep --import my_search.py --policy my_search sdlw --seeds 0-9
 ```
 
 ## Writing a strategy
@@ -100,8 +107,11 @@ published data, is in **[docs/FIDELITY.md](docs/FIDELITY.md)**. Read it before q
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q      # 193 tests, ~37 s
+python -m pytest tests -q      # 193 tests
 ```
+
+Runtime is very platform-sensitive: ~37 s on the Linux machine it was developed on, but 2-6
+minutes on Windows and variable between runs. Two integration tests dominate either way.
 
 The raycaster is checked against two independently derived analytic references to 1e-9 m. Two
 identical runs produce logs that differ only in their timestamp block. The score recomputed

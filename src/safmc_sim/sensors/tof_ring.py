@@ -14,7 +14,7 @@ smaller and honest about who is in charge.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -25,11 +25,8 @@ from ..constants import (
     TOF_SENSOR_COUNT,
     TOF_SENSOR_MAX_RANGE_M,
     TOF_SENSOR_SPACING_RAD,
-    TOF_STATUS_NO_RETURN,
-    TOF_STATUS_VALID,
     TOF_ZONE_WIDTH_RAD,
     TOF_ZONES_PER_SENSOR,
-    TOF_COLLAPSED_BINS,
 )
 from ..errors import ConfigError
 from ..frames import wrap_pi

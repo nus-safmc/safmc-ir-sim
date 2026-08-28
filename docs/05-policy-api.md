@@ -61,7 +61,7 @@ Practical consequences you will notice immediately:
 | `pose` | `.x .y .z .theta` in ARENA metres/radians. **Ground truth in v0.1** |
 | `velocity_xy` | `(vx, vy)` in the ARENA frame |
 | `lifecycle` | `ACTIVE`, `LANDED` or `CRASHED`. Both terminal states are permanent |
-| `tof` | The ring. `.ranges_m` is `(8, 8)`, `.collapsed_m` is the 64-bin scan, `.min_range_m` is the nearest return anywhere |
+| `tof` | The ring. `.ranges_m` is `(8, 8)` metres — `inf` where there was no return. `.zone_bearings_rad` and `.ranger_bearings_rad` give the matching body-frame directions. `.min_range_m` is the nearest return anywhere |
 | `markers` | Tuple of `(marker_id, kind, range_m, bearing_rad)` currently visible |
 | `peers` | The blackboard, as of the **start** of this tick, keyed by agent id |
 | `arena` | Published field dimensions only — width, depth, ceiling, start-area depth, run duration |

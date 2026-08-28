@@ -1,6 +1,6 @@
 """The smallest useful policy, written entirely in primitives.
 
-Run:  .venv/bin/python examples/01_hello_policy.py
+Run:  python examples/01_hello_policy.py
 """
 
 import numpy as np
@@ -66,4 +66,4 @@ if __name__ == "__main__":
     print(f"landed     {len(result.landed)}   crashed {len(result.crashed)}")
     print(f"sim time   {result.sim_time_s:.0f}s in {result.wall_time_s:.1f}s wall clock")
     print(f"log        {result.log_path}")
-    print("\nreplay:    .venv/bin/safmc-run replay runs/hello")
+    print("\nreplay:    safmc-run replay runs/hello")

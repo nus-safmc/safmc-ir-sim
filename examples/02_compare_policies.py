@@ -7,7 +7,7 @@ a draw from a distribution.
 `sdlw` is the only policy that ships. Import your own alongside it -- that is the comparison
 this simulator exists to make.
 
-Run:  .venv/bin/python examples/02_compare_policies.py
+Run:  python examples/02_compare_policies.py
 """
 
 from safmc_sim import policies  # noqa: F401 -- registers sdlw

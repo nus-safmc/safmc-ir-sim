@@ -336,7 +336,7 @@ document.getElementById('subtitle').textContent =
 document.getElementById('arenaNote').textContent =
   `Dashed circles are the 1 m scoring radius; a target turns green when a landed drone `+
   `satisfied both the radius and line of sight. Shaded band is the Start Area; dashed `+
-  `square is the Unknown Search Area. Orange rays are the 64-bin collapsed ToF scan.`;
+  `square is the Unknown Search Area. Orange rays are the 64 ToF ring zones.`;
 
 /* transport ----------------------------------------------------------------- */
 const scrub=document.getElementById('scrub'); scrub.max=T-1;

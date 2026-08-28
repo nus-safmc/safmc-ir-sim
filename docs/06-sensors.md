@@ -22,14 +22,14 @@ ranger axis** — the eight zones straddle it. A drone facing a wall 2 m away re
 
 ### What you get
 
+`ToFScan` has exactly four members. That is the whole sensor API:
+
 ```python
 scan = obs.tof
-scan.ranges_m           # (8, 8) float, inf where invalid
-scan.status             # (8, 8) uint8: 5 valid, 255 no return
-scan.collapsed_m        # (64,) the firmware's polar scan
-scan.min_range_m        # nearest valid return anywhere on the ring
-scan.zone_bearings_rad  # (8, 8) body-frame bearings, CCW from nose. Constant.
-scan.as_firmware_frame()  # {"distance_mm": uint16, "target_status": uint8}
+scan.ranges_m             # (8, 8) float, inf where there was no valid return
+scan.zone_bearings_rad    # (8, 8) body-frame bearings, CCW from nose. Constant.
+scan.ranger_bearings_rad  # (8,)   body-frame ranger axes, CCW from nose. Constant.
+scan.min_range_m          # nearest valid return anywhere on the ring
 ```
 
 **`inf` means no valid return. It never means "maximum range".** Those are different facts and
@@ -37,11 +37,36 @@ the real sensor distinguishes them too, via `target_status` 255. A policy that d
 `np.minimum(ranges, 4.0)` is choosing to conflate them — which is often the right choice for a
 potential-field controller, but should be a choice.
 
-The **64-bin collapsed scan** is index 0 straight ahead, **clockwise**, 5.625° per bin,
-min-pooled, `inf` for empty bins. It is the only form the real navigation stack has ever
-consumed (`tof_task.h:99-103`), so a policy written against it ports directly. Beware the
-handedness: bins go clockwise while `zone_bearings_rad` is counter-clockwise, matching the
-firmware's own convention on each.
+There is **no `status` array and no `collapsed_m`**. Both existed in an earlier version and were
+withdrawn in `50e2643`; see [SPEC](SPEC.md) R-SENS-4 and R-SENS-5 for why. Short version: the
+simulator only ever emitted status `5` or `255`, which `isfinite(range)` already tells you, and
+the collapsed scan was `ranges_m` reordered.
+
+#### If you need firmware index order
+
+The firmware's `tof_scan_collapsed_t` holds the same 64 values indexed by **absolute clockwise
+bearing** (`tof_task.c:243-293`). Ours are in `(ranger, zone)` order, **anticlockwise from the
+nose**. They are a permutation of each other — same numbers, different slots — so converting is
+pure reindexing:
+
+```python
+import numpy as np
+
+def collapsed_m(scan, n_bins=64):
+    """ranges_m -> firmware bin order: index 0 straight ahead, clockwise, 5.625 deg per bin."""
+    cw  = (-scan.zone_bearings_rad) % (2 * np.pi)          # CCW body frame -> CW, as firmware
+    idx = np.minimum((cw * n_bins / (2 * np.pi)).astype(int), n_bins - 1).reshape(-1)
+    out = np.full(n_bins, np.inf)
+    np.minimum.at(out, idx, scan.ranges_m.reshape(-1))     # min-pool, as firmware
+    return out
+```
+
+With the flown geometry the 64 zones land in 64 distinct bins, so the min-pool pools nothing —
+but it is kept because a non-default `ToFConfig` (more rangers, more zones) can genuinely
+collide, and then pooling is what the firmware would do.
+
+> **Do not assume `tof.npz` columns are firmware bin indices.** They are `(ranger, zone)` order.
+> Always map through `zone_bearings_rad`, which is stored in the same file.
 
 ### Height gating — the whole of the 2.5D model
 
