@@ -11,12 +11,18 @@ not eight is [ADR-0002](adr/0002-single-vectorised-tof-sensor.md).
 |---|---|---|
 | Rangers | 8, mounted counter-clockwise, 45° apart, gapless 360° | `tof_task.h:26-36`, `tof_task.c:183` |
 | Zones per ranger | 8 columns of 5.625° across the 45° FoV | `tof_task.c:258` |
-| Mount radius | 0.040 m, all optical axes horizontal | `safmc-ros/.../robot.urdf` |
+| Mount radius | 0.040 m cardinal, 0.034 m diagonal (the PCB is rectangular) | `safmc-ros/.../robot.urdf` |
+| Optical axes | all horizontal, no pitch or roll | `safmc-ros/.../robot.urdf` |
 | Physical reach | 4.0 m (VL53L5CX) | datasheet |
 | Firmware gate | `[0.05, 3.0]` m | `tof_task.h:16-18` |
 
 Ranger `i` sits at `i * 45°` counter-clockwise from the nose, and zone `j` at
-`(j - 3.5) * 5.625°` from its ranger's axis. Note that **no zone points exactly along the
+`(j - 3.5) * 5.625°` from its ranger's axis. Both are checked against the firmware's own
+arithmetic (`tof_task.c:183` and `:258`) by a test, and the mount positions against the URDF,
+so if anyone changes the ring a test tells them rather than a flight.
+
+`front_index` says which ranger points forward. It defaults to 0; the flown `sdkconfig` had it
+at 1 for that airframe, so set it per drone if you care. Note that **no zone points exactly along the
 ranger axis** — the eight zones straddle it. A drone facing a wall 2 m away reads
 `2.0 / cos(2.8125°) = 2.00236 m` on its two innermost forward zones, not 2.0 m.
 
