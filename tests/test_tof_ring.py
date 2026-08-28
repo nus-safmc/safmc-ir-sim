@@ -215,3 +215,32 @@ def test_rangers_point_where_their_names_say():
     ring = ToFRing(ToFConfig(), scene_for(cases[0]), np.random.default_rng(0))
     per_ranger = np.min(ring.step(0.0, 0.0, np.pi / 2, 0.5).ranges_m, axis=1)
     assert int(np.argmin(np.where(np.isfinite(per_ranger), per_ranger, np.inf))) == 6
+
+
+def test_the_ring_is_a_vl53l5cx_and_tiles_the_circle_exactly():
+    """The part number is load-bearing, not a comment.
+
+    The VL53L5CX has a 45 x 45 degree square FoV (65 degrees diagonal). Eight of them at 45
+    degree spacing tile a full circle with no gap and no overlap -- which is *why* the airframe
+    carries eight. Its pin-compatible near-twin the VL53L7CX has a 60 degree square FoV, which
+    would give 120 degrees of overlap and a 7.5 degree zone. Getting the part wrong silently
+    changes the sensor's angular resolution by a third.
+    """
+    from safmc_sim import constants as K
+
+    assert K.TOF_SENSOR_PART == "VL53L5CX"
+    cfg = ToFConfig()
+    assert np.rad2deg(cfg.sensor_fov_rad) == pytest.approx(45.0)
+    assert np.rad2deg(cfg.zone_width_rad) == pytest.approx(5.625)
+    assert cfg.ring_coverage_rad == pytest.approx(2 * np.pi)     # exactly gapless
+    assert cfg.sensor_max_range_m == 4.0                          # L7CX would be 3.5
+
+
+def test_zone_width_is_derived_from_the_sensor_fov_not_written_twice():
+    """Two independent constants that must agree is a drift waiting to happen."""
+    for fov_deg, zones, expected in [(45.0, 8, 5.625), (60.0, 8, 7.5), (45.0, 4, 11.25)]:
+        cfg = ToFConfig(sensor_fov_rad=np.deg2rad(fov_deg), zones_per_ranger=zones)
+        assert np.rad2deg(cfg.zone_width_rad) == pytest.approx(expected)
+        # and the geometry follows it, rather than staying on the old value
+        span = np.ptp(np.rad2deg(_zone_offsets(cfg)))
+        assert span == pytest.approx(expected * (zones - 1))

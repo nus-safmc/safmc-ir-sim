@@ -26,7 +26,7 @@ from ..constants import (
     TOF_SENSOR_COUNT,
     TOF_SENSOR_MAX_RANGE_M,
     TOF_SENSOR_SPACING_RAD,
-    TOF_ZONE_WIDTH_RAD,
+    TOF_SENSOR_FOV_RAD,
     TOF_ZONES_PER_SENSOR,
 )
 from ..errors import ConfigError
@@ -44,7 +44,12 @@ class ToFConfig:
     n_rangers: int = TOF_SENSOR_COUNT
     zones_per_ranger: int = TOF_ZONES_PER_SENSOR
     spacing_rad: float = TOF_SENSOR_SPACING_RAD
-    zone_width_rad: float = TOF_ZONE_WIDTH_RAD
+    sensor_fov_rad: float = TOF_SENSOR_FOV_RAD
+    """Square field of view of one sensor. Defaults to the VL53L5CX's 45 degrees.
+
+    The zone width is *derived* from this, never set alongside it -- writing both down is how
+    they drift apart. If you ever move to a VL53L7CX (60 degree square), set this and the zone
+    width follows; note that eight of those would overlap by 120 degrees rather than tile."""
     mount_radius_m: float = TOF_MOUNT_RADIUS_M
     mount_radius_diagonal_m: float = TOF_MOUNT_RADIUS_DIAGONAL_M
     """The ring is not a circle. In the URDF the four cardinal sensors sit 40 mm out and the
@@ -66,7 +71,22 @@ class ToFConfig:
     """Additive Gaussian range noise. Off by default: the target paper's arenas are noiseless
     and reproducing it is our first regression test. Turn it on for robustness sweeps."""
 
+    @property
+    def zone_width_rad(self) -> float:
+        """Angular width of one zone. 5.625 deg on the VL53L5CX. Derived, not configured."""
+        return self.sensor_fov_rad / self.zones_per_ranger
+
+    @property
+    def ring_coverage_rad(self) -> float:
+        """Total angle the ring covers. Exactly 2*pi on the real airframe.
+
+        Worth checking if you change the sensor or the count: below 2*pi leaves the drone
+        blind in a wedge, above it means neighbouring sensors overlap."""
+        return self.n_rangers * self.sensor_fov_rad
+
     def __post_init__(self) -> None:
+        if self.sensor_fov_rad <= 0:
+            raise ConfigError(f"sensor_fov_rad must be > 0, got {self.sensor_fov_rad}")
         if self.n_rangers < 1 or self.zones_per_ranger < 1:
             raise ConfigError("n_rangers and zones_per_ranger must both be >= 1")
         if not 0 <= self.front_index < self.n_rangers:
