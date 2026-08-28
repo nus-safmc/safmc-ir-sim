@@ -2,7 +2,15 @@
 
 ## The ToF ring
 
-One ir-sim sensor per drone, computing all rangers in a single vectorised raycast. Why one and
+Eight **ST VL53L5CX** multizone sensors. One raycast per drone computes all of them.
+
+> **The part number matters.** The VL53L5CX has a 65° *diagonal* FoV, which ST specifies as a
+> 45° × 45° square. Its pin- and driver-compatible near-twin the **VL53L7CX** is 90° diagonal
+> (60° × 60° square) with 3.5 m of range instead of 4.0 m. Swapping one for the other changes
+> the zone width from 5.625° to 7.5° and turns a gapless ring into one with 120° of overlap.
+>
+> `nus-safmc/gazebo-slam-prototype`'s repo description says "8 × VL53L7CX". That is stale — the
+> flown firmware links ST's `vl53l5cx` driver and the mount geometry only tiles with the L5CX. Why one and
 not eight is [ADR-0002](adr/0002-single-vectorised-tof-sensor.md).
 
 ### Geometry — reproduced from the flown firmware
@@ -11,12 +19,22 @@ not eight is [ADR-0002](adr/0002-single-vectorised-tof-sensor.md).
 |---|---|---|
 | Rangers | 8, mounted counter-clockwise, 45° apart, gapless 360° | `tof_task.h:26-36`, `tof_task.c:183` |
 | Zones per ranger | 8 columns of 5.625° across the 45° FoV | `tof_task.c:258` |
-| Mount radius | 0.040 m, all optical axes horizontal | `safmc-ros/.../robot.urdf` |
-| Physical reach | 4.0 m (VL53L5CX) | datasheet |
+| Mount radius | 0.040 m cardinal, 0.034 m diagonal (the PCB is rectangular) | `safmc-ros/.../robot.urdf` |
+| Optical axes | all horizontal, no pitch or roll | `safmc-ros/.../robot.urdf` |
+| Square FoV per sensor | 45° × 45° (65° diagonal) | datasheet |
+| Zone width | 5.625° — **derived** as FoV ÷ 8, never written down twice | |
+| Ring coverage | 8 × 45° = exactly 360°, no gap, no overlap | |
+| Physical reach | 4.0 m | datasheet |
+| Max rate at 8×8 | 15 Hz (the sensor only does 60 Hz at 4×4) | datasheet |
 | Firmware gate | `[0.05, 3.0]` m | `tof_task.h:16-18` |
 
 Ranger `i` sits at `i * 45°` counter-clockwise from the nose, and zone `j` at
-`(j - 3.5) * 5.625°` from its ranger's axis. Note that **no zone points exactly along the
+`(j - 3.5) * 5.625°` from its ranger's axis. Both are checked against the firmware's own
+arithmetic (`tof_task.c:183` and `:258`) by a test, and the mount positions against the URDF,
+so if anyone changes the ring a test tells them rather than a flight.
+
+`front_index` says which ranger points forward. It defaults to 0; the flown `sdkconfig` had it
+at 1 for that airframe, so set it per drone if you care. Note that **no zone points exactly along the
 ranger axis** — the eight zones straddle it. A drone facing a wall 2 m away reads
 `2.0 / cos(2.8125°) = 2.00236 m` on its two innermost forward zones, not 2.0 m.
 

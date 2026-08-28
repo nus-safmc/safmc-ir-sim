@@ -41,7 +41,13 @@ SENSOR_ANGLES[i] = (float)(((TOF_FRONT_SENSOR_IDX - i) * 45 % 360 + 360) % 360);
 sensors sit on a **40 mm** radius, the four diagonals at 24.04 mm per axis (≈34 mm radius — a
 rectangular PCB). **Every optical axis is horizontal**; no sensor is pitched.
 
-**Per sensor**: VL53L5CX at **8x8 = 64 zones**, one target per zone, 45x45 degree square FoV.
+**Per sensor**: VL53L5CX at **8x8 = 64 zones**, one target per zone, 45x45 degree square FoV
+(65 degrees on the diagonal), 4.0 m maximum range, 15 Hz maximum rate at 8x8.
+
+Eight of them at 45 degree spacing tile a full circle exactly. That is the reason for eight:
+it is the smallest number of L5CX sensors that leaves no blind wedge. Note that
+`gazebo-slam-prototype`'s description says VL53L7CX -- that part is 60x60 degrees and would
+overlap by 120 degrees, so it is inconsistent with both the firmware and this mount geometry.
 
 **Timing** (`tof_task.h:16-18`, `tof_task.c:475`): round-robin, one sensor per 8 ms tick.
 8 x 8 ms = 64 ms per full cycle, so **each sensor refreshes at ~15 Hz and the ring is skewed by up

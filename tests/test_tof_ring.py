@@ -140,3 +140,107 @@ def test_bearing_arrays_handed_to_a_policy_are_read_only():
 def test_impossible_config_raises(kw):
     with pytest.raises(ConfigError):
         ToFConfig(**kw)
+
+
+# -- fidelity to the real hardware ------------------------------------------------------------
+#
+# These pin the ring to its two sources of truth: the firmware's own angle arithmetic, and the
+# URDF's mount geometry. If someone changes the ring, one of these should be what tells them.
+
+# esp-everything/main/tof_task.c:183 and :258, transcribed literally. Firmware angles are
+# CLOCKWISE from body-forward; ours are counter-clockwise, hence the negation.
+def _firmware_bearings_ccw(front_index=0, n=8, zones=8):
+    sensor_cw = np.array([((front_index - i) * 45 % 360 + 360) % 360 for i in range(n)], float)
+    zone_cw = np.array([[sensor_cw[s] + (3.5 - c) * (45.0 / 8.0) for c in range(zones)]
+                        for s in range(n)])
+    return -sensor_cw, -zone_cw
+
+
+# safmc-ros/safmc_mapping/urdf/robot.urdf, in the index order of tof_pub.py's TOF_ID_MAP:
+# tof_n, tof_nw, tof_w, tof_sw, tof_s, tof_se, tof_e, tof_ne. ROS body frame: x forward, y left.
+_URDF_MOUNTS = [
+    (0.040, 0.0), (0.0240416306, 0.0240416306), (0.0, 0.040), (-0.0240416306, 0.0240416306),
+    (-0.040, 0.0), (-0.0240416306, -0.0240416306), (0.0, -0.040), (0.0240416306, -0.0240416306),
+]
+
+
+def _same_angle(a, b):
+    return np.allclose(np.mod(np.asarray(a) - np.asarray(b) + 180, 360) - 180, 0, atol=1e-9)
+
+
+@pytest.mark.parametrize("front_index", [0, 1, 4])
+def test_every_bearing_matches_the_firmware_formula(front_index):
+    cfg = ToFConfig(front_index=front_index)
+    sensor_ccw, zone_ccw = _firmware_bearings_ccw(front_index)
+    assert _same_angle(np.rad2deg(_ranger_bearings(cfg)), sensor_ccw)
+    sim_zone = np.rad2deg(_ranger_bearings(cfg)[:, None] + _zone_offsets(cfg)[None, :])
+    assert _same_angle(sim_zone, zone_ccw)
+
+
+def test_mount_geometry_matches_the_urdf():
+    """The ring is not a circle: cardinals at 40 mm, diagonals at 34 mm."""
+    from safmc_sim.sensors.tof_ring import _mount_radii
+
+    cfg = ToFConfig()
+    bearings = _ranger_bearings(cfg)
+    radii = _mount_radii(cfg)
+    placed = np.stack((radii * np.cos(bearings), radii * np.sin(bearings)), axis=1)
+    assert np.allclose(placed, np.array(_URDF_MOUNTS), atol=1e-6)
+    # The diagonals really are closer in -- a uniform radius would put them 6 mm too far out.
+    assert radii[1] < radii[0]
+
+
+def test_rangers_point_where_their_names_say():
+    """End-to-end handedness: a wall on the left must be seen by the left ranger.
+
+    A formula comparison cannot catch a sign or handedness error that is consistent between
+    the two formulas. Putting a real wall in a real scene can.
+    """
+    scene_for = lambda seg: WorldScene(
+        RayScene(segments=np.array([seg], float), segment_heights=np.array([2.0]))
+    )
+    # ARENA frame: +x East, +y North, theta CCW. Drone at the origin facing +x.
+    cases = {
+        0: [2, -1, 2, 1],     # ahead  (+x)
+        2: [-1, 2, 1, 2],     # left   (+y)
+        4: [-2, -1, -2, 1],   # behind (-x)
+        6: [-1, -2, 1, -2],   # right  (-y)
+    }
+    for expected_ranger, wall in cases.items():
+        ring = ToFRing(ToFConfig(), scene_for(wall), np.random.default_rng(0))
+        per_ranger = np.min(ring.step(0.0, 0.0, 0.0, 0.5).ranges_m, axis=1)
+        assert int(np.argmin(np.where(np.isfinite(per_ranger), per_ranger, np.inf))) == expected_ranger
+
+    # Yaw the drone 90 degrees anticlockwise and the wall that was ahead is now on its right.
+    ring = ToFRing(ToFConfig(), scene_for(cases[0]), np.random.default_rng(0))
+    per_ranger = np.min(ring.step(0.0, 0.0, np.pi / 2, 0.5).ranges_m, axis=1)
+    assert int(np.argmin(np.where(np.isfinite(per_ranger), per_ranger, np.inf))) == 6
+
+
+def test_the_ring_is_a_vl53l5cx_and_tiles_the_circle_exactly():
+    """The part number is load-bearing, not a comment.
+
+    The VL53L5CX has a 45 x 45 degree square FoV (65 degrees diagonal). Eight of them at 45
+    degree spacing tile a full circle with no gap and no overlap -- which is *why* the airframe
+    carries eight. Its pin-compatible near-twin the VL53L7CX has a 60 degree square FoV, which
+    would give 120 degrees of overlap and a 7.5 degree zone. Getting the part wrong silently
+    changes the sensor's angular resolution by a third.
+    """
+    from safmc_sim import constants as K
+
+    assert K.TOF_SENSOR_PART == "VL53L5CX"
+    cfg = ToFConfig()
+    assert np.rad2deg(cfg.sensor_fov_rad) == pytest.approx(45.0)
+    assert np.rad2deg(cfg.zone_width_rad) == pytest.approx(5.625)
+    assert cfg.ring_coverage_rad == pytest.approx(2 * np.pi)     # exactly gapless
+    assert cfg.sensor_max_range_m == 4.0                          # L7CX would be 3.5
+
+
+def test_zone_width_is_derived_from_the_sensor_fov_not_written_twice():
+    """Two independent constants that must agree is a drift waiting to happen."""
+    for fov_deg, zones, expected in [(45.0, 8, 5.625), (60.0, 8, 7.5), (45.0, 4, 11.25)]:
+        cfg = ToFConfig(sensor_fov_rad=np.deg2rad(fov_deg), zones_per_ranger=zones)
+        assert np.rad2deg(cfg.zone_width_rad) == pytest.approx(expected)
+        # and the geometry follows it, rather than staying on the old value
+        span = np.ptp(np.rad2deg(_zone_offsets(cfg)))
+        assert span == pytest.approx(expected * (zones - 1))

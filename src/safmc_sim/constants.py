@@ -59,14 +59,43 @@ MARKER_HEIGHT_M = 1.00          # sec 3.3.3 r.3 -- taller than cruise altitude, 
 # HW -- read from nus-safmc/esp-everything at 99cde05 ("Competition over", 2026-04-02)
 # --------------------------------------------------------------------------------------
 
+# --- the ranging sensor: ST VL53L5CX -----------------------------------------------------
+#
+# Part number matters. The drone flies the **VL53L5CX**: the firmware links ST's
+# vl53l5cx driver and calls vl53l5cx_set_resolution(VL53L5CX_RESOLUTION_8X8).
+#
+# Its near-twin the VL53L7CX is pin- and driver-compatible but has a 90 deg diagonal
+# (60 x 60 deg square) FoV against the L5CX's 65 deg diagonal (45 x 45 deg square), and
+# 3.5 m of range against 4.0 m. Swapping one for the other silently changes the zone width
+# from 5.625 to 7.5 deg and turns a gapless ring into one with 120 deg of overlap.
+#
+# Note that nus-safmc/gazebo-slam-prototype's description says "8 x VL53L7CX". That is
+# inconsistent with the flown firmware and with the mount geometry, and the team has
+# confirmed the L5CX is what flies. Treat the other repo's description as stale.
+
+TOF_SENSOR_PART = "VL53L5CX"
 TOF_SENSOR_COUNT = 8            # tof_task.h:10
 TOF_ZONES_PER_SENSOR = 8        # tof_task.c:109, VL53L5CX_RESOLUTION_8X8, one row used
-TOF_SENSOR_SPACING_RAD = np.deg2rad(45.0)  # tof_task.c:183, 8 x 45 deg = 360 deg
-TOF_ZONE_WIDTH_RAD = np.deg2rad(45.0 / 8.0)  # 5.625 deg per column, tof_task.c:258
-TOF_MOUNT_RADIUS_M = 0.040      # safmc-ros/safmc_mapping/urdf/robot.urdf, cardinal sensors
+TOF_SENSOR_FOV_RAD = np.deg2rad(45.0)
+"""Square field of view of one sensor, per the datasheet (65 deg diagonal / sqrt(2) ~= 46,
+specified by ST as a 45 x 45 deg square). The firmware agrees: TOF_SENSOR_HALF_WIDTH_DEG
+is 22.5 (tof_task.h:36)."""
+
+TOF_SENSOR_SPACING_RAD = np.deg2rad(45.0)  # tof_task.c:183
+"""Angle between adjacent sensors. Equal to the FoV, which is not a coincidence: 8 x 45 deg
+tiles a full circle exactly, which is *why* the airframe carries eight. Any other sensor
+part breaks that -- see the note above."""
+
+TOF_ZONE_WIDTH_RAD = TOF_SENSOR_FOV_RAD / TOF_ZONES_PER_SENSOR
+"""5.625 deg. **Derived**, never written down twice. The firmware computes the same value
+inline as (45.0 / 8.0) at tof_task.c:258; deriving it here means a change to the sensor's FoV
+cannot leave the zone width behind."""
+TOF_MOUNT_RADIUS_M = 0.040      # urdf robot.urdf, the four CARDINAL sensors (tof_n/e/s/w)
+TOF_MOUNT_RADIUS_DIAGONAL_M = 0.034  # urdf: the diagonals sit at (0.02404, 0.02404), i.e.
+                                # 34.0 mm -- the PCB is rectangular, so they are closer in
 TOF_MIN_VALID_M = 0.050         # tof_task.h:18, TOF_MIN_VALID_MM = 50
 TOF_MAX_VALID_M = 3.000         # tof_task.h:17, TOF_MAX_VALID_MM = 3000 (firmware gate)
-TOF_SENSOR_MAX_RANGE_M = 4.000  # VL53L5CX physical maximum, above the firmware gate
+TOF_SENSOR_MAX_RANGE_M = 4.000  # VL53L5CX datasheet maximum (the L7CX would be 3.5)
 TOF_COLLAPSED_BINS = 64         # tof_task.h:99, the only form nav consumes
 
 TOF_STATUS_VALID = 5            # tof_task.c:266, VL53L5CX target_status
@@ -128,8 +157,8 @@ without ever leaving the Start Area. Real drones are placed by hand with room ar
 PILLAR_BASE_DIAMETER_M = 0.50   # sec 3.2, weighted base, 0.15 m tall
 PILLAR_BASE_HEIGHT_M = 0.15     # sec 3.2
 DRONE_BBOX_M = 0.30             # sec 6, must fit a 30 cm cube including propellers
-TOF_SENSOR_FOV_RAD = np.deg2rad(45.0)      # tof_task.h:36, half width 22.5 deg
-TOF_RATE_HZ = 15.0              # tof_task.c:475, 8 sensors x 8 ms round robin
+TOF_RATE_HZ = 15.0              # tof_task.c:475, 8 sensors x 8 ms round robin. Also the
+                                # VL53L5CX's own max rate at 8x8 (it does 60 Hz only at 4x4)
 VFH_BINS = 32                   # vfh.h:19
 TOF_STATUS_VALID_WEAK = 9       # tof_task.c:266
 TOF_UNRELIABLE_SUBSTITUTE_M = 0.40  # tof_task.c, firmware's conservative "assume obstacle"
