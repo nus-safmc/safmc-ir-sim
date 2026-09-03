@@ -121,6 +121,18 @@ obstacle. Violations MUST raise, not warn.
 **R-WORLD-6** The arena MUST include explicit boundary walls. ir-sim has no implicit world
 bounds and a robot will silently leave the world otherwise [src: verified in recon].
 
+**R-WORLD-7** *(added with ADR-0005)* Every non-structural object a sensor may perceive MUST be
+a `Landmark`: an id, a kind, a position, a footprint radius and a height. A landmark with both
+a footprint and a height is **solid** and MUST occlude ranging through the height gate of
+R-SENS-6 and MUST be collidable at altitudes below its height; a landmark without both MUST do
+neither. Mission targets MUST be landmarks. Validation MUST reject a landmark outside the
+field, a duplicate id, and a solid landmark overlapping structure or another solid landmark.
+
+**R-WORLD-8** *(added with ADR-0005)* Landmarks MUST be placeable at fixed positions through
+the scenario descriptor (`ArenaConfig.landmarks`) and MUST be recorded in the log header. A
+solid placed landmark MUST be treated as pre-existing structure by the generator. A point
+landmark whose kind no configured sensor reports MUST be refused at run construction.
+
 ---
 
 ## 6. Drone model
@@ -239,6 +251,37 @@ MUST correspond to 2 Hz, the measured AprilTag rate on the real hardware
 **R-SENS-11** No sensor may read another agent's private state or any mission ground truth other
 than through its own geometric query.
 
+**R-SENS-12** *(added with ADR-0005)* Every sensor MUST implement the contract in
+`sensors/base.py`: a frozen `SensorConfig` subclass carrying a unique `name`, a `rate_hz`
+(`None` for every tick) and `build(rng)`; and a `Sensor` subclass whose
+`sample(truth, world, tick)` returns an immutable reading. Readings MUST be immutable — a
+frozen dataclass or a tuple — and any numpy array in one MUST be read-only.
+
+**R-SENS-13** *(added with ADR-0005)* The runner MUST drive every sensor through the same path:
+one instance per drone per config, built with that drone's own generator; sampled once before
+the first tick and then after motion whenever `(tick + 1) % decimation == 0`, so a decimated
+sensor is fresh in the observations at ticks `0, d, 2d, ...`; held, not cleared, between
+samples; not sampled on a terminal drone. Sensor names MUST be unique within a run and rates
+MUST satisfy R-TIME-3.
+
+**R-SENS-14** *(added with ADR-0005)* `Observation.sensors` MUST hold the latest reading of
+every configured sensor under its name and nothing else, and `Observation.stale_ticks` MUST
+hold each reading's age in ticks. `obs.tof` and `obs.markers` are shorthands for the flown
+sensors and MUST raise a descriptive error when that sensor is not configured.
+
+**R-SENS-15** *(added with ADR-0005)* A sensor's only view of the world MUST be the
+`WorldScene` handed to `sample`: the sensing scene (structure, solid landmarks, other drones'
+bodies) and the landmark list. A sensor MUST NOT be handed the arena, the mission, an agent, or
+the environment. Sensors sample from ground truth (`TrueState`); the pose a policy sees comes
+from `PoseSource` alone (R-SEAM-1). Together those are the only two paths from truth to a
+policy.
+
+**R-SENS-16** *(added with ADR-0005)* A sensor MAY be recorded by returning fixed-shape arrays
+from `record()`. The recorder MUST then write `<name>.npz` holding `ticks`, a per-agent
+`sample_tick`, one stacked array per key, and any constants from `record_static()`, and the
+header MUST list every sensor with whether it was recorded. Recording MUST NOT affect results
+(R-OBS-4).
+
 ---
 
 ## 8. Policy interface
@@ -250,9 +293,13 @@ than through its own geometric query.
 mutate simulator state by mutating the objects it is handed.
 
 **R-POL-3** `Observation` MUST contain only what a real drone could obtain: own pose and velocity,
-lifecycle state, tick index and time, the ToF product, marker detections, and the blackboard
-snapshot. Ground-truth world data (full obstacle list, other drones' true poses, unfound target
-positions) MUST NOT be reachable from `Observation`.
+lifecycle state, tick index and time, the latest reading of each configured sensor, and the
+blackboard snapshot. Ground-truth world data (full obstacle list, other drones' true poses,
+unfound target or landmark positions) MUST NOT be reachable from `Observation`.
+
+> Amended with ADR-0005. The original wording named "the ToF product, marker detections",
+> which was the sensor list of the day rather than a rule. Readings now arrive under
+> `sensors`; the flown two keep their shorthands.
 
 **R-POL-4** Violating R-POL-3 MUST be detectable: an auditor MUST be able to enumerate every
 public attribute reachable from an `Observation` and find no reference to the environment, the
@@ -328,9 +375,10 @@ logging is not a substitute; ir-sim provides only a loguru text wrapper and no s
 [src: irsim/env/env_logger.py].
 
 **R-OBS-2** The log MUST contain, per tick: simulation time, and per agent the pose, velocity,
-lifecycle state, issued command, and the collapsed ToF scan. It MUST contain, once per run: the
-resolved scenario including every obstacle and target, the seed, the full config, and package
-versions.
+lifecycle state, issued command, and every recorded sensor's rows (R-SENS-16; the ring is
+always one of them). It MUST contain, once per run: the resolved scenario including every
+obstacle, target and landmark, the seed, the full config including the sensor suite, and
+package versions.
 
 **R-OBS-3** The log MUST be sufficient to reconstruct the run without re-simulating: the visualiser
 MUST read only the log.
