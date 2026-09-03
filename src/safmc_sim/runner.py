@@ -16,22 +16,26 @@ One tick, in order, and the order is load-bearing:
 1. **Freeze the blackboard.** Every agent this tick reads the same immutable view. Without
    this, agent 0's publication would reach agent 1 but not the reverse, and results would
    depend on the order agents happen to be indexed (R-POL-8).
-2. **Build each Observation** from the pose source, the sensors' latest samples, and that
+2. **Build each Observation** from the pose source, every sensor's latest reading, and that
    frozen view.
 3. **Call every policy.** An exception propagates with agent id and tick attached. There is no
    catch-and-hover: a silently degraded agent produces a plausible wrong answer (R-POL-9).
 4. **Resolve commands** through the lifecycle state machine into ir-sim actions.
-5. **``env.step()``** -- ir-sim integrates every object from the pre-step state, rebuilds its
-   collision tree, then steps every sensor. That ordering is ir-sim's own guarantee and is why
-   there is no temporal skew between agents.
-6. **Update collisions and the mission.**
-7. **Record, then commit the blackboard** so publications become visible next tick.
+5. **``env.step()``** -- ir-sim integrates every object from the pre-step state and rebuilds
+   its collision tree.
+6. **Update collisions and the mission.** A drone that hit something this tick becomes
+   terminal here, before it can sense from inside the wall.
+7. **Sense.** Every due sensor on every still-active drone samples the post-motion world, so
+   no agent is measured against a staler picture than another. The runner drives every
+   sensor through one contract (``sensors/base.py``); it does not know what any of them are.
+8. **Record, then commit the blackboard** so publications become visible next tick.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any, Mapping
 
 import numpy as np
@@ -53,16 +57,34 @@ from .frames import wrap_pi
 from .kinematics import KINEMATICS_NAME, QuadParams, configure_robots
 from .mission import Event, Mission, ScoreBreakdown
 from .pose import POSE_SOURCES, PoseSource
-from .sensors.marker_cam import MarkerCam, MarkerCamConfig
+from .sensors.base import (
+    Sensor,
+    SensorConfig,
+    TrueState,
+    check_reading_is_immutable,
+    decimation,
+    validate_rate,
+    validate_sensor_name,
+)
+from .sensors.marker_cam import MarkerCamConfig
 from .sensors.scene import WorldScene
-from .sensors.tof_ring import ToFConfig, ToFRing, ToFScan
-from .world.arena import ArenaConfig, ArenaSpec, generate_arena
+from .sensors.tof_ring import ToFConfig
+from .world.arena import ArenaConfig, ArenaSpec, generate_arena, validate_arena
 
-__all__ = ["RunConfig", "RunResult", "AgentView", "Runner", "run"]
+__all__ = ["RunConfig", "RunResult", "AgentView", "Runner", "run", "flown_sensors"]
 
 # The action for a drone that is not going anywhere.
 _STOP = [0.0, 0.0, 0.0, 0.0]
 
+
+def flown_sensors() -> tuple[SensorConfig, ...]:
+    """The sensors the real airframe carries, with the flown geometry and rates.
+
+    The default for :attr:`RunConfig.sensors`. Extend it rather than replacing it when adding
+    a sensor -- ``RunConfig(sensors=flown_sensors() + (BeaconConfig(),))`` -- so a run still
+    carries the hardware that exists. See ``sensors/base.py`` for how to write one.
+    """
+    return (ToFConfig(), MarkerCamConfig())
 
 
 @dataclass(frozen=True)
@@ -79,11 +101,12 @@ class RunConfig:
 
     arena_config: ArenaConfig = field(default_factory=ArenaConfig)
     quad_params: QuadParams = field(default_factory=QuadParams)
-    tof_config: ToFConfig = field(default_factory=ToFConfig)
-    marker_config: MarkerCamConfig = field(default_factory=MarkerCamConfig)
 
-    marker_rate_hz: float = K.MARKER_RATE_HZ
-    """Default 2 Hz, the measured AprilTag rate on the real hardware."""
+    sensors: tuple[SensorConfig, ...] = field(default_factory=flown_sensors)
+    """What every drone carries. Each config is built once per drone, with that drone's own
+    generator, and driven by the runner through the contract in ``sensors/base.py``. Names
+    must be unique -- they are the keys under ``obs.sensors`` -- and every rate must divide
+    ``tick_hz`` exactly. The default is :func:`flown_sensors`."""
 
     start_spacing_m: float = K.START_SPACING_M
     """Take-off grid spacing. See constants.START_SPACING_M -- too small deadlocks reactive
@@ -135,7 +158,32 @@ class RunConfig:
                 f"collision_behaviour must be 'stop' or 'unobstructed', "
                 f"got {self.collision_behaviour!r}"
             )
-        _decimation(self.marker_rate_hz, self.tick_hz, "marker_rate_hz")
+        try:
+            object.__setattr__(self, "sensors", tuple(self.sensors))
+        except TypeError:
+            raise ConfigError(
+                f"sensors must be a sequence of SensorConfig, got {type(self.sensors).__name__}"
+            ) from None
+        names: list[str] = []
+        for cfg in self.sensors:
+            if not isinstance(cfg, SensorConfig):
+                raise ConfigError(
+                    f"sensors must be SensorConfig instances, got {type(cfg).__name__}. "
+                    f"Pass the config (ToFConfig()), not the sensor (ToFRing)."
+                )
+            # Re-validated here, not trusted from the config: a subclass that forgot
+            # super().__post_init__() could otherwise call itself "states" and overwrite
+            # the run's own file. Case-insensitive because the name becomes a file name.
+            validate_sensor_name(cfg.name)
+            validate_rate(cfg.rate_hz, cfg.name)
+            if cfg.name.lower() in names:
+                raise ConfigError(
+                    f"two sensors are named {cfg.name!r} (case-insensitively). Names are the "
+                    f"keys under obs.sensors and the stems of <name>.npz, and must be unique "
+                    f"-- give the second one a name."
+                )
+            names.append(cfg.name.lower())
+            decimation(cfg.rate_hz, self.tick_hz, f"sensor {cfg.name!r}")
 
     @property
     def dt(self) -> float:
@@ -146,23 +194,6 @@ class RunConfig:
         return int(round(self.duration_s * self.tick_hz))
 
 
-def _decimation(rate_hz: float | None, tick_hz: float, name: str) -> int:
-    """Convert a rate into an integer tick decimation, or refuse (R-TIME-3)."""
-    if rate_hz is None:
-        return 1
-    if rate_hz <= 0:
-        raise ConfigError(f"{name} must be > 0, got {rate_hz}")
-    ratio = tick_hz / rate_hz
-    nearest = round(ratio)
-    if nearest < 1 or abs(ratio - nearest) > 1e-9:
-        raise ConfigError(
-            f"{name}={rate_hz} Hz does not divide tick_hz={tick_hz} Hz exactly "
-            f"(ratio {ratio:.6f}). Pick a rate that divides the tick rate, or change "
-            f"tick_hz -- silently rounding a sensor rate would misreport sensor latency."
-        )
-    return int(nearest)
-
-
 @dataclass
 class AgentView:
     """Per-drone bookkeeping owned by the runner. Never handed to a policy."""
@@ -170,12 +201,14 @@ class AgentView:
     agent_id: str
     robot: Any
     policy: Any
+    sensors: list[Sensor] = field(default_factory=list)
+    """This drone's sensors, in ``RunConfig.sensors`` order."""
+    readings: dict[str, Any] = field(default_factory=dict)
+    """Latest reading per sensor name. Held, not cleared, between samples."""
+    sample_tick: dict[str, int] = field(default_factory=dict)
+    """The tick whose post-motion world each reading reflects; -1 before the first tick."""
     lifecycle: str = Lifecycle.ACTIVE
     last_command: Command = field(default_factory=Velocity)
-    ring: ToFRing | None = None
-    last_scan: ToFScan | None = None
-    last_markers: tuple = ()
-    last_marker_tick: int = -1
     crash_reason: str | None = None
     left_start_area: bool = False
 
@@ -220,9 +253,20 @@ class RunResult:
 
 
 class Runner:
-    """Builds and drives one run."""
+    """Builds and drives one run.
 
-    def __init__(self, config: RunConfig, recorder=None) -> None:
+    ``arena`` overrides the generated one: hand in a resolved ``ArenaSpec`` -- usually a
+    generated arena with landmarks placed by ``dataclasses.replace`` from its own layout --
+    and the run uses it instead of regenerating from the seed. It is validated first, and the
+    log header records it in full with ``arena_source: "supplied"``, so the run is still
+    reproducible from the log even though it is not reproducible from the seed alone. The
+    config's ``arena_config`` is then dead -- the arena carries its own -- so the runner
+    replaces it with the arena's, and ``RunResult.config`` and the header describe the arena
+    that was actually flown. ``header.seed`` still seeds the policies, sensors and take-off
+    grid; ``header.arena.seed`` is the arena's own.
+    """
+
+    def __init__(self, config: RunConfig, recorder=None, arena: ArenaSpec | None = None) -> None:
         self.config = config
         if recorder is not None and not config.record:
             raise ConfigError(
@@ -232,18 +276,30 @@ class Runner:
             )
         self._recorder = recorder
         self._seeds = np.random.SeedSequence(config.seed).spawn(4)
-        self.arena = generate_arena(config.seed, config.arena_config)
+        if arena is None:
+            self.arena = generate_arena(config.seed, config.arena_config)
+            self.arena_source = "generated"
+        else:
+            if not isinstance(arena, ArenaSpec):
+                raise ConfigError(f"arena must be an ArenaSpec, got {type(arena).__name__}")
+            validate_arena(arena)
+            self.arena = arena
+            self.arena_source = "supplied"
+            self.config = config = replace(config, arena_config=arena.config)
         self.mission = Mission(self.arena)
         self.blackboard: Blackboard = PerfectBlackboard()
         self.pose_source: PoseSource = POSE_SOURCES[config.pose_source](
             np.random.default_rng(self._seeds[3])
         )
-        self.world_scene = WorldScene(self.arena.structural_scene(), self.arena.marker_scene())
-        self.marker_cam = MarkerCam(config.marker_config)
-
-        self._marker_decimation = _decimation(
-            config.marker_rate_hz, config.tick_hz, "marker_rate_hz"
-        )
+        self.world_scene = WorldScene.from_arena(self.arena)
+        self._decimations = [
+            decimation(cfg.rate_hz, config.tick_hz, f"sensor {cfg.name!r}")
+            for cfg in config.sensors
+        ]
+        # What can kill you is what you can see: the same predicate that puts a landmark into
+        # the ring's scene makes it collidable here.
+        self._solid_landmarks = [lm for lm in self.arena.all_landmarks if lm.solid]
+        self._check_point_landmarks_are_perceivable()
 
         self.arena_info = ArenaInfo(
             width_m=self.arena.width_m,
@@ -259,6 +315,26 @@ class Runner:
         self.events: list[Event] = []
         self._mission_started_tick: int | None = None
         self._tick = 0
+
+    def _check_point_landmarks_are_perceivable(self) -> None:
+        """A point landmark that no sensor can report is a configuration mistake.
+
+        A solid landmark is a body: the ring sees it whatever its kind. A point exists *only*
+        to be reported by a sensor that knows its kind, so one nobody is configured to detect
+        would sit in the arena doing nothing, and the policy author would spend an afternoon
+        wondering why the camera never sees their nav tags.
+        """
+        perceived = {kind for cfg in self.config.sensors for kind in cfg.landmark_kinds}
+        orphans = sorted(
+            {lm.kind for lm in self.arena.all_landmarks if not lm.solid and lm.kind not in perceived}
+        )
+        if orphans:
+            raise ConfigError(
+                f"landmark kind(s) {orphans} are points that no configured sensor detects. "
+                f"Add the kind to a sensor that reports by kind -- e.g. "
+                f"MarkerCamConfig(kinds=TARGET_KINDS + ({orphans[0]!r},)) -- or give the "
+                f"landmark a footprint and a height so the ring can see it as a body."
+            )
 
     # -- construction ------------------------------------------------------------------------
 
@@ -301,6 +377,17 @@ class Runner:
         world["collision_mode"] = (
             "stop" if self.config.collision_behaviour == "stop" else "unobstructed"
         )
+        starts = self._start_positions()
+        # Arena validation cannot see the take-off grid, which is the runner's. A body placed
+        # under a spawn point would kill that drone at tick 0 and look like a policy failure.
+        for i, start in enumerate(starts):
+            struck = self._landmark_strike(start[:2], 0.0)
+            if struck is not None:
+                raise ConfigError(
+                    f"drone_{i:02d} would take off inside landmark {struck.id!r} at "
+                    f"({start[0]:.2f}, {start[1]:.2f}). Move the landmark, or change "
+                    f"start_spacing_m."
+                )
         cfg = {
             "world": world,
             "robot": [
@@ -308,7 +395,7 @@ class Runner:
                     "number": self.config.n_drones,
                     "kinematics": {"name": KINEMATICS_NAME},
                     "shape": {"name": "circle", "radius": K.DRONE_RADIUS_M},
-                    "state": self._start_positions().tolist(),
+                    "state": starts.tolist(),
                 }
             ],
             "obstacle": self.arena.to_irsim_obstacles(),
@@ -340,12 +427,14 @@ class Runner:
 
         for i, robot in enumerate(self.env.robot_list):
             agent_id = f"drone_{i:02d}"
-            ring = ToFRing(
-                config=replace(self.config.tof_config),
-                world_scene=self.world_scene,
-                rng=np.random.default_rng(sensor_seeds[i]),
-                object_id=robot.id,
-            )
+            # One generator per (drone, sensor), spawned in config order, so adding a sensor
+            # at the end of the list does not perturb the streams of the ones before it, and
+            # adding a drone does not perturb the earlier drones (R-DET-3).
+            per_sensor = sensor_seeds[i].spawn(max(len(self.config.sensors), 1))
+            sensors = [
+                sensor_cfg.build(np.random.default_rng(per_sensor[j]))
+                for j, sensor_cfg in enumerate(self.config.sensors)
+            ]
             policy = policy_cls(
                 agent_id=agent_id,
                 config=self.config.policy_config,
@@ -358,9 +447,17 @@ class Runner:
                     agent_id=agent_id,
                     robot=robot,
                     policy=policy,
-                    ring=ring,
+                    sensors=sensors,
                 )
             )
+        # Every sensor samples the initial world once, so the observation at tick 0 has a
+        # reading for each of them rather than a hole. The first reading is also where the
+        # contract is checked: a reading a policy could write into is refused here, at build,
+        # rather than discovered as a corrupted log after a 600 s run (R-SENS-12).
+        self._sense(-1)
+        for agent in self.agents:
+            for name, reading in agent.readings.items():
+                check_reading_is_immutable(name, reading)
         return self
 
     # -- the loop ------------------------------------------------------------------------------
@@ -380,7 +477,9 @@ class Runner:
         if self._recorder is not None:
             self._recorder.begin(
                 self.config, self.arena, [a.agent_id for a in self.agents],
-                zone_bearings_rad=self.agents[0].ring._zone_bearings,
+                sensors=self.agents[0].sensors if self.agents else (),
+                sample_readings=self.agents[0].readings if self.agents else {},
+                arena_source=self.arena_source,
             )
 
         try:
@@ -451,17 +550,12 @@ class Runner:
 
         self.env.step(actions, action_id=[a.robot.id for a in self.agents])
 
-        # Sensors sample AFTER motion, so every scan sees the same post-move world and no
-        # agent is measured against a staler snapshot than another. ir-sim guarantees the same
-        # ordering for its own sensors; we do it explicitly because the ring is ours.
-        # A terminal drone stops sensing -- recording its frozen scan every tick afterwards
-        # would put stale readings in the log dressed as current data.
-        self.world_scene.refresh_drones(self.env.robot_list, tick)
-        for agent in self.agents:
-            if not agent.terminal:
-                self._sample_ring(agent)
-
+        # Collisions first, so a drone that hit something this tick is terminal before the
+        # sensors run and does not record a scan from inside a wall; and so a drone clamped
+        # back into the field (unobstructed mode) senses from where the log says it is.
         self._post_step(tick, sim_time + dt)
+
+        self._sense(tick)
 
         if self._recorder is not None:
             self._recorder.tick(tick, sim_time + dt, self.agents, commands)
@@ -470,20 +564,35 @@ class Runner:
 
         return self._should_stop(tick)
 
+    # -- sensing ---------------------------------------------------------------------------------
+
+    def _sense(self, tick: int) -> None:
+        """Sample every due sensor on every active drone from the post-motion world.
+
+        ``tick`` is the tick ir-sim has just integrated, or -1 before the first. Sensing
+        happens AFTER motion and after the collision pass, so every scan sees the same
+        post-move world and no agent is measured against a staler snapshot than another;
+        ir-sim guarantees the same ordering for its own sensors, and we do it explicitly
+        because the sensors are ours. A sensor with decimation ``d`` samples when
+        ``(tick + 1) % d == 0``, which makes it fresh in the observations at ticks 0, d,
+        2d, ... A drone that became terminal -- this tick or earlier -- is not sampled: its
+        last reading is held, and ``sample_tick`` in the log says so.
+        """
+        self.world_scene.refresh_drones(self.env.robot_list, tick)
+        for agent in self.agents:
+            if agent.terminal:
+                continue
+            truth = TrueState.from_state(agent.agent_id, agent.robot.id, agent.state)
+            for sensor, every in zip(agent.sensors, self._decimations):
+                if (tick + 1) % every == 0:
+                    agent.readings[sensor.name] = sensor.sample(truth, self.world_scene, tick)
+                    agent.sample_tick[sensor.name] = tick
+
     # -- observation ---------------------------------------------------------------------------
 
     def _observe(self, agent: AgentView, tick: int, sim_time: float, peers) -> Observation:
-        if agent.last_scan is None:
-            self._sample_ring(agent)
-
-        if tick % self._marker_decimation == 0 and not agent.terminal:
-            agent.last_markers = self.marker_cam.detect(
-                agent.xy, float(agent.state[2, 0]), agent.z,
-                self.arena.targets, self.world_scene.static_sensing_scene,
-            )
-            agent.last_marker_tick = tick
-
         pose = self.pose_source.pose_of(agent.agent_id, agent.state, tick)
+        # A reading sampled at the end of tick s is first current at tick s + 1.
         return Observation(
             agent_id=agent.agent_id,
             tick=tick,
@@ -491,17 +600,12 @@ class Runner:
             pose=pose,
             velocity_xy=self.pose_source.velocity_of(agent.agent_id, agent.state, tick),
             lifecycle=agent.lifecycle,
-            tof=agent.last_scan,
-            markers=agent.last_markers,
+            sensors=MappingProxyType(dict(agent.readings)),
+            stale_ticks=MappingProxyType(
+                {name: tick - 1 - sampled for name, sampled in agent.sample_tick.items()}
+            ),
             peers=peers,
             arena=self.arena_info,
-            marker_stale_ticks=tick - agent.last_marker_tick,
-        )
-
-    def _sample_ring(self, agent: AgentView) -> None:
-        state = agent.state
-        agent.last_scan = agent.ring.step(
-            float(state[0, 0]), float(state[1, 0]), float(state[2, 0]), float(state[3, 0])
         )
 
     # -- command resolution ---------------------------------------------------------------------
@@ -534,6 +638,16 @@ class Runner:
         ``Velocity(vz=...)`` first and issue ``Land`` at the bottom; the commitment is this
         call either way.
         """
+        # Landing is where altitude goes to zero, and at zero every solid landmark is in the
+        # way. Without this, a drone could overfly a 1.0 m marker at 1.2 m, land on top of
+        # it and score -- an auditor did, 28 mm from the marker's centre.
+        if self.config.collision_behaviour == "stop":
+            struck = self._landmark_strike(agent.xy, 0.0)
+            if struck is not None:
+                # It came down onto the body and stopped there, so that is where it is.
+                agent.robot._state[3, 0] = min(agent.z, struck.height_m)
+                self._crash(agent, tick, sim_time, f"struck landmark {struck.id} while landing")
+                return
         self._freeze(agent)
         agent.robot._state[3, 0] = 0.0
         agent.lifecycle = Lifecycle.LANDED
@@ -541,8 +655,6 @@ class Runner:
             tick, sim_time, "landed", agent.agent_id,
             {"x": float(agent.xy[0]), "y": float(agent.xy[1])},
         )
-
-    # -- observation ------------------------------------------------------------------------------
 
     # -- post-step --------------------------------------------------------------------------------
 
@@ -553,25 +665,12 @@ class Runner:
 
             reason = self._collision_reason(agent)
             if reason is not None:
-                self._freeze(agent)
-                agent.lifecycle = Lifecycle.CRASHED
-                agent.crash_reason = reason
-                self._emit(
-                    tick, sim_time, "crashed", agent.agent_id,
-                    {"reason": reason, "x": float(agent.xy[0]), "y": float(agent.xy[1])},
-                )
+                self._crash(agent, tick, sim_time, reason)
                 continue
 
             if self._out_of_bounds(agent):
                 if self.config.collision_behaviour == "stop":
-                    self._freeze(agent)
-                    agent.lifecycle = Lifecycle.CRASHED
-                    agent.crash_reason = "left the field"
-                    self._emit(
-                        tick, sim_time, "crashed", agent.agent_id,
-                        {"reason": "left the field", "x": float(agent.xy[0]),
-                         "y": float(agent.xy[1])},
-                    )
+                    self._crash(agent, tick, sim_time, "left the field")
                     continue
                 # 'unobstructed' means no crashes, full stop -- otherwise whether the control
                 # mode is actually a control depends on whether the policy under test happens
@@ -594,6 +693,16 @@ class Runner:
                     )
 
         self.events.extend(self.mission.update(tick, sim_time, self._landed_positions()))
+
+    def _crash(self, agent: AgentView, tick: int, sim_time: float, reason: str) -> None:
+        """Make a drone CRASHED here, permanently, and say why."""
+        self._freeze(agent)
+        agent.lifecycle = Lifecycle.CRASHED
+        agent.crash_reason = reason
+        self._emit(
+            tick, sim_time, "crashed", agent.agent_id,
+            {"reason": reason, "x": float(agent.xy[0]), "y": float(agent.xy[1])},
+        )
 
     @staticmethod
     def _freeze(agent: AgentView) -> None:
@@ -626,14 +735,22 @@ class Runner:
             # drones in the run that was supposed to isolate search strategy from crashes.
             return None
 
-        # Mission markers are not ir-sim obstacles, because ir-sim's collision is strictly 2D
-        # and would make a 1.0 m marker impassable at every altitude. Height-gated here instead.
-        for target in self.arena.targets:
-            if agent.z >= target.height_m:
+        struck = self._landmark_strike(agent.xy, agent.z)
+        return None if struck is None else f"struck landmark {struck.id}"
+
+    def _landmark_strike(self, xy, z: float):
+        """The solid landmark a drone body at ``(xy, z)`` is inside, or None.
+
+        Solid landmarks -- mission markers, any placed body -- are not ir-sim obstacles,
+        because ir-sim's collision is strictly 2D and would make a 1.0 m marker impassable at
+        every altitude. Height-gated here instead, with the same predicate the ring uses.
+        """
+        for landmark in self._solid_landmarks:
+            if z >= landmark.height_m:
                 continue
-            reach = K.DRONE_RADIUS_M + target.radius_m
-            if float(np.hypot(agent.xy[0] - target.x, agent.xy[1] - target.y)) < reach:
-                return f"struck marker {target.id}"
+            reach = K.DRONE_RADIUS_M + landmark.radius_m
+            if float(np.hypot(xy[0] - landmark.x, xy[1] - landmark.y)) < reach:
+                return landmark
         return None
 
     def _out_of_bounds(self, agent: AgentView) -> bool:
@@ -719,6 +836,10 @@ def _check_finite(command, agent_id: str, tick: int, policy: str) -> None:
             )
 
 
-def run(config: RunConfig, recorder=None) -> RunResult:
-    """Build and drive one run. The one-liner entry point."""
-    return Runner(config, recorder=recorder).build().run()
+def run(config: RunConfig, recorder=None, arena: ArenaSpec | None = None) -> RunResult:
+    """Build and drive one run. The one-liner entry point.
+
+    ``arena`` supplies a resolved arena instead of generating one from the seed -- the way to
+    run with landmarks placed from a generated layout. See :class:`Runner`.
+    """
+    return Runner(config, recorder=recorder, arena=arena).build().run()

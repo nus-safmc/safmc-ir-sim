@@ -32,7 +32,7 @@ state and free communication"* — nothing stronger. See
 | F-6 | Camera is pitched 45° nose-down | Detector modelled as horizontal | Real camera sees the floor ahead, not the horizon; ground markers enter view differently |
 | F-7 | PX4 tracks setpoints with real closed-loop dynamics | First-order velocity lag, `tau` = 0.35 s | No overshoot, no attitude-induced translation, no tracking error under aggressive commands |
 | F-8 | Drones are 3D bodies with props | Circles of radius 0.18 m | Matches the radius the real VFH planner uses |
-| F-9 | Landing takes time and can fail | Modelled as a timed descent that always succeeds | Overstates landing reliability, which directly inflates score |
+| F-9 | Landing takes time and can fail | Instantaneous and always succeeds (F-16); under `stop` a landing inside a solid landmark is a crash, recorded on top of the body | Overstates landing reliability, which directly inflates score |
 | F-10 | Link loss disarms motors after 3 s | Not modelled (no comms model) | Removes a real failure mode |
 
 ## 3. Assumptions — values chosen without published data
@@ -84,11 +84,13 @@ Found during recon; recorded so nobody reintroduces them.
 |---|---|---|
 | F-11 | Mission markers are excluded from ir-sim's obstacle list and get a height-gated collision check of our own instead | Correct at cruise altitude; means marker collision is decided by our code, not shapely |
 | F-12 | The south field edge is netting in the rules but is modelled as a solid boundary at net height | Drones cannot leave the field, which is required since ir-sim has no world bounds. A drone that would have flown out is stopped rather than lost |
-| F-13 | Landing always succeeds, and takes a fixed descent at the climb-rate limit | Overstates landing reliability, which feeds straight into score |
-| F-14 | Yaw and altitude are tracked with proportional controllers in the runner, not by PX4's real control loops | No overshoot, no tracking error under aggressive commands |
+| F-13 | *Superseded by F-16.* An earlier runner flew a fixed descent at the climb-rate limit; landing is now instantaneous | — |
+| F-14 | *Superseded by F-7 and F-17.* An earlier runner held yaw and altitude with proportional controllers; it now contains no controller, and a commanded velocity reaches the kinematics unmodified | — |
 | F-15 | `collision_behaviour="stop"` freezes a drone permanently on any contact | Faithful to "no mid-run repair", but harsh: a graze is fatal. Use `unobstructed` as the control when comparing search strategies |
 | F-16 | `Land()` settles the drone to the floor in the tick it is issued | The descent is not modelled. A policy that wants a realistic approach can fly it with `Velocity(vz=...)` and issue `Land` at the bottom, but the commitment itself is instantaneous |
 | F-17 | No flight-phase model at all: no arming, no take-off sequence, no altitude hold | Deliberate. Those are guidance, and guidance belongs to the policy. It means a policy must climb before it can fly, and must hold its own altitude |
 | F-18 | Each ToF zone is a 5.625 x 5.625 degree **cone** on the real sensor | Cast as an infinitely thin ray | At the 3 m gate a real zone spans about +/-15 cm, so a thin ray can slip past a pillar edge the hardware would have caught. Makes the simulated sensor slightly *worse* at spotting thin obstacles than the real one, which is the safe direction to be wrong |
 | F-19 | `TOF_RATE_HZ` (15 Hz) is recorded but not used | The ring samples synchronously at the tick rate | Sensor physics we wrote down and did not implement; F-1 is its consequence. The sensor's FoV *is* now used — it derives the zone width — but only as an angle, not as a beam width (F-18) |
 | F-20 | The drone's airframe fits a 30 cm cube (`DRONE_BBOX_M`, the competition limit) | Collision uses `DRONE_RADIUS_M` = 0.18 m, i.e. a 36 cm diameter disc | That figure is the real VFH planner's *safety* radius, not the airframe. The simulated drone is about 20% wider than the real one -- conservative, so crashes are over- rather than under-reported |
+| F-21 | A drone between the camera and a tag hides the tag | The marker camera's occlusion test uses structure and solid landmarks only; other drones do not occlude it | A marker behind a teammate is reported as seen. Pre-existing behaviour, now stated. The ring *is* occluded by drones, so the two sensors disagree about teammates |
+| F-22 | — | `examples/03_custom_sensor.py` ships a range-only beacon sensor | A **template for the sensor contract, not a model of any hardware**: uncalibrated, invented noise, no wall bias, and the airframe carries no UWB. Any sensor added on the contract owes this ledger an entry before its readings are quoted |

@@ -1,5 +1,16 @@
 # Sensor models
 
+## What a sensor is
+
+Every sensor in this simulator is the same shape: a function from the drone's **true** state
+and the world to a frozen reading, sampled at a rate that divides the tick rate, driven by
+the runner through one contract in `sensors/base.py`. Your policy reads every reading by
+name from `obs.sensors`; `obs.tof` and `obs.markers` are shorthands for the two below.
+
+This page is what those two report. The contract itself, how to add a sensor, and what a
+**landmark** is — the thing you place in the arena for a sensor to find — are in
+[Adding a sensor or a landmark](10-adding-sensors-and-landmarks.md).
+
 ## The ToF ring
 
 Eight **ST VL53L5CX** multizone sensors. One raycast per drone computes all of them.
@@ -97,12 +108,15 @@ strictly 2D and `ObjectBase.z` is dead code.
 | Perimeter wall | 1.5 m | yes |
 | Inner wall, Unknown-area wall | 2.0 m | yes |
 | Pillar | 2.0 m | yes |
-| **Mission marker** | **1.0 m** | **yes at 0.5 m, no above 1.0 m** |
-| Another drone | its own altitude ±0.05 m | only if at a similar altitude |
+| **Mission marker** | **1.0 m** | **yes at 0.5 m, no at or above 1.0 m** |
+| Any other solid landmark | its own `height_m` | below its height only |
+| Point landmark (a tag, a mark, an anchor) | none | never — a ray cannot hit a point |
+| Another drone | **every altitude** | always for the ring, matching the 2D collision model; **never for the camera** (F-21) |
 
 Since the rules cap flight at 1.4 m and every wall is at least 1.5 m, structure is never
-overflyable — 2D is exact for navigation. Altitude earns its keep for markers and for other
-drones.
+overflyable — 2D is exact for navigation. Altitude earns its keep for markers and other placed
+bodies. Drones occlude each other at every altitude deliberately: collision is ir-sim's and
+strictly 2D, so what can kill you is what you can see.
 
 ### Accuracy
 
@@ -117,7 +131,7 @@ identical.
 
 ### Noise
 
-`ToFConfig(noise_std_m=...)` adds Gaussian range noise from the agent's own generator, applied
+`ToFConfig(noise_std_m=...)` adds Gaussian range noise from the sensor's own generator, applied
 before gating and **never** to a no-return — perturbing "nothing is there" is meaningless.
 
 Off by default, because the target paper's arenas are noiseless and reproducing it is our
@@ -129,7 +143,8 @@ something the paper lists as future work.
 The ring is sampled **synchronously at the tick rate**. The real ring is round-robin, one
 sensor per 8 ms, so each refreshes at ~15 Hz and the ring is **skewed by up to 64 ms** across
 sensors — it is never a synchronous snapshot. That matters for scan-matching and for a drone
-turning fast, and not much for reactive avoidance. Assumption A-8.
+turning fast, and not much for reactive avoidance. Assumption A-8. `ToFConfig(rate_hz=...)`
+will at least decimate it.
 
 Also absent: `range_sigma_mm`, `reflectance`, `ambient_per_spad` (the firmware discards them
 too); the firmware's conservative "substitute 0.40 m for an unreliable return"; and any
@@ -147,8 +162,16 @@ for m in obs.markers:
 
 Range is measured to the marker's **near surface**, not its centre. Occlusion is tested to
 just short of that surface, so a marker never occludes itself but another marker can occlude
-it. Default rate is 2 Hz, the measured AprilTag rate on the real hardware — nominally 10 Hz,
-but the detector task runs at the lowest priority in the system.
+it. Other drones do not occlude it (F-21). Default rate is 2 Hz, the measured AprilTag rate on
+the real hardware — nominally 10 Hz, but the detector task runs at the lowest priority in the
+system — so `obs.markers` is fresh every tenth tick and `obs.stale_ticks["markers"]` counts
+1–9 in between.
+
+**It detects landmarks by kind.** `MarkerCamConfig.kinds` defaults to the three mission-marker
+kinds. The real detector also reads the surveyed navigation tags (ids 12–29 in
+`laptop/setup.yaml`); in the simulator that is a [landmark](10-adding-sensors-and-landmarks.md#landmarks) of kind `"nav_tag"`
+plus one entry in `kinds`, and the detection comes back with `kind == "nav_tag"` so a policy
+can tell it from a victim — exactly as the real one can from the id range.
 
 Reporting `kind` is not cheating: the markers are team-supplied and the flown configuration
 assigns tag ids by role (0-11 landing targets, 8-11 bonus). A drone that reads a tag id does
@@ -167,22 +190,3 @@ know what it is looking at.
 A-5 (camera FOV, 1.0 rad) is derived from the QVGA intrinsics rather than measured, and the
 real camera is pitched 45° nose-down while ours is modelled horizontal (F-6) — so it sees the
 floor ahead rather than the horizon, and ground markers enter view differently.
-
-## Adding a sensor
-
-ir-sim has no sensor registry — `SensorFactory.create_sensor` is a hardcoded if/elif — so
-registration is a narrow patch applied at import, in `tof_ring.install()`. Copy that pattern.
-
-The duck-typed contract is small: `.step(state_3x1)`, `.sensor_type`, `.parent` (assigned for
-you), and `.plot` / `.step_plot` / `.plot_clear` if you want to be drawn.
-
-Two things to get right:
-
-- Read the world through `self._world_scene`, and get altitude from `self.parent.state[3, 0]`.
-  ir-sim hands `step()` only `[x, y, theta]`.
-- Do not name your `sensor_type` `lidar2d` or `fmcw_lidar2d` unless you want ir-sim to elect
-  it as `obj.lidar`, which changes what `env.get_lidar_scan()` and `FogMap` use.
-
-A `SensorRegistry` mirroring ir-sim's existing `GridMapGenerator` auto-registration would be
-roughly a 30-line upstream PR and would remove the patch entirely. Worth doing if anyone has
-an afternoon.

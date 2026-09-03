@@ -23,7 +23,31 @@ from abc import ABC, abstractmethod
 from types import MappingProxyType
 from typing import Any, Mapping
 
-__all__ = ["Blackboard", "PerfectBlackboard"]
+import numpy as np
+
+__all__ = ["Blackboard", "PerfectBlackboard", "frozen"]
+
+
+def frozen(value: Any) -> Any:
+    """An immutable equivalent of a published value: tuples, mapping proxies, read-only arrays.
+
+    Deep-copying on publish protects readers from the *publisher* (see below). It does not
+    protect readers from each other: every reader was handed the same copy, so a policy that
+    appended to a peer's list changed what every agent stepped after it saw in the same tick
+    -- the R-POL-8 order dependence again, from the reading side. Freezing at commit makes
+    the snapshot structurally read-only instead of read-only by convention.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: frozen(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(frozen(v) for v in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(frozen(v) for v in value)
+    if isinstance(value, np.ndarray):
+        out = np.array(value, copy=True)
+        out.flags.writeable = False
+        return out
+    return value
 
 
 class Blackboard(ABC):
@@ -74,7 +98,7 @@ class PerfectBlackboard(Blackboard):
     def commit(self) -> None:
         for agent_id, values in self._back.items():
             merged = dict(self._front.get(agent_id, {}))
-            merged.update(values)
+            merged.update({k: frozen(v) for k, v in values.items()})
             self._front[agent_id] = MappingProxyType(merged)
         self._back.clear()
         self._frozen = MappingProxyType(dict(self._front))

@@ -9,22 +9,27 @@ Layout, per run directory:
 
 ``run.jsonl``
     Line 1 is the header: schema version, the full resolved config, the complete arena
-    (every wall, pillar and target), the seed, and package versions. Then one line per event.
+    (every wall, pillar, target and landmark), whether that arena was generated from the seed
+    or supplied, the sensor suite, the seed, and package versions. Then one line per event.
     The last line is the footer: final score with its full arithmetic, per-agent lifecycles,
     and the mission summary.
 ``states.npz``
     Dense per-tick arrays: time, pose, velocity, lifecycle, and the command each agent was
     issued, with its arguments.
-``tof.npz``
-    Per-tick ring ranges, shaped ``(ticks, agents, n_rangers * zones_per_ranger)`` -- the
-    flattened ``ToFScan.ranges_m``, in ``(ranger, zone)`` order, anticlockwise from the nose.
-    ``zone_bearings_rad`` is stored alongside and is the only safe way to map a column back
-    to a direction.
+``<sensor>.npz``, one per recorded sensor
+    Whatever that sensor's ``record()`` returns, stacked per tick: each key becomes an array
+    shaped ``(ticks, agents, *row)``, beside ``ticks`` and ``sample_tick`` -- the tick each
+    agent's reading was actually sampled at, so a held reading (a decimated sensor, or a drone
+    that stopped sensing) is distinguishable from a fresh one. Constants from
+    ``record_static()`` are stored once. The header's ``sensors`` block lists every sensor
+    and whether it was recorded; a sensor whose reading has no fixed shape is not.
 
-    Not to be confused with the firmware's ``tof_scan_collapsed_t``, which holds the same 64
-    values indexed by *absolute clockwise bearing*. The two are a permutation of each other,
-    not the same array -- see ``docs/06-sensors.md``. Separate file because it dominates size
-    and is only needed when debugging sensing.
+    ``tof.npz`` holds ``ranges_m`` shaped ``(ticks, agents, 64)`` -- the flattened
+    ``ToFScan.ranges_m`` in ``(ranger, zone)`` order, anticlockwise from the nose -- and
+    ``zone_bearings_rad``, the only safe way to map a column back to a direction. Not to be
+    confused with the firmware's ``tof_scan_collapsed_t``, which holds the same 64 values
+    indexed by *absolute clockwise bearing*; see ``docs/06-sensors.md``. Sensor files are
+    separate because they dominate size and are only needed when debugging sensing.
 
 Two properties the format is built for:
 
@@ -109,30 +114,59 @@ def _command_row(command) -> tuple[int, list[float]]:
 class Recorder:
     """Writes one run to a directory."""
 
-    def __init__(self, directory: str | Path, record_tof: bool = True, tof_every: int = 1,
-                 overwrite: bool = False) -> None:
+    def __init__(self, directory: str | Path, record_sensors: bool = True,
+                 sensor_every: int = 1, overwrite: bool = False) -> None:
         self.directory = Path(directory)
         self.overwrite = overwrite
-        self.record_tof = record_tof
-        self.tof_every = max(int(tof_every), 1)
+        self.record_sensors = record_sensors
+        self.sensor_every = max(int(sensor_every), 1)
         self._agents: list[str] = []
         self._times: list[float] = []
         self._pose: list[np.ndarray] = []
         self._lifecycle: list[np.ndarray] = []
         self._command_kind: list[np.ndarray] = []
         self._command_args: list[np.ndarray] = []
-        self._tof_ticks: list[int] = []
-        self._tof: list[np.ndarray] = []
+        self._sensor_ticks: list[int] = []
+        # sensor name -> record key -> one (agents, *row) array per recorded tick
+        self._sensor_rows: dict[str, dict[str, list[np.ndarray]]] = {}
+        self._sensor_sample_tick: dict[str, list[np.ndarray]] = {}
+        self._sensor_static: dict[str, dict[str, np.ndarray]] = {}
+        self._sensors_skipped: set[str] = set()
+        self._sensor_names: list[str] = []
+        # sensor name -> record key -> row shape, fixed at begin() and enforced every tick
+        self._schema: dict[str, dict[str, tuple[int, ...]]] = {}
         self._header: dict[str, Any] | None = None
 
     # -- lifecycle ---------------------------------------------------------------------------
 
-    def begin(self, config, arena, agent_ids: Sequence[str], zone_bearings_rad=None) -> None:
+    def begin(self, config, arena, agent_ids: Sequence[str], sensors: Sequence = (),
+              sample_readings: Mapping[str, Any] | None = None,
+              arena_source: str = "generated") -> None:
+        """Start a run.
+
+        ``sensors`` is one drone's sensor list, for names and static arrays;
+        ``sample_readings`` that drone's first readings, so that every sensor's row schema --
+        which keys, what shapes -- is fixed and checked here, before a tick is recorded,
+        rather than discovered as a misaligned file at the end of the run.
+        """
         self._agents = list(agent_ids)
-        self._zone_bearings = (
-            np.zeros(0) if zone_bearings_rad is None
-            else np.asarray(zone_bearings_rad, dtype=np.float64).reshape(-1)
-        )
+        self._sensor_names = [s.name for s in sensors]
+        for sensor in sensors:
+            static = {}
+            for key, value in sensor.record_static().items():
+                if key in _RESERVED_SENSOR_KEYS:
+                    raise LogFormatError(
+                        f"sensor {sensor.name!r} record_static() uses reserved key {key!r}"
+                    )
+                static[key] = _numeric_array(value, f"sensor {sensor.name!r} record_static()[{key!r}]")
+            self._sensor_static[sensor.name] = static
+            if sample_readings is not None and sensor.name in sample_readings:
+                self._learn_schema(sensor, sensor.record(sample_readings[sensor.name]))
+
+        config_json = _jsonable(config)
+        # asdict() drops the class, and the class is what makes a sensor config meaningful.
+        for entry, sensor in zip(config_json.get("sensors", []), sensors):
+            entry["type"] = _type_name(sensor.config)
         self._header = {
             "schema": SCHEMA_VERSION,
             "record": "header",
@@ -145,8 +179,9 @@ class Recorder:
                 "versions": _package_versions(),
             },
             "seed": config.seed,
-            "config": _jsonable(config),
+            "config": config_json,
             "agents": self._agents,
+            "arena_source": arena_source,
             # The codebook travels with the log. Without it, states.npz is a wall of integers
             # whose meaning lives in whatever version of recorder.py happened to write it.
             "codebook": {
@@ -155,7 +190,20 @@ class Recorder:
                 "pose_columns": ["x", "y", "z", "theta"],
                 "velocity_columns": ["vx", "vy"],
                 "tof_no_return": "inf",
+                "sensor_sample_tick": "the tick whose post-motion world the recorded reading "
+                                      "reflects; -1 is the sample taken before the first tick",
             },
+            # One entry per sensor in config order. `recorded` is filled in at finish(),
+            # because whether a reading fits a table is only known once one has been seen.
+            "sensors": [
+                {
+                    "name": sensor.name,
+                    "type": _type_name(sensor.config),
+                    "rate_hz": sensor.config.rate_hz,
+                    "recorded": False,
+                }
+                for sensor in sensors
+            ],
             "arena": _jsonable(
                 {
                     "seed": arena.seed,
@@ -166,10 +214,35 @@ class Recorder:
                     "unknown_area": arena.unknown_area,
                     "walls": [asdict(w) for w in arena.walls],
                     "pillars": [asdict(p) for p in arena.pillars],
-                    "targets": [asdict(t) for t in arena.targets],
+                    # Base fields only, so a Landmark subclass with fields of its own still
+                    # reads back through Landmark(**row) when the log is re-scored.
+                    "targets": [_landmark_row(t) for t in arena.targets],
+                    "landmarks": [_landmark_row(lm) for lm in arena.landmarks],
                 }
             ),
         }
+
+    def _learn_schema(self, sensor, row) -> None:
+        """Fix a sensor's row keys and shapes from its first record(), or mark it skipped."""
+        name = sensor.name
+        if row is None:
+            self._sensors_skipped.add(name)
+            return
+        schema: dict[str, tuple[int, ...]] = {}
+        for key, value in row.items():
+            if key in _RESERVED_SENSOR_KEYS:
+                raise LogFormatError(f"sensor {name!r} record() uses reserved key {key!r}")
+            if key in self._sensor_static.get(name, {}):
+                raise LogFormatError(
+                    f"sensor {name!r} uses key {key!r} in both record() and record_static()"
+                )
+            schema[key] = _numeric_array(value, f"sensor {name!r} record()[{key!r}]").shape
+        if not schema:
+            raise LogFormatError(
+                f"sensor {name!r} record() returned an empty mapping; return None to leave "
+                f"the sensor out of the log"
+            )
+        self._schema[name] = schema
 
     def tick(self, tick: int, sim_time_s: float, agents, commands) -> None:
         self._times.append(sim_time_s)
@@ -196,14 +269,55 @@ class Recorder:
         self._command_kind.append(np.array([r[0] for r in rows], dtype=np.int8))
         self._command_args.append(np.array([r[1] for r in rows], dtype=np.float32))
 
-        if self.record_tof and tick % self.tof_every == 0:
-            self._tof_ticks.append(tick)
-            self._tof.append(
-                np.array(
-                    [a.last_scan.ranges_m.reshape(-1) for a in agents],
-                    dtype=np.float32,
+        if self.record_sensors and tick % self.sensor_every == 0:
+            self._sensor_ticks.append(tick)
+            for j, name in enumerate(self._sensor_names):
+                try:
+                    rows = [a.sensors[j].record(a.readings[name]) for a in agents]
+                except Exception as exc:  # noqa: BLE001 -- re-raised with sensor and tick
+                    raise LogFormatError(
+                        f"sensor {name!r} record() raised at tick {tick}: {exc!r}"
+                    ) from exc
+                if name in self._sensors_skipped:
+                    if any(r is not None for r in rows):
+                        raise LogFormatError(
+                            f"sensor {name!r} record() returned None at its first sample and "
+                            f"rows at tick {tick}. A sensor is recorded for the whole run or "
+                            f"not at all; return rows from the first sample, or None always."
+                        )
+                    continue
+                if name not in self._schema:
+                    # begin() was not given sample readings; learn from the first tick.
+                    self._learn_schema(agents[0].sensors[j], rows[0])
+                    if name in self._sensors_skipped:
+                        continue
+                schema = self._schema[name]
+                store = self._sensor_rows.setdefault(name, {})
+                frames: dict[str, list[np.ndarray]] = {key: [] for key in schema}
+                for agent, row in zip(agents, rows):
+                    # A sensor that records on some ticks and not others, or changes its
+                    # keys or shapes, would produce a misaligned file that loads without
+                    # complaint. Refuse it at the tick it happens, naming everything.
+                    if row is None or set(row) != set(schema):
+                        raise LogFormatError(
+                            f"sensor {name!r} record() for {agent.agent_id} at tick {tick} "
+                            f"returned keys {sorted(row) if row else None}; the schema fixed "
+                            f"at the first sample was {sorted(schema)}"
+                        )
+                    for key, shape in schema.items():
+                        value = np.asarray(row[key], dtype=np.float32)
+                        if value.shape != shape:
+                            raise LogFormatError(
+                                f"sensor {name!r} record()[{key!r}] for {agent.agent_id} at "
+                                f"tick {tick} has shape {value.shape}; the schema fixed at "
+                                f"the first sample was {shape}"
+                            )
+                        frames[key].append(value)
+                for key, values in frames.items():
+                    store.setdefault(key, []).append(np.stack(values))
+                self._sensor_sample_tick.setdefault(name, []).append(
+                    np.array([a.sample_tick[name] for a in agents], dtype=np.int32)
                 )
-            )
 
     def finish(self, result) -> str:
         if self._header is None:
@@ -218,8 +332,29 @@ class Recorder:
                 f"{self.directory} already holds a run. Refusing to overwrite it -- pick "
                 f"another directory, or pass overwrite=True if you meant to replace it."
             )
-        self.directory.mkdir(parents=True, exist_ok=True)
+        for entry in self._header["sensors"]:
+            entry["recorded"] = entry["name"] in self._sensor_rows
 
+        # Assemble every array before writing anything, so a stacking failure cannot leave a
+        # directory holding run.jsonl and states.npz but not the sensor file the header
+        # promises. Either the whole run lands on disk or none of it does.
+        states = dict(
+            time_s=np.array(self._times, dtype=np.float64),
+            pose=np.stack(self._pose) if self._pose else np.zeros((0, 0, 4), np.float64),
+            lifecycle=np.stack(self._lifecycle) if self._lifecycle else np.zeros((0, 0), np.int8),
+            command_kind=np.stack(self._command_kind) if self._command_kind else np.zeros((0, 0), np.int8),
+            command_args=np.stack(self._command_args) if self._command_args else np.zeros((0, 0, 4), np.float32),
+        )
+        sensor_files: dict[str, dict[str, np.ndarray]] = {}
+        for name, store in self._sensor_rows.items():
+            sensor_files[name] = dict(
+                ticks=np.array(self._sensor_ticks, dtype=np.int32),
+                sample_tick=np.stack(self._sensor_sample_tick[name]),
+                **{key: np.stack(frames) for key, frames in store.items()},
+                **self._sensor_static.get(name, {}),
+            )
+
+        self.directory.mkdir(parents=True, exist_ok=True)
         with (self.directory / "run.jsonl").open("w") as handle:
             handle.write(json.dumps(self._header, sort_keys=True) + "\n")
             for event in result.events:
@@ -245,24 +380,40 @@ class Recorder:
                 + "\n"
             )
 
-        np.savez_compressed(
-            self.directory / "states.npz",
-            time_s=np.array(self._times, dtype=np.float64),
-            pose=np.stack(self._pose) if self._pose else np.zeros((0, 0, 4), np.float64),
-            lifecycle=np.stack(self._lifecycle) if self._lifecycle else np.zeros((0, 0), np.int8),
-            command_kind=np.stack(self._command_kind) if self._command_kind else np.zeros((0, 0), np.int8),
-            command_args=np.stack(self._command_args) if self._command_args else np.zeros((0, 0, 4), np.float32),
-        )
-        if self.record_tof and self._tof:
-            np.savez_compressed(
-                self.directory / "tof.npz",
-                ticks=np.array(self._tof_ticks, dtype=np.int32),
-                ranges_m=np.stack(self._tof),
-                # Constant for the run, but the replay needs them to draw a ray, and a log
-                # that cannot be drawn without the simulator is not self-contained.
-                zone_bearings_rad=self._zone_bearings,
-            )
+        np.savez_compressed(self.directory / "states.npz", **states)
+        for name, arrays in sensor_files.items():
+            np.savez_compressed(self.directory / f"{name}.npz", **arrays)
         return str(self.directory)
+
+
+_RESERVED_SENSOR_KEYS = frozenset({"ticks", "sample_tick"})
+
+_LANDMARK_FIELDS = ("id", "kind", "x", "y", "radius_m", "height_m")
+
+
+def _numeric_array(value, what: str) -> np.ndarray:
+    """A numeric ndarray, or a LogFormatError naming what was wrong.
+
+    An object array saves fine and then fails to load without ``allow_pickle`` -- the kind
+    of failure that surfaces a run later, on someone else's machine.
+    """
+    try:
+        array = np.asarray(value)
+    except Exception as exc:  # noqa: BLE001
+        raise LogFormatError(f"{what} is not array-like: {exc}") from exc
+    if array.dtype.kind not in "biuf":
+        raise LogFormatError(
+            f"{what} has dtype {array.dtype}; sensor arrays must be numeric or boolean"
+        )
+    return array
+
+
+def _landmark_row(landmark) -> dict[str, Any]:
+    return {name: getattr(landmark, name) for name in _LANDMARK_FIELDS}
+
+
+def _type_name(obj) -> str:
+    return f"{type(obj).__module__}.{type(obj).__qualname__}"
 
 
 def _package_versions() -> dict[str, str]:
@@ -313,15 +464,22 @@ def load_run(directory: str | Path) -> dict[str, Any]:
             f"{jsonl} has schema {header.get('schema')!r}, this build reads {SCHEMA_VERSION!r}"
         )
 
-    out: dict[str, Any] = {"header": header, "events": events, "footer": footer}
+    out: dict[str, Any] = {"header": header, "events": events, "footer": footer, "sensors": {}}
     states = directory / "states.npz"
     if states.exists():
         with np.load(states) as data:
             out["states"] = {k: data[k] for k in data.files}
-    tof = directory / "tof.npz"
-    if tof.exists():
-        with np.load(tof) as data:
-            out["tof"] = {k: data[k] for k in data.files}
+    if "sensors" in header:
+        for entry in header["sensors"]:
+            path = directory / f"{entry['name']}.npz"
+            if entry.get("recorded") and path.exists():
+                with np.load(path) as data:
+                    out["sensors"][entry["name"]] = {k: data[k] for k in data.files}
+    elif (directory / "tof.npz").exists():
+        # A log written before the sensor suite was recorded in the header (C8) carried the
+        # ring alone, always as tof.npz. Still readable; it has no sample_tick column.
+        with np.load(directory / "tof.npz") as data:
+            out["sensors"]["tof"] = {k: data[k] for k in data.files}
     return out
 
 
@@ -331,7 +489,7 @@ def arena_from_log(header: Mapping[str, Any]):
     Regenerating from the seed would test the generator's determinism rather than reading what
     was actually simulated, and would hide a divergence between the two.
     """
-    from .world.arena import ArenaConfig, ArenaSpec, Pillar, Target, Wall
+    from .world.arena import ArenaConfig, ArenaSpec, Landmark, Pillar, Target, Wall
 
     spec = header["arena"]
     return ArenaSpec(
@@ -344,6 +502,7 @@ def arena_from_log(header: Mapping[str, Any]):
         walls=tuple(Wall(**w) for w in spec["walls"]),
         pillars=tuple(Pillar(**p) for p in spec["pillars"]),
         targets=tuple(Target(**t) for t in spec["targets"]),
+        landmarks=tuple(Landmark(**lm) for lm in spec.get("landmarks", [])),
         config=ArenaConfig(),
     )
 

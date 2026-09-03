@@ -71,43 +71,115 @@ def test_observation_exposes_no_route_to_ground_truth():
         zone_bearings_rad=np.zeros((8, 8)),
         ranger_bearings_rad=np.zeros(8),
     )
+    from collections.abc import Mapping
+    from types import MappingProxyType
+
+    from safmc_sim.sensors.base import Sensor, TrueState
+    from safmc_sim.sensors.marker_cam import MarkerDetection
+    from safmc_sim.sensors.scene import WorldScene
+    from safmc_sim.sensors.tof_ring import ToFConfig, ToFRing
+    from safmc_sim.world.landmark import Landmark
+
     obs = Observation(
         agent_id="drone_00", tick=0, sim_time_s=0.0,
         pose=Pose(1.0, 2.0, 0.5, 0.0), velocity_xy=(0.0, 0.0), lifecycle="ACTIVE",
-        tof=scan, markers=(), peers={},
+        sensors=MappingProxyType({
+            "tof": scan,
+            "markers": (MarkerDetection("victim_0", "victim", 1.5, 0.1),),
+        }),
+        stale_ticks=MappingProxyType({"tof": 0, "markers": 3}),
+        peers=MappingProxyType({"drone_01": MappingProxyType({"goal": [1.0, 2.0]})}),
         arena=ArenaInfo(20.0, 20.0, 1.4, 6.0, 600.0),
     )
 
-    banned = ("ArenaSpec", "Mission", "Runner", "AgentView", "EnvBase", "ObjectBase", "World")
+    # ir-sim and runner internals, matched by name because importing them here would drag
+    # in the environment; and our own world objects, matched by type so a subclass under any
+    # name is caught too. A Landmark inside a reading is a ground-truth position with an id.
+    banned_names = ("ArenaSpec", "Mission", "Runner", "AgentView", "EnvBase", "ObjectBase", "World")
+    banned_types = (Sensor, Landmark, WorldScene, TrueState)
     seen: set[int] = set()
 
     def walk(obj, path, depth=0):
-        if id(obj) in seen or depth > 4:
+        # The bans come first, so the depth cap can never hide a banned object; a Landmark
+        # nested deeper than a policy would ever look is still a Landmark in the observation.
+        assert type(obj).__name__ not in banned_names, f"{path} reaches {type(obj).__name__}"
+        assert not isinstance(obj, banned_types), f"{path} reaches {type(obj).__name__}"
+        if id(obj) in seen or depth > 12:
             return
         seen.add(id(obj))
-        assert type(obj).__name__ not in banned, f"{path} reaches {type(obj).__name__}"
-        if isinstance(obj, (str, bytes, int, float, bool, type(None), np.ndarray)):
+        if isinstance(obj, np.ndarray):
+            # An object array is a container; a numeric one is a leaf.
+            if obj.dtype == object:
+                for i, v in enumerate(obj.ravel()):
+                    walk(v, f"{path}.flat[{i}]", depth + 1)
             return
-        if isinstance(obj, dict):
+        if isinstance(obj, (str, bytes, int, float, bool, type(None))):
+            return
+        # A mappingproxy is not a dict; an earlier `isinstance(obj, dict)` never descended
+        # into `sensors` or `peers`, so the walk was silently not looking at the readings.
+        if isinstance(obj, Mapping):
             for k, v in obj.items():
                 walk(v, f"{path}[{k!r}]", depth + 1)
             return
-        if isinstance(obj, (list, tuple, set)):
+        if isinstance(obj, (list, tuple, set, frozenset)):
             for i, v in enumerate(obj):
                 walk(v, f"{path}[{i}]", depth + 1)
             return
         for name in dir(obj):
             if name.startswith("_"):
                 continue
+            # Only the attribute access is guarded. An earlier version wrapped the recursive
+            # call as well, so an AssertionError raised anywhere below the root was swallowed
+            # and the test could not fail -- an auditor smuggled a Landmark through it.
             try:
-                walk(getattr(obj, name), f"{path}.{name}", depth + 1)
+                value = getattr(obj, name)
             except Exception:  # noqa: BLE001 -- a property that raises exposes nothing
-                pass
+                continue
+            walk(value, f"{path}.{name}", depth + 1)
 
     walk(obs, "obs")
+
+    # The walk must be able to fail, or it guards nothing. Smuggle each banned thing into a
+    # reading and check it is found -- including a Sensor instance and a Target subclass,
+    # which a name match would miss.
+    class Victim(Landmark):
+        pass
+
+    deep = Landmark("deep", "nav_tag", 1.0, 2.0)
+    for _ in range(9):
+        deep = (deep,)
+    boxed = np.empty(1, dtype=object)
+    boxed[0] = Landmark("boxed", "nav_tag", 1.0, 2.0)
+    boxed.flags.writeable = False
+
+    class Sneaky:
+        @property
+        def where(self):
+            return Landmark("prop", "nav_tag", 1.0, 2.0)
+
+    for leak in (
+        (Landmark("t", "nav_tag", 1.0, 2.0),),
+        Victim("v", "victim", 1.0, 2.0),
+        ToFRing(ToFConfig(), np.random.default_rng(0)),
+        TrueState("d", 0, 1.0, 2.0, 0.5, 0.0, 0.0, 0.0),
+        deep,                                            # nine tuples down
+        frozenset({Landmark("f", "nav_tag", 1.0, 2.0)}),
+        boxed,                                           # a read-only object array
+        Sneaky(),                                        # behind a property
+    ):
+        smuggled = dataclasses.replace(
+            obs, sensors=MappingProxyType({**obs.sensors, "leak": leak})
+        )
+        seen.clear()
+        with pytest.raises(AssertionError, match="leak"):
+            walk(smuggled, "obs")
     # And the obvious names are simply absent.
-    for attribute in ("env", "arena_spec", "mission", "targets", "obstacles", "world"):
+    for attribute in ("env", "arena_spec", "mission", "targets", "obstacles", "world",
+                      "landmarks", "truth"):
         assert not hasattr(obs, attribute)
+    # The shorthands are the mapping, not a second copy of it.
+    assert obs.tof is obs.sensors["tof"]
+    assert obs.markers is obs.sensors["markers"]
 
 
 def test_registry_overwrites_with_a_warning_rather_than_raising():
@@ -201,3 +273,25 @@ def test_policy_config_is_read_only():
     policy = P("d0", {"a": 1}, np.random.default_rng(0), ArenaInfo(20, 20, 1.4, 6, 600))
     with pytest.raises(TypeError):
         policy.config["a"] = 2
+
+
+def test_a_reader_cannot_mutate_a_published_value_for_the_agents_stepped_after_it():
+    """R-POL-8 from the reading side.
+
+    Deep-copying on publish protected readers from the publisher, but every reader got the
+    same copy: an auditor appended to a peer's published list inside step() and the agents
+    stepped after it saw the change in the same tick, the ones before did not. Published
+    containers are frozen at commit -- tuples, mapping proxies, read-only arrays.
+    """
+    board = PerfectBlackboard()
+    board.publish("a", {"path": [[1.0, 2.0], [3.0, 4.0]], "tags": {"x", "y"},
+                        "grid": np.zeros((2, 2)), "meta": {"n": 1}})
+    board.commit()
+    view = board.snapshot("b")["a"]
+    assert isinstance(view["path"], tuple) and isinstance(view["path"][0], tuple)
+    assert isinstance(view["tags"], frozenset)
+    with pytest.raises(TypeError):
+        view["meta"]["n"] = 2
+    with pytest.raises(ValueError):
+        view["grid"][0, 0] = 1.0
+    assert not hasattr(view["path"], "append")

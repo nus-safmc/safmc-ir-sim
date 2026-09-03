@@ -320,3 +320,149 @@ survives independently. They are **not** a current claim about anything.
 
 **Open.** Rebuild a comparison once the team has written its own policies — that is now the
 intended shape.
+
+---
+
+## C8 — sensors and landmarks become primitives
+
+**Why.** Two sensors, two unrelated interfaces, five files to edit for a third, and an "Adding
+a sensor" section in `docs/06-sensors.md` that described an ir-sim factory patch removed at C3.
+The team wants mocked cameras, optical flow and UWB, and things in the arena for them to
+perceive — start marks, surveyed AprilTags, vision cues. [ADR-0005](adr/0005-sensor-and-landmark-primitives.md).
+
+**Built.**
+
+- `sensors/base.py` — the contract: `SensorConfig` (frozen, named, rated, `build(rng)`),
+  `Sensor` (`sample(truth, world, tick)`, optional `record`), `TrueState`, `read_only`,
+  `decimation`. One timing rule for every sensor: sampled before tick 0, then after motion when
+  `(t + 1) % d == 0`.
+- `world/landmark.py` — `Landmark(id, kind, x, y, radius_m, height_m)`; solid ⇔ footprint and
+  height; solid ones occlude and collide, points do neither. `Target` is now a `Landmark`.
+- `sensors/scene.py` — `WorldScene` carries the landmark list and is the only world a sensor sees.
+- The ring and the camera ported onto the contract. The camera detects landmarks **by kind**
+  (`MarkerCamConfig.kinds`), so a nav tag is a landmark plus one config entry.
+- `runner.py` — `RunConfig.sensors` (default `flown_sensors()`), one `_sense` path for every
+  sensor, per-(drone, sensor) generators, solid-landmark collision, and a refusal of any point
+  landmark no configured sensor can report.
+- `api.py` — `Observation.sensors` and `stale_ticks`; `tof` and `markers` become shorthands
+  that raise by name when the run does not carry that sensor.
+- `recorder.py` — `<name>.npz` per recorded sensor with `sample_tick`; header `sensors` block;
+  landmarks in the arena block. `load_run()["sensors"][name]`.
+- `world/arena.py` — `ArenaConfig.landmarks`, `ArenaSpec.landmarks` / `all_landmarks` /
+  `landmark_scene()`; solid placed landmarks are structure to the generator; validation.
+- `examples/03_custom_sensor.py` — a range-only beacon sensor, four anchors, a policy that
+  reads it by name. A template, not a model (F-22).
+- Spec: R-SENS-12..16, R-WORLD-7..8; R-POL-3 and R-OBS-2 amended. A new guide,
+  `docs/10-adding-sensors-and-landmarks.md`, in the reading order beside "Writing a policy";
+  `docs/06` keeps the flown models. Docs 04–08, ARCHITECTURE, FIDELITY (F-21, F-22), README.
+
+**Verified — TESTED.** 239 tests. `tests/test_sensor_primitive.py` builds a sensor the way the
+docs say to and checks: names and rates refused at construction; a custom reading reaches the
+policy by name with the documented staleness; per-drone instances and generators; adding a
+sensor does not perturb earlier sensors' streams (R-DET-3); byte-identical runs with a noisy
+custom sensor (R-DET-1); the log by name with `sample_tick`; reserved keys refused; a spy
+sensor is handed `TrueState` and `WorldScene` and nothing with `arena`/`mission`/`agents`; the
+camera reports only its configured kinds; two cameras under two names. `tests/test_landmarks.py`
+covers solid vs point, the height gate, config and `replace` placement, generation around a
+placed body, validation, and a fence of 0.6 m posts that kills a fleet at 0.4 m and not at
+0.9 m. The R-POL-4 walk now descends into mappings and bans `Landmark`, `Target`, `WorldScene`,
+`TrueState` and `Sensor`.
+
+**Verified — MEASURED.** Full suite 45 s (38 s at C7 with 200 tests). The example runs 60 s of
+10 drones with three sensors and writes `beacons.npz` shaped `(1200, 10, 4)`.
+
+Against the pre-change tree (`3a24398`, run in a separate process from a `git archive` of its
+`src/`): the default arena is **identical for every seed 0–29** — walls, pillars, targets and
+room; and a default `sdlw` run (seed 3, 10 drones, 30 s) is **byte-identical** in
+`states.npz`, in every recorded ToF row including row 0, and in every event. The tick-0
+change below is to the *observation* a policy is handed before the first step, which the log
+never held; the reference policy climbs before it reads the ring, so nothing it did changed.
+
+**Found while building.** The R-POL-4 walk did not descend into a `MappingProxyType` (it is
+not a `dict`), so the new `sensors` mapping would have been skipped. Other drones never
+occluded the camera (now F-21). A solid landmark placed by config had to become structure for
+the generator — on seed 7 a random inner wall landed on one, caught by a test.
+
+**Behaviour that changed.** The camera samples at the end of tick t−1 instead of the top of
+tick t: same world state, its readings are identical. The **tick-0 ring observation** is
+different: the old runner sampled it lazily before the drone bodies had been added to the
+scene, so at tick 0 no drone saw its neighbours; now every drone does. The recorded rows are
+unaffected (row 0 was always the post-step scan) and later observations are identical; the
+byte-identical comparison above is the measurement. A marker
+strike is reported as `struck landmark <id>`, not `struck marker`.
+`Recorder(record_tof=, tof_every=)` is `Recorder(record_sensors=, sensor_every=)`;
+`load_run()["tof"]` is `load_run()["sensors"]["tof"]`, which also gains `sample_tick`.
+
+**Audited.** Two independent adversarial audits against R-SENS-12..16 and R-WORLD-7..8, each
+told to falsify rather than confirm. Findings that changed code, all now under test:
+
+- The R-POL-4 walk **could not fail**: its try/except wrapped the recursive call and
+  swallowed every assertion below the root, in this version and in every earlier one. An
+  auditor smuggled a `Landmark` and a `TrueState` through it. The walk now guards only the
+  attribute access, bans by `isinstance`, and the test proves it can fail.
+- `ToFScan.ranges_m` was **writable**, and the scan is held between samples: one write in a
+  policy put `-7` into 18 of 20 recorded rows. Read-only now, as the bearings were; the
+  runner refuses any sensor whose first reading a policy could write into.
+- Reachability validation **ignored solid landmarks**: an arena with every doorway plugged
+  by posts validated. Solid landmarks are now in the occupancy grid, placed footprints are
+  fixed structure to the generator, and a take-off position inside a body is refused.
+- A drone could **land on top of a 1.0 m marker** from 1.2 m and score 15. Landing inside a
+  solid landmark is a crash.
+- A `Landmark` with kind `"victim"` was accepted as a **decoy** the camera would report and
+  the mission would never score. Refused on the config path and the replace path.
+- The documented `dataclasses.replace` placement **could not be run**. `run(config,
+  arena=placed)` now exists; the header records `arena_source`.
+- A config that skipped `super().__post_init__()` could name itself `states` and
+  **overwrite `states.npz`**; `TOF` and `tof` collided on a case-insensitive filesystem.
+  Names are re-validated by `RunConfig`, case-insensitively.
+- A `record()` whose keys or shapes changed between ticks wrote a **misaligned file** that
+  loaded without complaint, and a stacking failure left `run.jsonl` beside a missing sensor
+  file. The row schema is fixed at run start and enforced every tick; the log is written all
+  or nothing.
+- A `Landmark` subclass with extra fields, or one with NaN geometry, **broke offline
+  re-scoring**. The header records base fields only; geometry must be finite.
+- No test guarded "sensed after motion" or "a terminal drone stops sampling" — both mutants
+  survived the suite. Both have tests.
+
+Doc claims the audits falsified and that were corrected: "the ring is always recorded"; "the
+walk never inspected any reading" (it walked `obs.tof`; what it never did was fail); the
+reserved-key check happens at run start, not construction; `docs/04`'s diagram placed the
+sensors inside ir-sim; `docs/08` still described the six-command API removed at C7;
+FIDELITY F-9, F-13 and F-14 described the removed descent and controllers; `docs/07`'s log
+sizes were ten times stale.
+
+**Audited again.** A second pass on the fixes, told to re-create each hole and its
+neighbours. What it found, all now fixed and under test:
+
+- `read_only()` returned a *view*: the writable original was one `.base` away, and
+  `obs.tof.zone_bearings_rad.base[:] += 0.5` re-aimed the ring for the run. It copies now,
+  `RayScene` owns copies, and the build-time check follows the `.base` chain and refuses
+  object arrays.
+- A `Landmark` subclass that skipped `super().__post_init__()` reached the log with an empty
+  kind or a NaN and broke offline re-scoring. Every invariant is re-checked on the resolved
+  arena, and a `Target` subclass with an unknown kind is refused too.
+- Published blackboard values were mutable by *readers*: an agent that appended to a peer's
+  list changed what the agents stepped after it saw in the same tick (pre-existing).
+  Published containers are frozen at commit.
+- Pre-C8 logs lost their `tof.npz` in `load_run`. They fall back to it.
+- The walk test's depth cap ran before its bans, and it treated `frozenset` and object
+  arrays as leaves. Bans first, deeper cap, both containers walked; eight smuggling cases.
+- A sensor returning `None` at its first sample and rows later was silently unrecorded; a
+  `record_static()` returning a string saved and then failed to load; a `record()` that
+  raised lost its sensor and tick. All refused by name.
+- A supplied arena left the config's `arena_config` in the header describing an arena that
+  was never flown; the arena's own config replaces it. A drone that crashed while landing
+  was recorded hovering at cruise; it is recorded on top of the body.
+- A sloppy config's `rate_hz="4"` and `sensors=None` raised bare `TypeError`s; `ConfigError`.
+
+Design choices the pass questioned, kept and now stated: under `unobstructed` a landing
+inside a body stands, because that mode switches every crash off; only a sensor's *first*
+reading is checked for immutability; `sensed_coverage` on old logs shifts ~0.1 % because
+markers now occupy the grid. **274 tests.**
+
+**Open.** No sensor beyond the flown two is a model of anything; the example is a template.
+A sensor that feeds localisation — flow, UWB, nav tags — is half a feature until a
+`PoseSource` consumes it (ADR-0003). The CLI has no `--sensors`; custom sensors are configured
+in Python, as `examples/03_custom_sensor.py` shows. The contract bounds a sensor's *reach*
+(R-SENS-15) but cannot bound its *use*: a sensor that returned every landmark's true position
+would pass every check. That is R-SENS-11's review obligation, not a property of the code.

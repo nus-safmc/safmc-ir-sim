@@ -97,6 +97,14 @@ class RayScene:
             raise ConfigError("circle_z_min length must match circles")
         if len(self.segment_z_min) != len(self.segments):
             raise ConfigError("segment_z_min length must match segments")
+        # One scene is shared by every sensor on every drone. A sensor that wrote into it
+        # would move a wall for the whole fleet, so the scene owns read-only copies -- copies,
+        # not views, because a read-only view still exposes the writable original as .base.
+        for name in ("circles", "circle_heights", "segments", "segment_heights",
+                     "circle_z_min", "segment_z_min"):
+            copy = np.array(getattr(self, name), dtype=float, copy=True)
+            copy.flags.writeable = False
+            object.__setattr__(self, name, copy)
 
     @property
     def n_primitives(self) -> int:

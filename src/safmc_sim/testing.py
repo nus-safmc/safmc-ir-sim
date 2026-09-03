@@ -11,6 +11,9 @@ observation, and finding those by running a whole mission is slow and imprecise.
 
 from __future__ import annotations
 
+from types import MappingProxyType
+from typing import Any, Mapping
+
 import numpy as np
 
 from .api import ArenaInfo, Observation, Pose
@@ -21,6 +24,7 @@ from .constants import (
     RUN_DURATION_S,
     START_AREA_DEPTH_M,
 )
+from .sensors.base import read_only
 from .sensors.tof_ring import ToFConfig, ToFScan, _ranger_bearings, _zone_offsets
 
 __all__ = ["make_observation", "make_scan"]
@@ -52,9 +56,9 @@ def make_scan(config: ToFConfig | None = None, **ranger_ranges: float) -> ToFSca
 
     bearings = _ranger_bearings(cfg)
     return ToFScan(
-        ranges_m=ranges,
-        zone_bearings_rad=bearings[:, None] + _zone_offsets(cfg)[None, :],
-        ranger_bearings_rad=bearings,
+        ranges_m=read_only(ranges),
+        zone_bearings_rad=read_only(bearings[:, None] + _zone_offsets(cfg)[None, :]),
+        ranger_bearings_rad=read_only(bearings),
     )
 
 
@@ -68,15 +72,31 @@ def make_observation(
     markers: tuple = (),
     peers: dict | None = None,
     front_range_m: float | None = None,
+    sensors: Mapping[str, Any] | None = None,
+    stale_ticks: Mapping[str, int] | None = None,
     **ranger_ranges: float,
 ) -> Observation:
     """An ``Observation`` with sensible defaults: mid-arena, at cruise, nothing in range.
 
     Name any ranger to put something in front of it -- ``front_range_m=0.3`` is the common
-    case and has its own argument.
+    case and has its own argument. ``sensors`` adds or overrides readings by sensor name, for
+    a policy that reads a sensor of your own:
+
+        make_observation(sensors={"beacons": BeaconReading(...)})
     """
     if front_range_m is not None:
         ranger_ranges.setdefault("front", front_range_m)
+    readings: dict[str, Any] = {"tof": make_scan(**ranger_ranges), "markers": tuple(markers)}
+    if sensors:
+        if markers and "markers" in sensors:
+            raise ValueError("pass markers= or sensors={'markers': ...}, not both")
+        readings.update(sensors)
+    ages = {name: 0 for name in readings}
+    if stale_ticks:
+        unknown = set(stale_ticks) - set(readings)
+        if unknown:
+            raise ValueError(f"stale_ticks names sensors the observation lacks: {sorted(unknown)}")
+        ages.update(stale_ticks)
     return Observation(
         agent_id="drone_00",
         tick=tick,
@@ -84,8 +104,8 @@ def make_observation(
         pose=Pose(x=x, y=y, z=z, theta=theta),
         velocity_xy=(0.0, 0.0),
         lifecycle=lifecycle,
-        tof=make_scan(**ranger_ranges),
-        markers=markers,
+        sensors=MappingProxyType(readings),
+        stale_ticks=MappingProxyType(ages),
         peers=peers or {},
         arena=ArenaInfo(
             width_m=FIELD_WIDTH_M,

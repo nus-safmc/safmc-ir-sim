@@ -9,23 +9,31 @@ from safmc_sim.constants import (
     TOF_MOUNT_RADIUS_M,
 )
 from safmc_sim.errors import ConfigError
+from safmc_sim.sensors.base import TrueState
 from safmc_sim.sensors.raycast import RayScene
 from safmc_sim.sensors.scene import WorldScene
 from safmc_sim.sensors.tof_ring import ToFConfig, ToFRing, _ranger_bearings, _zone_offsets
+from safmc_sim.world.landmark import Landmark
 
 
-def box_scene(size=20.0, height=2.0, markers=None):
+def box_scene(size=20.0, height=2.0, landmarks=()):
     segments = np.array(
         [[0, 0, size, 0], [size, 0, size, size], [size, size, 0, size], [0, size, 0, 0]],
         dtype=float,
     )
     return WorldScene(
-        RayScene(segments=segments, segment_heights=np.full(4, height)), markers=markers
+        RayScene(segments=segments, segment_heights=np.full(4, height)), landmarks=landmarks
     )
 
 
-def make_ring(scene, seed=0, **cfg):
-    return ToFRing(ToFConfig(**cfg), scene, np.random.default_rng(seed))
+def make_ring(seed=0, **cfg):
+    return ToFRing(ToFConfig(**cfg), np.random.default_rng(seed))
+
+
+def scan(ring, scene, x, y, theta, z, tick=0):
+    """Sample ``ring`` at a pose. The runner builds the TrueState; tests build it by hand."""
+    truth = TrueState("drone_00", -1, x=x, y=y, z=z, theta=theta, vx=0.0, vy=0.0)
+    return ring.sample(truth, scene, tick)
 
 
 def test_ring_geometry_matches_the_flown_hardware():
@@ -56,7 +64,7 @@ def test_config_is_applied_not_ignored():
     defaults while `sensor.config` reported the requested values -- meaning the recorded log
     described a ring that was never simulated.
     """
-    ring = make_ring(box_scene(), front_index=4)
+    ring = make_ring(front_index=4)
     assert np.allclose(ring._ranger_bearings, _ranger_bearings(ToFConfig(front_index=4)))
     assert not np.allclose(ring._ranger_bearings, _ranger_bearings(ToFConfig(front_index=0)))
 
@@ -64,8 +72,8 @@ def test_config_is_applied_not_ignored():
 def test_ranges_are_correct_against_hand_computed_geometry():
     # Drone at the centre of a 20 m box, facing +x. The forward ranger's origin is one mount
     # radius ahead, so its nearest zone reads slightly less than 10 m.
-    ring = make_ring(box_scene(20.0), sensor_max_range_m=25.0, max_valid_m=20.0)
-    fwd = ring.step(10.0, 10.0, 0.0, 0.5).ranges_m[0]
+    ring = make_ring(sensor_max_range_m=25.0, max_valid_m=20.0)
+    fwd = scan(ring, box_scene(20.0), 10.0, 10.0, 0.0, 0.5).ranges_m[0]
     axis = 10.0 - TOF_MOUNT_RADIUS_M
     # The innermost zones are 2.8125 deg off-axis, so range = axis / cos(offset).
     off = np.deg2rad(2.8125)
@@ -76,11 +84,11 @@ def test_ranges_are_correct_against_hand_computed_geometry():
 def test_gate_rejects_returns_outside_the_acceptance_window():
     """Outside [50, 3000] mm is reported as no-return, never as a fabricated number."""
     scene = box_scene(20.0)
-    far = make_ring(scene).step(10.0, 10.0, 0.0, 0.5)      # walls ~10 m away, gate is 3 m
+    far = scan(make_ring(), scene, 10.0, 10.0, 0.0, 0.5)      # walls ~10 m away, gate is 3 m
     assert np.all(np.isinf(far.ranges_m))
     assert np.isinf(far.min_range_m)
 
-    near = make_ring(scene).step(18.0, 10.0, 0.0, 0.5)
+    near = scan(make_ring(), scene, 18.0, 10.0, 0.0, 0.5)
     assert np.isfinite(near.ranges_m[0]).all()
     axis = 2.0 - TOF_MOUNT_RADIUS_M
     assert near.min_range_m == pytest.approx(axis / np.cos(np.deg2rad(2.8125)), abs=1e-6)
@@ -95,17 +103,17 @@ def test_gate_bounds_are_the_firmware_values():
 
 def test_height_gating_reaches_the_scan():
     """A 1.0 m marker is seen at cruise altitude and not above it."""
-    markers = RayScene(circles=np.array([[12.0, 10.0, 0.15]]), circle_heights=np.array([1.0]))
-    scene = box_scene(20.0, markers=markers)
-    assert np.isfinite(make_ring(scene).step(10.0, 10.0, 0.0, 0.5).ranges_m).any()
-    assert np.all(np.isinf(make_ring(scene).step(10.0, 10.0, 0.0, 1.2).ranges_m))
+    marker = Landmark("m", "victim", 12.0, 10.0, radius_m=0.15, height_m=1.0)
+    scene = box_scene(20.0, landmarks=[marker])
+    assert np.isfinite(scan(make_ring(), scene, 10.0, 10.0, 0.0, 0.5).ranges_m).any()
+    assert np.all(np.isinf(scan(make_ring(), scene, 10.0, 10.0, 0.0, 1.2).ranges_m))
 
 
 def test_noise_is_drawn_from_the_supplied_generator_and_is_reproducible():
     scene = box_scene(20.0)
 
     def sample(seed):
-        return make_ring(scene, seed=seed, noise_std_m=0.02).step(18.0, 10.0, 0.0, 0.5).ranges_m
+        return scan(make_ring(seed=seed, noise_std_m=0.02), scene, 18.0, 10.0, 0.0, 0.5).ranges_m
 
     assert np.array_equal(sample(3), sample(3))
     assert not np.array_equal(sample(3), sample(4))
@@ -113,15 +121,15 @@ def test_noise_is_drawn_from_the_supplied_generator_and_is_reproducible():
 
 def test_noise_never_invents_a_return_where_there_was_none():
     """Perturbing 'nothing is there' is meaningless."""
-    scan = make_ring(box_scene(20.0), noise_std_m=0.5).step(10.0, 10.0, 0.0, 0.5)
-    assert np.all(np.isinf(scan.ranges_m))
+    result = scan(make_ring(noise_std_m=0.5), box_scene(20.0), 10.0, 10.0, 0.0, 0.5)
+    assert np.all(np.isinf(result.ranges_m))
 
 
 def test_bearing_arrays_handed_to_a_policy_are_read_only():
     """A frozen dataclass blocks rebinding but not in-place numpy writes."""
-    scan = make_ring(box_scene()).step(10.0, 10.0, 0.0, 0.5)
+    result = scan(make_ring(), box_scene(), 10.0, 10.0, 0.0, 0.5)
     for name in ("zone_bearings_rad", "ranger_bearings_rad"):
-        array = getattr(scan, name)
+        array = getattr(result, name)
         assert not array.flags.writeable, f"{name} is writable"
         with pytest.raises(ValueError):
             array[:] = 0.0
@@ -207,13 +215,11 @@ def test_rangers_point_where_their_names_say():
         6: [-1, -2, 1, -2],   # right  (-y)
     }
     for expected_ranger, wall in cases.items():
-        ring = ToFRing(ToFConfig(), scene_for(wall), np.random.default_rng(0))
-        per_ranger = np.min(ring.step(0.0, 0.0, 0.0, 0.5).ranges_m, axis=1)
+        per_ranger = np.min(scan(make_ring(), scene_for(wall), 0.0, 0.0, 0.0, 0.5).ranges_m, axis=1)
         assert int(np.argmin(np.where(np.isfinite(per_ranger), per_ranger, np.inf))) == expected_ranger
 
     # Yaw the drone 90 degrees anticlockwise and the wall that was ahead is now on its right.
-    ring = ToFRing(ToFConfig(), scene_for(cases[0]), np.random.default_rng(0))
-    per_ranger = np.min(ring.step(0.0, 0.0, np.pi / 2, 0.5).ranges_m, axis=1)
+    per_ranger = np.min(scan(make_ring(), scene_for(cases[0]), 0.0, 0.0, np.pi / 2, 0.5).ranges_m, axis=1)
     assert int(np.argmin(np.where(np.isfinite(per_ranger), per_ranger, np.inf))) == 6
 
 

@@ -1,0 +1,119 @@
+"""Landmarks: things placed in the world for sensors to find.
+
+Structure -- walls and pillars -- is what a drone must not hit. A *landmark* is everything
+else that is deliberately in the arena: a mission marker with an AprilTag on its face, a
+surveyed navigation tag on a wall, a start-point mark painted on the floor, a radio anchor in
+a corner. A landmark has a position and a kind. Whether it has a body is up to it.
+
+Two rules, and the second is the one that keeps policies honest.
+
+**A landmark is solid if it has both a footprint and a height.** Solid landmarks occlude
+ranging -- height-gated, so a 1.0 m marker hides the wall behind it from a drone at 0.5 m but
+not from one at 1.2 m (R-SENS-6) -- and they can be struck. Everything else is a point: a tag
+painted on a wall does not block a time-of-flight ray, and a drone cannot crash into a radio
+anchor's signal. The same predicate, :attr:`Landmark.solid`, decides both, so what can kill
+you is exactly what the ring can see.
+
+**A landmark reaches a policy only through a sensor's geometric query.** The runner never
+hands the landmark list to a policy. The ToF ring sees solid landmarks as anonymous circles.
+The marker camera reports id, kind, range and bearing for the kinds it is configured to detect
+and nothing for the rest. A UWB anchor is invisible to a camera because a camera does not
+detect radio -- not because someone remembered to hide it. This is R-SENS-11 restated from the
+world's side.
+
+Mission targets are landmarks with scoring semantics; see
+:class:`~safmc_sim.world.arena.Target`. Everything else is placed with
+``ArenaConfig(landmarks=...)``, or -- when placement depends on the generated layout -- with
+``dataclasses.replace(arena, landmarks=...)`` and ``run(config, arena=placed)``.
+
+Subclass ``Landmark`` if a sensor needs more than these fields (a tag family, an anchor's
+channel), but know that the log records only the base fields: a subclass round-trips out of
+``run.jsonl`` as a plain ``Landmark``, which is all scoring and replay need.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Iterable
+
+import numpy as np
+
+from ..errors import ConfigError
+from ..sensors.raycast import RayScene
+
+__all__ = ["Landmark", "occluder_scene", "validate_landmark_fields"]
+
+
+@dataclass(frozen=True)
+class Landmark:
+    """Something placed in the arena that a sensor may perceive. Not structure.
+
+    ``radius_m`` is the footprint and ``height_m`` the top of the body above the floor. Both
+    default to zero, which makes the landmark a point: a tag on a wall, an anchor. A footprint
+    with zero height is a flat mark on the floor -- it has an extent but no body. Give it both
+    to make it a body that occludes rays and can be hit.
+    """
+
+    id: str
+    kind: str
+    x: float
+    y: float
+    radius_m: float = 0.0
+    height_m: float = 0.0
+
+    def __post_init__(self) -> None:
+        validate_landmark_fields(self)
+
+    @property
+    def solid(self) -> bool:
+        """True if this landmark occludes rays and can be collided with."""
+        return self.radius_m > 0.0 and self.height_m > 0.0
+
+    @property
+    def xy(self) -> np.ndarray:
+        return np.array([self.x, self.y])
+
+
+def validate_landmark_fields(lm: Landmark, error: type = ConfigError) -> None:
+    """The invariants every landmark must satisfy, as a function so they can be re-checked.
+
+    ``Landmark.__post_init__`` runs this at construction. ``validate_arena`` runs it again on
+    every landmark in a resolved arena, because a subclass that forgot
+    ``super().__post_init__()`` would otherwise reach the log with a NaN or an empty kind and
+    break offline re-scoring -- an auditor did exactly that.
+    """
+    if not isinstance(lm.id, str) or not lm.id:
+        raise error(f"landmark id must be a non-empty string, got {lm.id!r}")
+    if not isinstance(lm.kind, str) or not lm.kind:
+        raise error(f"landmark {lm.id!r}: kind must be a non-empty string")
+    for name in ("x", "y", "radius_m", "height_m"):
+        value = getattr(lm, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise error(f"landmark {lm.id!r}: {name} must be a finite number, got {value!r}")
+    if lm.radius_m < 0.0 or lm.height_m < 0.0:
+        raise error(
+            f"landmark {lm.id!r}: radius_m and height_m must be >= 0, "
+            f"got {lm.radius_m} and {lm.height_m}"
+        )
+    if lm.height_m > 0.0 and lm.radius_m <= 0.0:
+        raise error(
+            f"landmark {lm.id!r} has height_m={lm.height_m} but no footprint. height_m is "
+            f"the top of a body, and a point has no body -- give it a radius_m, or drop the "
+            f"height."
+        )
+
+
+def occluder_scene(landmarks: Iterable[Landmark]) -> RayScene:
+    """The ray-castable view of the solid landmarks. Points contribute nothing.
+
+    Every circle stands on the floor, so ``circle_z_min`` keeps its default of zero and the
+    height gate alone decides whether a ray at altitude ``z`` is blocked.
+    """
+    solid = [lm for lm in landmarks if lm.solid]
+    if not solid:
+        return RayScene()
+    return RayScene(
+        circles=np.array([[lm.x, lm.y, lm.radius_m] for lm in solid], dtype=float),
+        circle_heights=np.array([lm.height_m for lm in solid], dtype=float),
+    )

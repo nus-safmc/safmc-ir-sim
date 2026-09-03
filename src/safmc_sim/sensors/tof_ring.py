@@ -4,11 +4,12 @@ Mirrors the flown hardware: 8 x ST VL53L5CX mounted counter-clockwise at 45 degr
 gapless 360 degree coverage, on a 40 mm radius, all optical axes horizontal, each contributing
 8 zones of 5.625 degrees across its 45 degree field of view.
 
-The runner owns this. It is deliberately **not** plugged into ir-sim's sensor system: doing
+It is a :class:`~safmc_sim.sensors.base.Sensor` like any other, and the runner drives it
+through that contract. It is deliberately **not** plugged into ir-sim's sensor system: doing
 that required monkeypatching ``SensorFactory.create_sensor`` (ir-sim has no sensor registry),
 and it dragged in a plotting path that never runs, a walk up to the parent object to find the
 drone's altitude, and arithmetic to reverse-engineer the tick number from ir-sim's clock. The
-runner already has the state, the altitude and the tick. Calling ``step()`` directly is both
+runner already has the state, the altitude and the tick. Calling ``sample()`` directly is both
 smaller and honest about who is in charge.
 """
 
@@ -31,6 +32,7 @@ from ..constants import (
 )
 from ..errors import ConfigError
 from ..frames import wrap_pi
+from .base import Sensor, SensorConfig, TrueState, read_only
 from .raycast import cast_rays
 from .scene import WorldScene
 
@@ -38,8 +40,13 @@ __all__ = ["ToFConfig", "ToFScan", "ToFRing"]
 
 
 @dataclass(frozen=True)
-class ToFConfig:
+class ToFConfig(SensorConfig):
     """Ring geometry and gating. Defaults reproduce the flown hardware exactly."""
+
+    name: str = "tof"
+    rate_hz: float | None = None
+    """Sampled every tick. The real ring is round-robin at ~15 Hz with up to 64 ms of skew
+    across sensors (divergence F-1, assumption A-8); set a rate here to at least decimate."""
 
     n_rangers: int = TOF_SENSOR_COUNT
     zones_per_ranger: int = TOF_ZONES_PER_SENSOR
@@ -85,6 +92,7 @@ class ToFConfig:
         return self.n_rangers * self.sensor_fov_rad
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.sensor_fov_rad <= 0:
             raise ConfigError(f"sensor_fov_rad must be > 0, got {self.sensor_fov_rad}")
         if self.n_rangers < 1 or self.zones_per_ranger < 1:
@@ -104,6 +112,9 @@ class ToFConfig:
             )
         if self.noise_std_m < 0.0:
             raise ConfigError("noise_std_m must be >= 0")
+
+    def build(self, rng: np.random.Generator) -> "ToFRing":
+        return ToFRing(self, rng)
 
 
 @dataclass(frozen=True)
@@ -128,18 +139,6 @@ class ToFScan:
     def min_range_m(self) -> float:
         """Nearest valid return anywhere on the ring, or ``inf``."""
         return float(np.min(self.ranges_m))
-
-
-def _read_only(array: np.ndarray) -> np.ndarray:
-    """A view that cannot be written through.
-
-    ``ToFScan`` is a frozen dataclass, which blocks rebinding but not in-place numpy writes.
-    Without this, a policy doing ``obs.tof.zone_bearings_rad[:] += 0.5`` would permanently
-    re-aim its own ring, silently and irrecoverably.
-    """
-    view = array.view()
-    view.flags.writeable = False
-    return view
 
 
 def _ranger_bearings(cfg: ToFConfig) -> np.ndarray:
@@ -177,16 +176,13 @@ def _zone_offsets(cfg: ToFConfig) -> np.ndarray:
     return (col - (cfg.zones_per_ranger - 1) / 2.0) * cfg.zone_width_rad
 
 
-class ToFRing:
-    """One drone's ring. Constructed and stepped by the runner."""
+class ToFRing(Sensor):
+    """One drone's ring. Built from a :class:`ToFConfig`; sampled by the runner."""
 
-    def __init__(self, config: ToFConfig, world_scene: WorldScene, rng: np.random.Generator,
-                 object_id: int | None = None) -> None:
-        self.config = config
-        self._world_scene = world_scene
-        self._rng = rng
-        self._object_id = object_id
+    config: ToFConfig
 
+    def __init__(self, config: ToFConfig, rng: np.random.Generator) -> None:
+        super().__init__(config, rng)
         self._ranger_bearings = _ranger_bearings(config)
         self._mount_radii = _mount_radii(config)
         self._zone_offsets = _zone_offsets(config)
@@ -195,14 +191,16 @@ class ToFRing:
             self._ranger_bearings[:, None] + self._zone_offsets[None, :]
         )
         # Handed to policies inside every ToFScan. A frozen dataclass blocks rebinding but not
-        # in-place writes, and these are the sensor's own arrays -- a policy doing
-        # `obs.tof.zone_bearings_rad[:] += 0.5` would permanently re-aim the ring.
-        self._zone_bearings_ro = _read_only(self._zone_bearings)
-        self._ranger_bearings_ro = _read_only(self._ranger_bearings)
+        # in-place writes, and these describe the sensor's own geometry -- a policy doing
+        # `obs.tof.zone_bearings_rad[:] += 0.5` would permanently re-aim the ring. read_only
+        # copies, so the sensor's own arrays are never reachable from a reading at all.
+        self._zone_bearings_ro = read_only(self._zone_bearings)
+        self._ranger_bearings_ro = read_only(self._ranger_bearings)
 
-    def step(self, x: float, y: float, theta: float, z: float) -> ToFScan:
-        """Sample the ring from a pose. Pure: same pose and scene give the same scan."""
+    def sample(self, truth: TrueState, world: WorldScene, tick: int) -> ToFScan:
+        """Sample the ring from the true pose. Same pose, scene and noise state: same scan."""
         cfg = self.config
+        x, y, theta, z = truth.x, truth.y, truth.theta, truth.z
         world_ranger = theta + self._ranger_bearings
         # Each ranger sits on the mount circle, pointing radially outward.
         origins = np.repeat(
@@ -217,19 +215,37 @@ class ToFRing:
         world_zone = (theta + self._zone_bearings).reshape(-1)
         directions = np.stack((np.cos(world_zone), np.sin(world_zone)), axis=1)
 
-        scene = self._world_scene.sensing_scene(exclude_object_id=self._object_id)
+        scene = world.sensing_scene(exclude_object_id=truth.object_id)
         raw = cast_rays(scene, origins, directions, z, cfg.sensor_max_range_m)
 
         if cfg.noise_std_m > 0.0:
             hit = np.isfinite(raw)
             # Noise on a no-return is meaningless -- there is nothing to perturb.
-            raw = np.where(hit, raw + self._rng.normal(0.0, cfg.noise_std_m, raw.shape), raw)
+            raw = np.where(hit, raw + self.rng.normal(0.0, cfg.noise_std_m, raw.shape), raw)
 
         valid = np.isfinite(raw) & (raw >= cfg.min_valid_m) & (raw <= cfg.max_valid_m)
         ranges = np.where(valid, raw, np.inf).reshape(cfg.n_rangers, cfg.zones_per_ranger)
 
+        # The scan is HELD between samples and recorded from the same object, so a policy
+        # that wrote into ranges_m would corrupt its own next observation and the log. An
+        # auditor did exactly that: 18 of 20 recorded rows read -7 after one write.
         return ToFScan(
-            ranges_m=ranges,
+            ranges_m=read_only(ranges),
             zone_bearings_rad=self._zone_bearings_ro,
             ranger_bearings_rad=self._ranger_bearings_ro,
         )
+
+    # -- the log -------------------------------------------------------------------------------
+
+    def record(self, reading: ToFScan):
+        """``ranges_m`` flattened to ``(n_rangers * zones,)`` in ``(ranger, zone)`` order.
+
+        Anticlockwise from the nose -- NOT the firmware's clockwise 64-bin order. The two are
+        a permutation of each other; map through ``zone_bearings_rad`` (docs/06-sensors.md).
+        """
+        return {"ranges_m": reading.ranges_m.reshape(-1)}
+
+    def record_static(self):
+        # Constant for the run, but the replay needs them to draw a ray, and a log that
+        # cannot be drawn without the simulator is not self-contained (R-OBS-3).
+        return {"zone_bearings_rad": self._zone_bearings.reshape(-1).copy()}

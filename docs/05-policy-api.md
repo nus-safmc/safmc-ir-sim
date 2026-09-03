@@ -61,8 +61,10 @@ Practical consequences you will notice immediately:
 | `pose` | `.x .y .z .theta` in ARENA metres/radians. **Ground truth in v0.1** |
 | `velocity_xy` | `(vx, vy)` in the ARENA frame |
 | `lifecycle` | `ACTIVE`, `LANDED` or `CRASHED`. Both terminal states are permanent |
-| `tof` | The ring. `.ranges_m` is `(8, 8)` metres — `inf` where there was no return. `.zone_bearings_rad` and `.ranger_bearings_rad` give the matching body-frame directions. `.min_range_m` is the nearest return anywhere |
-| `markers` | Tuple of `(marker_id, kind, range_m, bearing_rad)` currently visible |
+| `sensors` | Every sensor's latest reading, keyed by name. What a drone carries is `RunConfig(sensors=...)`; the default is the two below. A custom sensor's reading arrives here under the name its config gave it — see [Adding a sensor](10-adding-sensors-and-landmarks.md) |
+| `stale_ticks` | Ticks since each sensor last sampled, keyed like `sensors`. 0 is fresh. The camera runs at 2 Hz, so `stale_ticks["markers"]` counts 0–9 |
+| `tof` | Shorthand for `sensors["tof"]`: the ring. `.ranges_m` is `(8, 8)` metres — `inf` where there was no return. `.zone_bearings_rad` and `.ranger_bearings_rad` give the matching body-frame directions. `.min_range_m` is the nearest return anywhere |
+| `markers` | Shorthand for `sensors["markers"]`: a tuple of `(marker_id, kind, range_m, bearing_rad)` in view at the last camera sample |
 | `peers` | The blackboard, as of the **start** of this tick, keyed by agent id |
 | `arena` | Published field dimensions only — width, depth, ceiling, start-area depth, run duration |
 | `tick`, `sim_time_s` | Where you are |
@@ -72,7 +74,11 @@ Convenience: `obs.in_start_area`, `obs.time_remaining_s`, `obs.pose.xy`.
 Facts you will want and would otherwise have to dig for:
 
 - **The tick rate is 20 Hz**, so `dt` is 0.05 s. `yaw_rate=1.2` turns 0.06 rad per tick.
-- **Marker kinds** are exactly `"victim"`, `"bonus_victim"` and `"fire"`.
+- **Marker kinds** are `"victim"`, `"bonus_victim"` and `"fire"` by default. A run that places
+  other landmarks and tells the camera about them — a `"nav_tag"`, say — will report those
+  too, with their kind; see [landmarks](10-adding-sensors-and-landmarks.md#landmarks).
+- **A sensor the run does not carry raises**, by name: `obs.tof` on a run configured without
+  the ring says so rather than returning something empty.
 - **Rangers are numbered anticlockwise from the nose**: `ranges_m[0]` is forward, `[2]` is
   your left, `[4]` is behind, `[6]` is your right.
 - **Your drone index** is not part of the contract. If you need to differentiate drones, use
@@ -93,6 +99,10 @@ Crashing will dominate your score before anything clever does, so know the rules
 - **What can kill you is what you can see.** Other drones occlude your ring at every altitude,
   matching the collision model. If your ring is clear, you are clear.
 - **Walls and pillars are taller than the ceiling**, so they always block and always hurt.
+- **Mission markers are 1.0 m tall bodies**, and any other solid landmark is as tall as it
+  says: below that height you hit it, at or above it you fly over — and the ring sees it
+  under exactly the same rule. Landing inside one is a crash, not a rescue (in `stop` mode;
+  `unobstructed` switches every crash off, this one included).
 - **`collision_behaviour="stop"`** (the default) means one touch ends that drone's run — there
   is no repair. `--collision unobstructed` turns collisions off entirely, and is the right
   control when you want to compare *search strategy* without crash rate confounding it.
@@ -106,9 +116,12 @@ drones to spend and *when* is the actual strategic problem.
 **Randomness comes from `self.rng`.** Every policy gets its own `numpy.random.Generator`.
 Calling `numpy.random.uniform(...)` directly breaks seeded replay.
 
-**Peer data is one tick old.** `self.publish(key, value)` becomes visible — to everyone,
-including you — on the *next* tick. That is not a latency model; it is what makes the result
-independent of the order agents happen to be indexed.
+**Peer data is one tick old, and read-only.** `self.publish(key, value)` becomes visible — to
+everyone, including you — on the *next* tick. That is not a latency model; it is what makes
+the result independent of the order agents happen to be indexed. What you read back is
+frozen: lists come back as tuples, dicts as read-only mappings, arrays read-only. Mutating a
+peer's value in place would have changed what the agents stepped after you saw this tick,
+which is the same order dependence from the other side.
 
 ## Coordinating a fleet
 
@@ -168,8 +181,9 @@ def test_backs_off_from_a_wall():
 ```
 
 `safmc_sim.testing.make_observation()` builds a plausible `Observation` with everything clear,
-and lets you set individual ranges. Policies are plain objects with injected dependencies, so
-they unit-test without a simulator. Use that — a full run is 12 000 ticks.
+and lets you set individual ranges; `sensors={"beacons": ...}` adds a reading for a sensor of
+your own. Policies are plain objects with injected dependencies, so they unit-test without a
+simulator. Use that — a full run is 12 000 ticks.
 
 ## The one reference policy
 

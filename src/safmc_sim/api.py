@@ -145,9 +145,22 @@ class Observation:
     velocity_xy: tuple[float, float]
     lifecycle: str
 
-    tof: ToFScan
-    markers: tuple[MarkerDetection, ...]
-    """Markers currently detected. Empty on ticks where the detector did not sample."""
+    sensors: Mapping[str, Any]
+    """The latest reading of every sensor this drone carries, keyed by sensor name.
+
+    ``sensors["tof"]`` is a :class:`ToFScan` and ``sensors["markers"]`` a tuple of
+    :class:`MarkerDetection`; those two have the shorthands :attr:`tof` and :attr:`markers`
+    because the flown airframe carries them. Anything else is reached here under the name its
+    config was given -- ``RunConfig(sensors=...)`` decides what a drone carries, and a reading
+    is whatever its sensor's author made it, so read that sensor's docstring. Readings are
+    meant to be immutable, and the runner checks each sensor's first reading at build --
+    refusing a list, a dict, an unfrozen dataclass or a writable array (R-SENS-12) -- which
+    catches the shape a sensor was written to return; a sensor that changes shape mid-run is
+    its author's bug, not something the runner re-checks every tick. What a reading *contains* is its author's
+    honesty -- the contract keeps the arena, the mission and other agents out of a sensor's
+    reach (R-SENS-15), but it cannot stop a sensor returning more than its physical
+    counterpart could measure. That is what review and FIDELITY.md are for.
+    """
 
     peers: Mapping[str, Mapping[str, Any]]
     """Blackboard as of the START of this tick, keyed by agent id.
@@ -157,10 +170,36 @@ class Observation:
     """
 
     arena: ArenaInfo
-    tof_stale_ticks: int = 0
-    """Ticks since the ToF ring last sampled. Non-zero only if the sensor is decimated."""
+    stale_ticks: Mapping[str, int] = field(default_factory=dict)
+    """Ticks since each sensor last sampled, keyed like ``sensors``. Zero means fresh.
 
-    marker_stale_ticks: int = 0
+    Non-zero only for a decimated sensor -- the marker camera at 2 Hz is fresh every tenth
+    tick and counts 1..9 in between -- or for a drone that has stopped sensing.
+    """
+
+    # -- the flown airframe's two sensors, by name ---------------------------------------------
+
+    @property
+    def tof(self) -> ToFScan:
+        """The ring's latest scan. Shorthand for ``sensors["tof"]``."""
+        return self._reading("tof")
+
+    @property
+    def markers(self) -> tuple[MarkerDetection, ...]:
+        """Markers in view at the last camera sample. Shorthand for ``sensors["markers"]``."""
+        return self._reading("markers")
+
+    def _reading(self, name: str) -> Any:
+        try:
+            return self.sensors[name]
+        except KeyError:
+            # AttributeError, not KeyError: this is attribute access, and hasattr(obs, "tof")
+            # must answer False rather than raise.
+            raise AttributeError(
+                f"this run has no sensor named {name!r}; it carries "
+                f"{sorted(self.sensors) or 'no sensors'}. RunConfig(sensors=...) decides "
+                f"what a drone carries."
+            ) from None
 
     @property
     def in_start_area(self) -> bool:
