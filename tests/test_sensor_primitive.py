@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from safmc_sim import policies  # noqa: F401 -- registers sdlw
-from safmc_sim.api import Policy, Velocity, register_policy
+from safmc_sim.api import Land, Policy, Velocity, register_policy
 from safmc_sim.errors import ConfigError
 from safmc_sim.recorder import Recorder, load_run
 from safmc_sim.runner import RunConfig, Runner, flown_sensors, run
@@ -148,8 +148,9 @@ def test_a_run_with_only_the_ring_has_no_markers_and_says_so():
     class NoCamera(Policy):
         def step(self, obs):
             assert set(obs.sensors) == {"tof"}
-            with pytest.raises(KeyError, match="no sensor named 'markers'"):
+            with pytest.raises(AttributeError, match="no sensor named 'markers'"):
                 obs.markers
+            assert not hasattr(obs, "markers") and hasattr(obs, "tof")
             return Velocity()
 
     run(RunConfig(seed=0, policy="_no_camera", sensors=(ToFConfig(),), **SHORT))
@@ -354,3 +355,201 @@ def test_the_camera_can_be_re_aimed_by_name_and_carried_twice():
 
     run(RunConfig(seed=0, policy="_two_cams", sensors=(ToFConfig(), fwd, aft), **SHORT))
     assert names == {"tof", "cam_front", "cam_rear"}
+
+
+# -- what the audit got through, and the contract now refuses -----------------------------------
+#
+# An adversarial audit of the first cut found that a policy could write into its held ToF
+# scan, that a sensor could return a list, that a config which forgot super().__post_init__()
+# could call itself "states", and that a sensor whose rows changed shape produced a
+# misaligned file. Each has a test now, so the next audit can spend its time elsewhere.
+
+
+@dataclass
+class UnfrozenReading:
+    z_m: float
+
+
+class Probe(Altimeter):
+    """Returns whatever shape of reading the config asks for, right or wrong."""
+
+    def sample(self, truth, world, tick):
+        variant = self.config.variant
+        if variant == "list":
+            return [truth.z]
+        if variant == "writable":
+            return np.array([truth.z])
+        if variant == "unfrozen":
+            return UnfrozenReading(truth.z)
+        if variant == "nested":
+            return (Altitude(truth.z, tick), {"z": truth.z})
+        return Altitude(truth.z, tick)
+
+
+@dataclass(frozen=True)
+class ProbeConfig(AltimeterConfig):
+    name: str = "probe"
+    variant: str = "ok"
+
+    def build(self, rng):
+        return Probe(self, rng)
+
+
+@pytest.mark.parametrize("variant, match", [
+    ("list", "mutable"),
+    ("writable", "writable array"),
+    ("unfrozen", "frozen dataclass"),
+    ("nested", r"reading\[1\]"),
+])
+def test_a_reading_a_policy_could_write_into_is_refused_at_build(variant, match):
+    runner = Runner(RunConfig(seed=0, policy="sdlw",
+                              sensors=(ToFConfig(), ProbeConfig(variant=variant)), **SHORT))
+    try:
+        with pytest.raises(ConfigError, match=match):
+            runner.build()
+    finally:
+        runner._teardown()
+
+
+def test_the_ring_s_scan_is_read_only_through_the_observation():
+    """A policy that writes into ranges_m would edit its own next observation and the log."""
+
+    @register_policy("_writes_scan")
+    class Writes(Policy):
+        def step(self, obs):
+            with pytest.raises(ValueError, match="read-only"):
+                obs.tof.ranges_m[:] = -7.0
+            return Velocity()
+
+    run(RunConfig(seed=0, policy="_writes_scan", **SHORT))
+
+
+def test_sensing_happens_after_motion():
+    """The fresh reading at tick t is the state at the end of tick t-1: not earlier, not later."""
+    seen = []
+
+    @register_policy("_when_sampled")
+    class When(Policy):
+        def step(self, obs):
+            seen.append((obs.tick, obs.pose.z, obs.sensors["altimeter"].z_m))
+            return Velocity(vz=0.5)
+
+    run(RunConfig(seed=0, policy="_when_sampled", sensors=(with_altimeter(rate_hz=None),),
+                  n_drones=10, duration_s=2.0, record=False))
+    by_tick: dict[int, list] = {}
+    for tick, z, read in seen:
+        by_tick.setdefault(tick, []).append((z, read))
+    # The reading equals the pose the policy sees in the same observation...
+    for rows in by_tick.values():
+        for z, read in rows:
+            assert read == z
+    # ...and the fleet is climbing, so that pose is strictly below the next tick's. A reading
+    # taken before this tick's motion would match the previous tick's pose instead.
+    for tick in range(1, 30):
+        for (z0, _), (z1, _) in zip(by_tick[tick], by_tick[tick + 1]):
+            assert z0 < z1
+
+
+def test_a_terminal_drone_stops_sampling_and_holds():
+    @register_policy("_lands_at_20")
+    class Lands(Policy):
+        def step(self, obs):
+            return Velocity(vz=0.4) if obs.tick < 20 else Land()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run(RunConfig(seed=0, policy="_lands_at_20", n_drones=10, duration_s=3.0),
+            recorder=Recorder(tmp))
+        tof = load_run(tmp)["sensors"]["tof"]
+    sample = tof["sample_tick"]
+    assert sample.shape[0] == 21, "every drone landed at tick 20, so the run stops there"
+    assert (sample[:20] == np.arange(20)[:, None]).all()      # fresh every tick while flying
+    assert (sample[20] == 19).all()                            # landed: the last scan is held
+
+
+def test_recording_a_custom_sensor_does_not_change_the_run():
+    """R-OBS-4 with a noisy custom sensor in the suite."""
+    captured: dict[str, list] = {}
+
+    @register_policy("_captures_altitude")
+    class Captures(Policy):
+        def step(self, obs):
+            captured.setdefault(self.config["run"], []).append(obs.sensors["altimeter"].z_m)
+            return Velocity(vz=0.3)
+
+    def config(label, record):
+        return RunConfig(seed=2, policy="_captures_altitude", n_drones=10, duration_s=3.0,
+                         record=record, policy_config={"run": label},
+                         sensors=flown_sensors() + (with_altimeter(noise_std_m=0.05),))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run(config("loud", True), recorder=Recorder(tmp))
+    run(config("quiet", False))
+    assert captured["loud"] == captured["quiet"]
+
+
+def test_a_config_that_skipped_super_post_init_is_still_validated():
+    @dataclass(frozen=True)
+    class Sloppy(AltimeterConfig):
+        def __post_init__(self):
+            pass                                      # forgot super().__post_init__()
+
+    with pytest.raises(ConfigError, match="reserved"):
+        RunConfig(sensors=(Sloppy(name="states"),))
+    with pytest.raises(ConfigError, match="identifier"):
+        RunConfig(sensors=(Sloppy(name="../escaped"),))
+    with pytest.raises(ConfigError, match="case-insensitively"):
+        RunConfig(sensors=(ToFConfig(), ToFConfig(name="TOF")))
+
+
+def test_a_sensor_whose_rows_change_shape_is_refused_and_writes_nothing():
+    from pathlib import Path
+
+    from safmc_sim.errors import LogFormatError
+
+    class Shifty(Altimeter):
+        def record(self, reading):
+            return {"z_m": np.zeros(1 if reading.tick < 5 else 2)}
+
+    @dataclass(frozen=True)
+    class ShiftyConfig(AltimeterConfig):
+        name: str = "shifty"
+        rate_hz: float | None = None
+
+        def build(self, rng):
+            return Shifty(self, rng)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(LogFormatError, match="shape"):
+            run(RunConfig(seed=0, policy="sdlw", n_drones=10, duration_s=1.0,
+                          sensors=(ToFConfig(), ShiftyConfig())), recorder=Recorder(tmp))
+        assert not list(Path(tmp).iterdir()), "a refused run must not leave a partial log"
+
+
+def test_record_and_record_static_cannot_share_a_key():
+    from safmc_sim.errors import LogFormatError
+
+    class Overlap(Altimeter):
+        def record_static(self):
+            return {"z_m": np.zeros(1)}
+
+    @dataclass(frozen=True)
+    class OverlapConfig(AltimeterConfig):
+        name: str = "overlap"
+
+        def build(self, rng):
+            return Overlap(self, rng)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(LogFormatError, match="both record"):
+            run(RunConfig(seed=0, policy="sdlw", n_drones=10, duration_s=1.0,
+                          sensors=(OverlapConfig(),)), recorder=Recorder(tmp))
+
+
+def test_the_header_types_every_sensor_config():
+    with tempfile.TemporaryDirectory() as tmp:
+        run(RunConfig(seed=1, policy="sdlw", n_drones=10, duration_s=1.0,
+                      sensors=flown_sensors() + (with_altimeter(),)), recorder=Recorder(tmp))
+        header = load_run(tmp)["header"]
+    assert header["config"]["sensors"][2]["type"].endswith("AltimeterConfig")
+    assert header["config"]["sensors"][2]["name"] == "altimeter"
+    assert header["arena_source"] == "generated"

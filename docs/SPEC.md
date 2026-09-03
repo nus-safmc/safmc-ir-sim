@@ -122,16 +122,24 @@ obstacle. Violations MUST raise, not warn.
 bounds and a robot will silently leave the world otherwise [src: verified in recon].
 
 **R-WORLD-7** *(added with ADR-0005)* Every non-structural object a sensor may perceive MUST be
-a `Landmark`: an id, a kind, a position, a footprint radius and a height. A landmark with both
-a footprint and a height is **solid** and MUST occlude ranging through the height gate of
-R-SENS-6 and MUST be collidable at altitudes below its height; a landmark without both MUST do
-neither. Mission targets MUST be landmarks. Validation MUST reject a landmark outside the
-field, a duplicate id, and a solid landmark overlapping structure or another solid landmark.
+a `Landmark`: an id, a kind, a finite position, a finite footprint radius and a finite height.
+A landmark with both a footprint and a height is **solid** and MUST occlude ranging through the
+height gate of R-SENS-6 and MUST be collidable at altitudes below its height -- including
+altitude zero, so a landing inside a solid landmark is a collision, not a score; a landmark
+without both MUST do neither. Mission targets MUST be landmarks. A placed landmark that would
+be reported under a mission kind but is not a generated target MUST be refused. Validation
+MUST reject a landmark outside the field, a duplicate id, and a landmark with a footprint
+overlapping structure or another footprint.
 
 **R-WORLD-8** *(added with ADR-0005)* Landmarks MUST be placeable at fixed positions through
-the scenario descriptor (`ArenaConfig.landmarks`) and MUST be recorded in the log header. A
-solid placed landmark MUST be treated as pre-existing structure by the generator. A point
-landmark whose kind no configured sensor reports MUST be refused at run construction.
+the scenario descriptor (`ArenaConfig.landmarks`), and a resolved `ArenaSpec` carrying
+landmarks MUST be usable in place of the generated one (`run(config, arena=...)`), validated
+first and recorded in full with its provenance. The generator MUST treat a placed landmark
+with a footprint as fixed: walls and pillars keep their published gaps from a body, nothing
+is built over a flat mark, and targets are not placed on either. Reachability validation
+(R-WORLD-4) MUST count solid landmarks as blocking, and a run MUST refuse a take-off position
+inside one. A point landmark whose kind no configured sensor reports MUST be refused at run
+construction.
 
 ---
 
@@ -251,18 +259,26 @@ MUST correspond to 2 Hz, the measured AprilTag rate on the real hardware
 **R-SENS-11** No sensor may read another agent's private state or any mission ground truth other
 than through its own geometric query.
 
+> Clarified with ADR-0005. The contract enforces the *reach*: a sensor is handed geometry and
+> the landmark list and nothing else (R-SENS-15). It cannot enforce the *use*: a sensor that
+> returned every landmark's exact position would be within reach and outside the rule. That
+> part is a review obligation -- the auditor checklist, and a FIDELITY entry for every sensor
+> -- not a property the code has.
+
 **R-SENS-12** *(added with ADR-0005)* Every sensor MUST implement the contract in
 `sensors/base.py`: a frozen `SensorConfig` subclass carrying a unique `name`, a `rate_hz`
 (`None` for every tick) and `build(rng)`; and a `Sensor` subclass whose
 `sample(truth, world, tick)` returns an immutable reading. Readings MUST be immutable — a
-frozen dataclass or a tuple — and any numpy array in one MUST be read-only.
+frozen dataclass or a tuple — and any numpy array in one MUST be read-only. The runner MUST
+check the first reading of every sensor at build and refuse a mutable one.
 
 **R-SENS-13** *(added with ADR-0005)* The runner MUST drive every sensor through the same path:
 one instance per drone per config, built with that drone's own generator; sampled once before
-the first tick and then after motion whenever `(tick + 1) % decimation == 0`, so a decimated
-sensor is fresh in the observations at ticks `0, d, 2d, ...`; held, not cleared, between
-samples; not sampled on a terminal drone. Sensor names MUST be unique within a run and rates
-MUST satisfy R-TIME-3.
+the first tick and then after motion and after the collision pass whenever
+`(tick + 1) % decimation == 0`, so a decimated sensor is fresh in the observations at ticks
+`0, d, 2d, ...`; held, not cleared, between samples; not sampled on a drone that is terminal,
+including one that became terminal this tick. Sensor names MUST be unique within a run,
+case-insensitively, whether or not the config validated them; rates MUST satisfy R-TIME-3.
 
 **R-SENS-14** *(added with ADR-0005)* `Observation.sensors` MUST hold the latest reading of
 every configured sensor under its name and nothing else, and `Observation.stale_ticks` MUST
@@ -277,10 +293,12 @@ from `PoseSource` alone (R-SEAM-1). Together those are the only two paths from t
 policy.
 
 **R-SENS-16** *(added with ADR-0005)* A sensor MAY be recorded by returning fixed-shape arrays
-from `record()`. The recorder MUST then write `<name>.npz` holding `ticks`, a per-agent
-`sample_tick`, one stacked array per key, and any constants from `record_static()`, and the
-header MUST list every sensor with whether it was recorded. Recording MUST NOT affect results
-(R-OBS-4).
+from `record()`. The recorder MUST fix each sensor's row keys and shapes from its first
+reading before any tick is recorded, MUST refuse a later row that differs, and MUST write
+either the whole log or none of it. It writes `<name>.npz` holding `ticks`, a per-agent
+`sample_tick`, one stacked array per key, and any constants from `record_static()`; the header
+MUST list every sensor with its config type and whether it was recorded. `record()` MUST be
+pure: recording MUST NOT affect results (R-OBS-4).
 
 ---
 
@@ -303,7 +321,8 @@ unfound target or landmark positions) MUST NOT be reachable from `Observation`.
 
 **R-POL-4** Violating R-POL-3 MUST be detectable: an auditor MUST be able to enumerate every
 public attribute reachable from an `Observation` and find no reference to the environment, the
-arena, the mission, or another agent's object.
+arena, the mission, a landmark, a sensor, or another agent's object. The test that does this
+MUST itself be shown able to fail.
 
 **R-POL-5** `Command` MUST be exactly two types: `Velocity` (ARENA-frame linear velocity plus a
 yaw rate) and `Land`. No others.
@@ -376,9 +395,9 @@ logging is not a substitute; ir-sim provides only a loguru text wrapper and no s
 
 **R-OBS-2** The log MUST contain, per tick: simulation time, and per agent the pose, velocity,
 lifecycle state, issued command, and every recorded sensor's rows (R-SENS-16; the ring is
-always one of them). It MUST contain, once per run: the resolved scenario including every
-obstacle, target and landmark, the seed, the full config including the sensor suite, and
-package versions.
+recorded whenever it is carried). It MUST contain, once per run: the resolved scenario
+including every obstacle, target and landmark and whether it was generated or supplied, the
+seed, the full config including the sensor suite, and package versions.
 
 **R-OBS-3** The log MUST be sufficient to reconstruct the run without re-simulating: the visualiser
 MUST read only the log.

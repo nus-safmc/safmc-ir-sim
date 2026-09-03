@@ -24,6 +24,7 @@ from .constants import (
     RUN_DURATION_S,
     START_AREA_DEPTH_M,
 )
+from .sensors.base import read_only
 from .sensors.tof_ring import ToFConfig, ToFScan, _ranger_bearings, _zone_offsets
 
 __all__ = ["make_observation", "make_scan"]
@@ -55,9 +56,9 @@ def make_scan(config: ToFConfig | None = None, **ranger_ranges: float) -> ToFSca
 
     bearings = _ranger_bearings(cfg)
     return ToFScan(
-        ranges_m=ranges,
-        zone_bearings_rad=bearings[:, None] + _zone_offsets(cfg)[None, :],
-        ranger_bearings_rad=bearings,
+        ranges_m=read_only(ranges),
+        zone_bearings_rad=read_only(bearings[:, None] + _zone_offsets(cfg)[None, :]),
+        ranger_bearings_rad=read_only(bearings),
     )
 
 
@@ -87,9 +88,14 @@ def make_observation(
         ranger_ranges.setdefault("front", front_range_m)
     readings: dict[str, Any] = {"tof": make_scan(**ranger_ranges), "markers": tuple(markers)}
     if sensors:
+        if markers and "markers" in sensors:
+            raise ValueError("pass markers= or sensors={'markers': ...}, not both")
         readings.update(sensors)
     ages = {name: 0 for name in readings}
     if stale_ticks:
+        unknown = set(stale_ticks) - set(readings)
+        if unknown:
+            raise ValueError(f"stale_ticks names sensors the observation lacks: {sorted(unknown)}")
         ages.update(stale_ticks)
     return Observation(
         agent_id="drone_00",

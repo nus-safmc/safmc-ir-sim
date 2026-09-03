@@ -217,6 +217,17 @@ for(const [id,info] of Object.entries(D.missionSummary))
     targetNodes[id].dot.setAttribute('fill','#22c55e');
     targetNodes[id].ring.setAttribute('stroke','#22c55e');
   }
+// Placed landmarks: a body (footprint and height) is drawn like a small pillar, a point or a
+// flat mark as a hollow diamond. Hover for id and kind. Older logs have no landmarks key.
+for(const l of (D.arena.landmarks||[])){
+  const g=el('g'), solid=l.radius_m>0&&l.height_m>0;
+  if(solid) g.appendChild(el('circle',{cx:sx(l.x),cy:sy(l.y),r:Math.max(l.radius_m*S,3),
+    fill:'var(--pillar)',stroke:'var(--warn)','stroke-width':1}));
+  else g.appendChild(el('path',{d:`M${sx(l.x)-4},${sy(l.y)} l4,-4 l4,4 l-4,4 z`,
+    fill:'none',stroke:'var(--warn)','stroke-width':1.3}));
+  const tip=el('title'); tip.textContent=`${l.id} (${l.kind})`; g.appendChild(tip);
+  svg.appendChild(g);
+}
 
 /* dynamic layer ------------------------------------------------------------- */
 const tofLayer=el('g',{stroke:'var(--warn)','stroke-opacity':.45,'stroke-width':.7});
@@ -336,7 +347,8 @@ document.getElementById('subtitle').textContent =
 document.getElementById('arenaNote').textContent =
   `Dashed circles are the 1 m scoring radius; a target turns green when a landed drone `+
   `satisfied both the radius and line of sight. Shaded band is the Start Area; dashed `+
-  `square is the Unknown Search Area. Orange rays are the 64 ToF ring zones.`;
+  `square is the Unknown Search Area. Orange rays are the 64 ToF ring zones. Orange diamonds `+
+  `are placed point landmarks (tags, marks, anchors); orange-ringed discs are placed bodies.`;
 
 /* transport ----------------------------------------------------------------- */
 const scrub=document.getElementById('scrub'); scrub.max=T-1;

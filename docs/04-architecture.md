@@ -21,6 +21,8 @@ missions or logs. The split follows that line exactly.
                         │  runner.py     the tick loop            │
                         │    ├─ PoseSource      ◄── seam R-SEAM-1 │
                         │    ├─ Blackboard      ◄── seam R-SEAM-2 │
+                        │    ├─ sensors/base.py ◄── seam R-SENS-15│
+                        │    │    ToFRing · MarkerCam · yours     │
                         │    ├─ mission.py      scoring + rules   │
                         │    └─ recorder.py     structured log    │
                         └───────────────┬─────────────────────────┘
@@ -29,10 +31,7 @@ missions or logs. The split follows that line exactly.
                         │  ir-sim  2.10.2                         │
                         │    world · STRtree collision · YAML     │
                         │    render · fixed-step integration      │
-                        │    ├─ kinematics.py  @register_kinematics
-                        │    └─ sensors/  base.py contract        │
-                        │         ├─ ToFRing, MarkerCam   (flown) │
-                        │         └─ yours          (one file)    │
+                        │    └─ kinematics.py  @register_kinematics
                         └─────────────────────────────────────────┘
 ```
 
@@ -72,11 +71,12 @@ One tick is exactly this, and the order is load-bearing:
 3. **Call each policy's `step(obs)`.** Exceptions propagate — a crashed policy aborts the run with
    agent id, tick and traceback. It is never swallowed into a hover (R-POL-9).
 4. **Resolve commands to ir-sim actions** through the lifecycle state machine. A `LANDED` agent
-   ignores its command permanently. Take-off is checked against the two-wave rule.
+   ignores its command permanently. Departures are recorded, never refused: the two-wave rule
+   is scored from the log afterwards, not enforced mid-flight.
 5. **`env.step(actions)`** — ir-sim integrates every object and rebuilds the STRtree.
-6. **Sense.** Every due sensor on every active drone samples the post-motion world through one
-   contract; the runner does not know what any sensor is.
-7. **Update the mission**: landings, scoring, LOS, rule violations.
+6. **Collisions and the mission**: crashes, landings, scoring, line of sight.
+7. **Sense.** Every due sensor on every still-active drone samples the post-motion world
+   through one contract; the runner does not know what any sensor is.
 8. **Record.** Then swap the blackboard buffers.
 
 ## Where the seams are, and why they are drawn there

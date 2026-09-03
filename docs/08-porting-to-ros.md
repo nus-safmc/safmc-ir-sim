@@ -48,18 +48,20 @@ different type mask, exactly as `esp-everything/main/mavlink_task.c:43-56` does.
 
 | `Command` | Firmware call | Type mask |
 |---|---|---|
-| `VelocityBody(vx, vy, vz, yaw_rate)` | `mavlink_set_velocity_ned` after rotating body → NED | `0x5C7` |
-| `VelocityWorld(vx, vy, z, yaw)` | `mavlink_set_velocity_xy_position_z` | `0x9E3` |
-| `PositionWorld(x, y, z, yaw)` | `mavlink_set_position_ned` | `0x9F8` |
-| `Hold()` | `mavlink_set_hold` | position hold at current pose |
-| `Takeoff(altitude_m)` | `MAV_CMD_COMPONENT_ARM_DISARM` + `MAV_CMD_DO_SET_MODE` (offboard) + climb | — |
+| `Velocity(vx, vy, vz, yaw_rate)` | `mavlink_set_velocity_ned`, after converting ARENA → NED: swap x and y, negate z, and the yaw rate flips sign because NED heading is clockwise | `0x5C7` |
 | `Land()` | `MAV_CMD_NAV_LAND` | — |
+
+Two commands, because that is the whole action space (R-POL-5). Arming and offboard mode are
+the node's business before the first `Velocity`, not a command a policy sends. The firmware's
+other helpers — `set_velocity_xy_position_z`, `set_position_ned`, `set_hold` — are guidance,
+and guidance lives in the policy; an earlier version mirrored them and was removed at C7.
 
 Four details from the firmware that a naive port gets wrong:
 
 1. **Unused fields must be `NaN`, not zero.** The firmware comments this explicitly: a yaw
    field of `0.0` commands "face North", which is a PX4 behaviour and almost never intended.
-   This is why `VelocityWorld.yaw` and `PositionWorld.yaw` are `None`-able here.
+   A `Velocity` fills only the velocity and yaw-rate fields; every position and yaw field in
+   the setpoint must be `NaN`.
 2. **The offboard setpoint must be refreshed at 20 Hz.** PX4 drops offboard mode if it stops
    arriving for ~500 ms. Our tick rate is 20 Hz for exactly this reason.
 3. **A stale velocity setpoint auto-reverts to position hold after 300 ms**
@@ -78,7 +80,7 @@ the real information budget, and `Observation` was built to match it.
 | `pose.theta` | `ATTITUDE.yaw` (convert heading → ARENA yaw) |
 | `velocity_xy` | `LOCAL_POSITION_NED.vx/vy` |
 | `lifecycle` | `HEARTBEAT` armed flag + `custom_main_mode`, plus your own state machine |
-| `sensors["tof"]` (`obs.tof`) | `tof_get_collapsed_scan()` — the 64-bin scan, already the right shape |
+| `sensors["tof"]` (`obs.tof`) | `tof_get_collapsed_scan()` — the same 64 values, but indexed by clockwise bearing; reorder into `(ranger, zone)` through `zone_bearings_rad`, see below |
 | `sensors["markers"]` (`obs.markers`) | AprilTag detections, id + pose, converted to range and bearing |
 | `sensors[<yours>]` | One subscription per sensor you added; its reading dataclass is the message you must fill |
 | `peers` | Whatever your `Blackboard` implementation is backed by |

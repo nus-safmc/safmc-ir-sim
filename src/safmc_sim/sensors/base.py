@@ -58,6 +58,7 @@ the tick rate are refused at configuration time (R-TIME-3) rather than rounded.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -70,12 +71,40 @@ from ..errors import ConfigError
 if TYPE_CHECKING:  # pragma: no cover -- annotations only; scene imports this module
     from .scene import WorldScene
 
-__all__ = ["TrueState", "SensorConfig", "Sensor", "read_only", "decimation"]
+__all__ = [
+    "TrueState",
+    "SensorConfig",
+    "Sensor",
+    "read_only",
+    "decimation",
+    "validate_sensor_name",
+    "check_reading_is_immutable",
+]
 
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# Sensor readings are recorded to ``<name>.npz`` beside these two files.
-_RESERVED_NAMES = frozenset({"states", "run"})
+# Sensor readings are recorded to ``<name>.npz`` beside these files.
+_RESERVED_NAMES = frozenset({"states", "run", "replay"})
+
+
+def validate_sensor_name(name: object) -> str:
+    """The name is a mapping key and a file stem; refuse anything that is not safe as both.
+
+    Called by :class:`SensorConfig` at construction and again by ``RunConfig``, because a
+    subclass that forgets ``super().__post_init__()`` would otherwise be able to name itself
+    ``states`` and overwrite the run's own file -- an auditor did.
+    """
+    if not isinstance(name, str) or not _NAME.match(name):
+        raise ConfigError(
+            f"sensor name must be an identifier (letters, digits, underscores), "
+            f"got {name!r} -- it is a mapping key and a file stem"
+        )
+    if name.lower() in _RESERVED_NAMES:
+        raise ConfigError(
+            f"sensor name {name!r} is reserved: {name}.npz would collide with the run's "
+            f"own files"
+        )
+    return name
 
 
 @dataclass(frozen=True)
@@ -130,16 +159,7 @@ class SensorConfig(ABC):
     """Sample rate. ``None`` samples every tick. Must divide the tick rate exactly."""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not _NAME.match(self.name):
-            raise ConfigError(
-                f"sensor name must be an identifier (letters, digits, underscores), "
-                f"got {self.name!r} -- it is a mapping key and a file stem"
-            )
-        if self.name in _RESERVED_NAMES:
-            raise ConfigError(
-                f"sensor name {self.name!r} is reserved: {self.name}.npz would collide "
-                f"with the run's own files"
-            )
+        validate_sensor_name(self.name)
         if self.rate_hz is not None and not self.rate_hz > 0.0:
             raise ConfigError(
                 f"sensor {self.name!r}: rate_hz must be > 0 or None, got {self.rate_hz}"
@@ -179,6 +199,12 @@ class Sensor(ABC):
         reading. ``tick`` is the tick whose post-motion world is being sampled, ``-1`` for the
         sample before the first tick; use it for time-dependent noise, never for anything a
         policy could not know.
+
+        The reading must be immutable -- a frozen dataclass whose arrays went through
+        :func:`read_only`, or a tuple of such things. The runner checks the first sample and
+        refuses the run otherwise (R-SENS-12): a reading is held between samples and recorded
+        from the same object, so a policy that could write into it would edit its own next
+        observation and the log.
         """
 
     # -- optional: appear in the log ---------------------------------------------------------
@@ -187,8 +213,13 @@ class Sensor(ABC):
         """Fixed-shape arrays to log per tick, or ``None`` to leave this sensor out of the log.
 
         Each key becomes an array in ``<name>.npz`` stacked to ``(ticks, agents, *shape)``.
-        The shape must be the same every tick, which is why the default is ``None``: a
-        variable-length reading, such as a tuple of detections, does not fit a table.
+        Keys and shapes must be the same every tick and every drone -- the recorder refuses
+        a change loudly -- which is why the default is ``None``: a variable-length reading,
+        such as a tuple of detections, does not fit a table. Values are stored as float32.
+
+        Must be pure. It is called only when recording is on, so anything it changes --
+        ``self.rng`` included -- would make a recorded run differ from an unrecorded one,
+        which R-OBS-4 forbids.
         """
         return None
 
@@ -208,9 +239,49 @@ def read_only(array: np.ndarray) -> np.ndarray:
     doing ``obs.tof.zone_bearings_rad[:] += 0.5`` would permanently re-aim its own ring,
     silently and irrecoverably.
     """
-    view = array.view()
+    view = np.asarray(array).view()
     view.flags.writeable = False
     return view
+
+
+_IMMUTABLE_SCALARS = (str, bytes, int, float, bool, complex, type(None), np.generic)
+
+
+def check_reading_is_immutable(sensor_name: str, reading: Any, path: str = "reading") -> None:
+    """Refuse a reading a policy could write into. Runs once, on a sensor's first sample.
+
+    Accepts scalars and strings, read-only numpy arrays, tuples and frozensets of acceptable
+    things, and frozen dataclasses whose fields are acceptable. Rejects lists, dicts, sets,
+    writable arrays and unfrozen dataclasses, naming the offending path so the fix -- usually
+    one :func:`read_only` -- is obvious.
+    """
+    if isinstance(reading, _IMMUTABLE_SCALARS):
+        return
+    if isinstance(reading, np.ndarray):
+        if reading.flags.writeable:
+            raise ConfigError(
+                f"sensor {sensor_name!r}: {path} is a writable array. A reading is held "
+                f"between samples and recorded, so a policy could edit its own next "
+                f"observation through it. Wrap it: read_only(array)."
+            )
+        return
+    if isinstance(reading, (tuple, frozenset)):
+        for i, item in enumerate(reading):
+            check_reading_is_immutable(sensor_name, item, f"{path}[{i}]")
+        return
+    if dataclasses.is_dataclass(reading) and not isinstance(reading, type):
+        if not type(reading).__dataclass_params__.frozen:
+            raise ConfigError(
+                f"sensor {sensor_name!r}: {path} is a {type(reading).__name__}, which is not "
+                f"a frozen dataclass. Declare it @dataclass(frozen=True)."
+            )
+        for f in dataclasses.fields(reading):
+            check_reading_is_immutable(sensor_name, getattr(reading, f.name), f"{path}.{f.name}")
+        return
+    raise ConfigError(
+        f"sensor {sensor_name!r}: {path} is a {type(reading).__name__}, which is mutable. "
+        f"Readings must be frozen dataclasses, tuples, scalars or read-only arrays."
+    )
 
 
 def decimation(rate_hz: float | None, tick_hz: float, name: str) -> int:

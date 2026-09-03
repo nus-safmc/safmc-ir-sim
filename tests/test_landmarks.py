@@ -154,3 +154,187 @@ def test_a_solid_landmark_of_any_kind_is_lethal_below_its_height_and_not_above()
     # The high fleet clears the 0.6 m posts. It may still hit a 1.0 m mission marker further
     # north -- that is the same rule, applied to a taller body.
     assert not struck_posts(high)
+
+
+# -- what the audit got through, and the world now refuses ---------------------------------------
+#
+# The first cut validated an arena whose every doorway was plugged with posts, accepted a
+# landmark of kind "victim" as a decoy, let a drone land on top of a marker and score, and
+# documented a placement path that could not be run. Each has a test now.
+
+import tempfile
+from dataclasses import dataclass
+
+from safmc_sim import policies  # noqa: F401 -- registers sdlw
+from safmc_sim.api import Land, Policy, Velocity, register_policy
+from safmc_sim.recorder import Recorder, load_run, score_from_log
+from safmc_sim.runner import RunConfig, Runner, run
+from safmc_sim.sensors.marker_cam import MarkerCamConfig
+from safmc_sim.sensors.tof_ring import ToFConfig
+from safmc_sim.world.arena import TARGET_KINDS, target_polygon
+
+
+def test_a_supplied_arena_runs_and_the_log_rescores_it():
+    """The documented placement path -- generate, replace, run -- end to end."""
+    from safmc_sim.metrics import compute_metrics
+
+    arena = generate_arena(1)
+    x0, y0, x1, y1 = arena.unknown_area
+    tags = (Landmark("tag_sw", "nav_tag", x0, y0), Landmark("tag_ne", "nav_tag", x1, y1))
+    placed = dataclasses.replace(arena, landmarks=tags)
+    cfg = RunConfig(seed=1, n_drones=10, duration_s=3.0, policy="sdlw",
+                    sensors=(ToFConfig(), MarkerCamConfig(kinds=TARGET_KINDS + ("nav_tag",))))
+    with tempfile.TemporaryDirectory() as tmp:
+        result = run(cfg, recorder=Recorder(tmp), arena=placed)
+        log = load_run(tmp)
+        assert log["header"]["arena_source"] == "supplied"
+        assert [lm["id"] for lm in log["header"]["arena"]["landmarks"]] == ["tag_sw", "tag_ne"]
+        assert score_from_log(tmp).total == result.score.total
+        compute_metrics(tmp)
+    assert result.arena is placed
+
+    with pytest.raises(ConfigError, match="ArenaSpec"):
+        Runner(cfg, arena=arena.config)
+
+
+def test_a_landmark_subclass_round_trips_through_the_log_as_a_landmark():
+    @dataclass(frozen=True)
+    class NavTag(Landmark):
+        tag_id: int = 0
+
+    tag = NavTag("tag_12", "nav_tag", 3.0, 9.0, tag_id=12)
+    cfg = RunConfig(seed=0, n_drones=10, duration_s=2.0, policy="sdlw",
+                    arena_config=ArenaConfig(landmarks=(tag,)),
+                    sensors=(ToFConfig(), MarkerCamConfig(kinds=TARGET_KINDS + ("nav_tag",))))
+    with tempfile.TemporaryDirectory() as tmp:
+        result = run(cfg, recorder=Recorder(tmp))
+        row = load_run(tmp)["header"]["arena"]["landmarks"][0]
+        assert set(row) == {"id", "kind", "x", "y", "radius_m", "height_m"}
+        assert score_from_log(tmp).total == result.score.total
+
+
+def test_decoy_targets_are_refused_on_every_path():
+    with pytest.raises(ConfigError, match="mission kind"):
+        ArenaConfig(landmarks=(Landmark("d", "victim", 5.0, 9.0),))
+    with pytest.raises(ConfigError, match="mission kind"):
+        ArenaConfig(landmarks=(Target("victim_9", "victim", 5.0, 9.0),))
+    arena = generate_arena(0)
+    for decoy in (Landmark("d", "fire", 5.0, 9.0), Target("t", "bonus_victim", 5.0, 9.0)):
+        with pytest.raises(ArenaError, match="mission kind"):
+            validate_arena(dataclasses.replace(arena, landmarks=(decoy,)))
+
+
+@pytest.mark.parametrize("kw", [
+    dict(x=float("nan")), dict(y=float("inf")), dict(radius_m=float("nan")),
+    dict(radius_m=0.1, height_m=float("inf")), dict(radius_m=float("inf"), height_m=1.0),
+])
+def test_non_finite_landmarks_are_rejected(kw):
+    with pytest.raises(ConfigError, match="finite"):
+        Landmark(**{**dict(id="lm", kind="thing", x=1.0, y=1.0), **kw})
+
+
+def test_solid_landmarks_block_the_grid_and_a_fence_walls_a_target_off():
+    post = Landmark("post", "prop", 10.0, 12.0, radius_m=0.3, height_m=1.0)
+    grid = generate_arena(0, ArenaConfig(landmarks=(post,))).occupancy_grid(0.1)
+    assert grid[100, 120], "a solid landmark must be blocked in the occupancy grid"
+
+    # A ring of tall posts around a target, tight enough that a 0.18 m drone cannot pass:
+    # nothing inside the ring is reachable and nothing within the 1 m landing radius is
+    # outside it. Validation must say so rather than pass an unscorable arena.
+    # The landing-spot check looks in a square window of +/-1 m around the target, so the
+    # fence has to seal it out to the window's corners at 1.41 m: twelve 0.28 m posts on a
+    # 1.4 m ring, inflated by the drone radius, close every gap and reach 1.6 m.
+    ring_m, post_m, clear_m = 1.4, 0.28, 2.0
+
+    def far_from_everything(arena, t):
+        obstacles = arena.obstacle_polygons()
+        return (
+            min(o.distance(target_polygon(t)) for o in obstacles) > clear_m
+            and all(np.hypot(t.x - o.x, t.y - o.y) > clear_m for o in arena.targets if o is not t)
+            and clear_m < t.x < arena.width_m - clear_m
+            # North of the Start Area by the whole fence: every free Start Area cell is
+            # reachable by definition, so a fence overlapping it would not enclose anything.
+            and arena.start_area_depth_m + clear_m < t.y < arena.depth_m - clear_m
+        )
+
+    for seed in range(12):
+        arena = generate_arena(seed)
+        target = next((t for t in arena.targets if far_from_everything(arena, t)), None)
+        if target is not None:
+            break
+    assert target is not None, "no seed in 0..11 has a target with 2 m of clear space"
+    angles = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
+    fence = tuple(
+        Landmark(f"fence_{i}", "prop", target.x + ring_m * np.cos(a), target.y + ring_m * np.sin(a),
+                 radius_m=post_m, height_m=2.0)
+        for i, a in enumerate(angles)
+    )
+    with pytest.raises(ArenaError, match="reachable"):
+        validate_arena(dataclasses.replace(arena, landmarks=fence))
+
+
+def test_a_body_under_a_take_off_position_is_refused():
+    probe = Runner(RunConfig(seed=0, n_drones=10, duration_s=1.0, record=False, policy="sdlw"))
+    x, y = probe._start_positions()[3][:2]
+    post = Landmark("post", "prop", float(x), float(y), radius_m=0.1, height_m=0.5)
+    runner = Runner(RunConfig(seed=0, n_drones=10, duration_s=1.0, record=False, policy="sdlw",
+                              arena_config=ArenaConfig(landmarks=(post,))))
+    try:
+        with pytest.raises(ConfigError, match="drone_03 would take off inside"):
+            runner.build()
+    finally:
+        runner._teardown()
+
+
+def test_landing_onto_a_body_is_a_crash_not_a_score():
+    """Overfly a 0.6 m post at 0.9 m, then land on it. At ground level the post is in the way."""
+    probe = Runner(RunConfig(seed=0, n_drones=10, duration_s=1.0, record=False, policy="sdlw"))
+    x0, y0 = probe._start_positions()[0][:2]
+    post = Landmark("post", "prop", float(x0), float(y0) + 1.5, radius_m=0.15, height_m=0.6)
+
+    @register_policy("_land_on_post")
+    class LandOnPost(Policy):
+        def step(self, obs):
+            if self.agent_id != "drone_00":
+                return Velocity()
+            if obs.pose.z < 0.88:
+                return Velocity(vz=0.5)
+            dx, dy = post.x - obs.pose.x, post.y - obs.pose.y
+            d = float(np.hypot(dx, dy))
+            if d < 0.05:
+                return Land()
+            speed = min(0.3, d)
+            return Velocity(vx=speed * dx / d, vy=speed * dy / d)
+
+    result = run(RunConfig(seed=0, n_drones=10, duration_s=30.0, record=False,
+                           policy="_land_on_post", arena_config=ArenaConfig(landmarks=(post,)),
+                           sensors=(ToFConfig(),)))
+    crashes = [e for e in result.events if e.kind == "crashed" and e.agent_id == "drone_00"]
+    assert crashes, "drone_00 never reached the post"
+    assert crashes[0].detail["reason"] == "struck landmark post while landing"
+    assert "drone_00" not in result.landed
+
+
+def test_a_flat_mark_is_kept_clear_of_generated_structure():
+    mark = Landmark("start_00", "start_mark", 10.0, 9.0, radius_m=0.5)
+    footprint = target_polygon(mark)
+    for seed in range(20):
+        arena = generate_arena(seed, ArenaConfig(landmarks=(mark,)))
+        assert not any(o.intersects(footprint) for o in arena.obstacle_polygons())
+        assert all(
+            np.hypot(t.x - mark.x, t.y - mark.y) > t.radius_m + mark.radius_m for t in arena.targets
+        )
+
+
+def test_the_generated_arena_s_landmarks_are_in_the_header_too():
+    tag = Landmark("tag_1", "nav_tag", 3.0, 9.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        run(RunConfig(seed=0, n_drones=10, duration_s=1.0, policy="sdlw",
+                      arena_config=ArenaConfig(landmarks=(tag,)),
+                      sensors=(ToFConfig(), MarkerCamConfig(kinds=TARGET_KINDS + ("nav_tag",)))),
+            recorder=Recorder(tmp))
+        header = load_run(tmp)["header"]
+    assert header["arena_source"] == "generated"
+    assert header["arena"]["landmarks"] == [
+        {"id": "tag_1", "kind": "nav_tag", "x": 3.0, "y": 9.0, "radius_m": 0.0, "height_m": 0.0}
+    ]

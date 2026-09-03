@@ -74,7 +74,11 @@ def test_observation_exposes_no_route_to_ground_truth():
     from collections.abc import Mapping
     from types import MappingProxyType
 
+    from safmc_sim.sensors.base import Sensor, TrueState
     from safmc_sim.sensors.marker_cam import MarkerDetection
+    from safmc_sim.sensors.scene import WorldScene
+    from safmc_sim.sensors.tof_ring import ToFConfig, ToFRing
+    from safmc_sim.world.landmark import Landmark
 
     obs = Observation(
         agent_id="drone_00", tick=0, sim_time_s=0.0,
@@ -88,21 +92,23 @@ def test_observation_exposes_no_route_to_ground_truth():
         arena=ArenaInfo(20.0, 20.0, 1.4, 6.0, 600.0),
     )
 
-    # The world objects a reading must never carry: a Landmark or Target in an observation
-    # would be a ground-truth position with an id on it.
-    banned = ("ArenaSpec", "Mission", "Runner", "AgentView", "EnvBase", "ObjectBase", "World",
-              "Landmark", "Target", "WorldScene", "TrueState", "Sensor")
+    # ir-sim and runner internals, matched by name because importing them here would drag
+    # in the environment; and our own world objects, matched by type so a subclass under any
+    # name is caught too. A Landmark inside a reading is a ground-truth position with an id.
+    banned_names = ("ArenaSpec", "Mission", "Runner", "AgentView", "EnvBase", "ObjectBase", "World")
+    banned_types = (Sensor, Landmark, WorldScene, TrueState)
     seen: set[int] = set()
 
     def walk(obj, path, depth=0):
-        if id(obj) in seen or depth > 4:
+        if id(obj) in seen or depth > 6:
             return
         seen.add(id(obj))
-        assert type(obj).__name__ not in banned, f"{path} reaches {type(obj).__name__}"
+        assert type(obj).__name__ not in banned_names, f"{path} reaches {type(obj).__name__}"
+        assert not isinstance(obj, banned_types), f"{path} reaches {type(obj).__name__}"
         if isinstance(obj, (str, bytes, int, float, bool, type(None), np.ndarray)):
             return
-        # A mappingproxy is not a dict; the old `isinstance(obj, dict)` never descended into
-        # `sensors` or `peers`, so this walk was silently not looking at the readings.
+        # A mappingproxy is not a dict; an earlier `isinstance(obj, dict)` never descended
+        # into `sensors` or `peers`, so the walk was silently not looking at the readings.
         if isinstance(obj, Mapping):
             for k, v in obj.items():
                 walk(v, f"{path}[{k!r}]", depth + 1)
@@ -114,12 +120,35 @@ def test_observation_exposes_no_route_to_ground_truth():
         for name in dir(obj):
             if name.startswith("_"):
                 continue
+            # Only the attribute access is guarded. An earlier version wrapped the recursive
+            # call as well, so an AssertionError raised anywhere below the root was swallowed
+            # and the test could not fail -- an auditor smuggled a Landmark through it.
             try:
-                walk(getattr(obj, name), f"{path}.{name}", depth + 1)
+                value = getattr(obj, name)
             except Exception:  # noqa: BLE001 -- a property that raises exposes nothing
-                pass
+                continue
+            walk(value, f"{path}.{name}", depth + 1)
 
     walk(obs, "obs")
+
+    # The walk must be able to fail, or it guards nothing. Smuggle each banned thing into a
+    # reading and check it is found -- including a Sensor instance and a Target subclass,
+    # which a name match would miss.
+    class Victim(Landmark):
+        pass
+
+    for leak in (
+        (Landmark("t", "nav_tag", 1.0, 2.0),),
+        Victim("v", "victim", 1.0, 2.0),
+        ToFRing(ToFConfig(), np.random.default_rng(0)),
+        TrueState("d", 0, 1.0, 2.0, 0.5, 0.0, 0.0, 0.0),
+    ):
+        smuggled = dataclasses.replace(
+            obs, sensors=MappingProxyType({**obs.sensors, "leak": leak})
+        )
+        seen.clear()
+        with pytest.raises(AssertionError, match="leak"):
+            walk(smuggled, "obs")
     # And the obvious names are simply absent.
     for attribute in ("env", "arena_spec", "mission", "targets", "obstacles", "world",
                       "landmarks", "truth"):

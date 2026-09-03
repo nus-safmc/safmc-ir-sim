@@ -17,10 +17,10 @@ straight line from the drone to the victim, there must be no walls or pillars on
 So the scoring scene lives with the mission (``ArenaSpec.structural_scene``) and never here,
 because the type system then makes it impossible to pass the wrong one (R-MISS-2).
 
-Live drone bodies are pulled from ir-sim at the moment a sensor asks, not pushed in by the
-runner. That ordering is forced: ir-sim moves every object, rebuilds its tree, and only then
-steps every sensor (env_base.py:316-331). Anything the runner injected before ``env.step()``
-would be one tick stale. The result is cached per tick so N sensors cost one rebuild.
+Live drone bodies are rebuilt from ir-sim's robot list once per tick, by the runner, after
+``env.step()`` and before any sensor samples. That ordering is forced: ir-sim moves every
+object and rebuilds its tree during the step, so anything read before it would be one tick
+stale. The rebuild is cached by tick so N sensors on N drones cost one pass.
 """
 
 from __future__ import annotations

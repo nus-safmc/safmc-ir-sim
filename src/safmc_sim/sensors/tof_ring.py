@@ -225,8 +225,11 @@ class ToFRing(Sensor):
         valid = np.isfinite(raw) & (raw >= cfg.min_valid_m) & (raw <= cfg.max_valid_m)
         ranges = np.where(valid, raw, np.inf).reshape(cfg.n_rangers, cfg.zones_per_ranger)
 
+        # The scan is HELD between samples and recorded from the same object, so a policy
+        # that wrote into ranges_m would corrupt its own next observation and the log. An
+        # auditor did exactly that: 18 of 20 recorded rows read -7 after one write.
         return ToFScan(
-            ranges_m=ranges,
+            ranges_m=read_only(ranges),
             zone_bearings_rad=self._zone_bearings_ro,
             ranger_bearings_rad=self._ranger_bearings_ro,
         )

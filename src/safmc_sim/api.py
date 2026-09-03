@@ -152,9 +152,12 @@ class Observation:
     :class:`MarkerDetection`; those two have the shorthands :attr:`tof` and :attr:`markers`
     because the flown airframe carries them. Anything else is reached here under the name its
     config was given -- ``RunConfig(sensors=...)`` decides what a drone carries, and a reading
-    is whatever its sensor's author made it, so read that sensor's docstring. Every reading
-    is read-only, and every one was produced by a geometric query against the world: there is
-    no reading a real device could not have made (R-SENS-15).
+    is whatever its sensor's author made it, so read that sensor's docstring. Every reading is
+    immutable: the runner refuses a sensor whose reading is a list, a dict, a mutable
+    dataclass or a writable array (R-SENS-12). What a reading *contains* is its author's
+    honesty -- the contract keeps the arena, the mission and other agents out of a sensor's
+    reach (R-SENS-15), but it cannot stop a sensor returning more than its physical
+    counterpart could measure. That is what review and FIDELITY.md are for.
     """
 
     peers: Mapping[str, Mapping[str, Any]]
@@ -188,7 +191,9 @@ class Observation:
         try:
             return self.sensors[name]
         except KeyError:
-            raise KeyError(
+            # AttributeError, not KeyError: this is attribute access, and hasattr(obs, "tof")
+            # must answer False rather than raise.
+            raise AttributeError(
                 f"this run has no sensor named {name!r}; it carries "
                 f"{sorted(self.sensors) or 'no sensors'}. RunConfig(sensors=...) decides "
                 f"what a drone carries."

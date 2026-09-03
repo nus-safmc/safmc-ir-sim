@@ -99,6 +99,9 @@ Crashing will dominate your score before anything clever does, so know the rules
 - **What can kill you is what you can see.** Other drones occlude your ring at every altitude,
   matching the collision model. If your ring is clear, you are clear.
 - **Walls and pillars are taller than the ceiling**, so they always block and always hurt.
+- **Mission markers are 1.0 m tall bodies**, and any other solid landmark is as tall as it
+  says: below that height you hit it, at or above it you fly over — and the ring sees it
+  under exactly the same rule. Landing inside one is a crash, not a rescue.
 - **`collision_behaviour="stop"`** (the default) means one touch ends that drone's run — there
   is no repair. `--collision unobstructed` turns collisions off entirely, and is the right
   control when you want to compare *search strategy* without crash rate confounding it.

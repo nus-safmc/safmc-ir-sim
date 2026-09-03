@@ -121,10 +121,10 @@ strictly 2D and `ObjectBase.z` is dead code.
 | Perimeter wall | 1.5 m | yes |
 | Inner wall, Unknown-area wall | 2.0 m | yes |
 | Pillar | 2.0 m | yes |
-| **Mission marker** | **1.0 m** | **yes at 0.5 m, no above 1.0 m** |
+| **Mission marker** | **1.0 m** | **yes at 0.5 m, no at or above 1.0 m** |
 | Any other solid landmark | its own `height_m` | below its height only |
 | Point landmark (a tag, a mark, an anchor) | none | never — a ray cannot hit a point |
-| Another drone | **every altitude** | always, matching the 2D collision model |
+| Another drone | **every altitude** | always for the ring, matching the 2D collision model; **never for the camera** (F-21) |
 
 Since the rules cap flight at 1.4 m and every wall is at least 1.5 m, structure is never
 overflyable — 2D is exact for navigation. Altitude earns its keep for markers and other placed
@@ -239,18 +239,36 @@ RunConfig(arena_config=ArenaConfig(landmarks=(Landmark("tag_12", "nav_tag", 3.0,
 ```
 
 A placement that depends on the generated layout — a tag on each doorway of the Unknown
-Search Area — is generated first and then placed with `dataclasses.replace(arena,
-landmarks=...)`; `tests/test_landmarks.py` shows it. A solid placed landmark counts as
-structure for generation: walls and pillars keep their published gaps from it and the room is
-drawn around it. Validation rejects a landmark outside the field, a duplicate id, and a solid
-one overlapping structure or another body (R-WORLD-7).
+Search Area — is generated first, placed with `dataclasses.replace`, and handed to the run:
+
+```python
+arena = generate_arena(seed)
+placed = dataclasses.replace(arena, landmarks=tags_on_the_doorways(arena))
+run(config, arena=placed)          # validated; header records arena_source: "supplied"
+```
+
+A placed landmark with a footprint is fixed structure to the generator: walls and pillars
+keep their published gaps from a body, nothing is built over a flat mark, targets are not
+dropped on either, and the room is drawn clear of them. Validation rejects a landmark outside
+the field, a duplicate id, non-finite geometry, a footprint overlapping structure or another
+footprint, a target walled off by solid landmarks, and — on either path — a landmark wearing a
+mission kind that is not a generated target, because the camera would report it as a victim
+that can never score (R-WORLD-7). The run itself refuses a take-off position inside a body.
+
+**Solid means lethal at every altitude below its height, including zero.** A drone that
+lands inside a solid landmark crashes; it does not settle on top of it and score.
 
 **The runner refuses a point landmark nobody can perceive.** A point exists only to be
 reported by a sensor that knows its kind, so if no configured sensor lists it, that is a
-configuration mistake and you get a `ConfigError` naming the kind at build time, rather than an
-afternoon wondering why the camera never sees your tags.
+configuration mistake and you get a `ConfigError` naming the kind when the run is constructed,
+rather than an afternoon wondering why the camera never sees your tags. Solid landmarks are
+exempt — the ring sees them whatever their kind — which also means a camera configured
+without the mission kinds is accepted: a run that cannot read victims is a legitimate
+experiment.
 
-Every landmark is written to the log header with the arena, so a replay knows where they were.
+Every landmark is written to the log header with the arena, and the replay draws them: a
+hollow diamond for a point or a flat mark, an orange-ringed disc for a body, id and kind on
+hover.
 
 ## Adding a sensor
 
@@ -334,21 +352,41 @@ def step(self, obs):
 **Testing a policy that reads it** needs no simulator:
 `make_observation(sensors={"beacons": BeaconRanges(...)})`.
 
-Things the contract will refuse, at construction rather than at tick 4 000: a name that is not
-an identifier or collides with `states`/`run`; two sensors with one name; a rate that does not
-divide the tick rate; a `record()` key named `ticks` or `sample_tick`; a point landmark whose
-kind no sensor lists. Things it cannot check and you must: that the reading is what the real
-device would report, and that the physics is defensible — say so in the module docstring and
-in [FIDELITY.md](FIDELITY.md), the way the two flown sensors do.
+Things the contract refuses, and when — always before tick 4 000:
+
+- **At construction:** a name that is not an identifier or collides with `states`, `run` or
+  `replay`; two sensors with one name, case-insensitively; a rate that does not divide the
+  tick rate. `RunConfig` re-checks the names itself, so a config that forgot
+  `super().__post_init__()` gets caught too.
+- **At build:** a first reading a policy could write into — a list, a dict, an unfrozen
+  dataclass, a writable array; a point landmark whose kind no sensor lists; a take-off
+  position inside a body.
+- **When the run starts recording:** a `record()` key named `ticks` or `sample_tick`, or
+  shared with `record_static()`. Every sensor's row keys and shapes are fixed from its first
+  reading, and a later row that differs stops the run with the sensor, key, drone and tick
+  named. A refused run writes no log at all.
+
+Things it cannot check and you must: that the reading is what the real device would report —
+the contract keeps the arena, the mission and other agents out of a sensor's reach, but a
+sensor that returned every landmark's true position is within reach and outside the rule —
+and that the physics is defensible. Say so in the module docstring and in
+[FIDELITY.md](FIDELITY.md), the way the two flown sensors do.
+
+Two things worth knowing about determinism: `record()` must be pure, because it runs only
+when recording is on and R-OBS-4 requires a recorded run to match an unrecorded one; and each
+sensor's generator is spawned in `RunConfig.sensors` order, so appending a sensor leaves the
+earlier sensors' noise streams untouched while inserting one in front re-seeds everything
+after it.
 
 ### Timing, exactly
 
-Every sensor samples once before the first tick, then after motion at the end of each tick `t`
-for which `(t + 1) % decimation == 0`. A 2 Hz sensor on the 20 Hz loop is therefore fresh in
-the observations at ticks 0, 10, 20, … and `obs.stale_ticks[name]` counts up between. All
-drones sample the same post-move world, so no drone is measured against a staler picture than
-another. A terminal drone stops sampling and its last reading is held; the log's `sample_tick`
-column says which rows are held.
+Every sensor samples once before the first tick, then at the end of each tick `t` for which
+`(t + 1) % decimation == 0` — after motion, and after the collision pass, so a drone that hit
+something this tick is already terminal and does not record a scan from inside the wall. A
+2 Hz sensor on the 20 Hz loop is therefore fresh in the observations at ticks 0, 10, 20, … and
+`obs.stale_ticks[name]` counts up between. All drones sample the same post-move world, so no
+drone is measured against a staler picture than another. A terminal drone stops sampling and
+its last reading is held; the log's `sample_tick` column says which rows are held.
 
 ## Sensors we expect to add
 
@@ -374,5 +412,6 @@ highest-value single class in the project.
 Every sensor is listed in the header's `sensors` block with its config type, its rate and
 whether it was recorded. A recorded sensor gets `<name>.npz` with `ticks`, a per-agent
 `sample_tick`, one array per `record()` key stacked to `(ticks, agents, ...)`, and any
-constants from `record_static()`. The ring is always recorded; the camera is not, because a
-tuple of detections has no fixed shape. See [07-logging-and-viz.md](07-logging-and-viz.md).
+constants from `record_static()`. The ring is recorded whenever it is carried; the camera is
+not, because a tuple of detections has no fixed shape. See
+[07-logging-and-viz.md](07-logging-and-viz.md).

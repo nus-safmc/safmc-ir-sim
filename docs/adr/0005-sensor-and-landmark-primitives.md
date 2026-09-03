@@ -77,19 +77,38 @@ query (R-SENS-11, restated from the world's side).
   recorder or the replay. `examples/03_custom_sensor.py` is the template and a test runs it.
 - **The stale documentation is fixed at the root**: `docs/06-sensors.md` now describes the
   contract, and `tests/test_sensor_primitive.py` builds a sensor the way the docs say to.
-- **`Observation.sensors` is `Mapping[str, Any]`.** The type of a reading is its author's.
-  The R-POL-4 walk test now descends into mappings — it previously did not, which means it
-  had never actually inspected `peers` either — and additionally bans `Landmark`, `Target`,
-  `WorldScene`, `TrueState` and `Sensor` from anything reachable from an observation.
+- **`Observation.sensors` is `Mapping[str, Any]`.** The type of a reading is its author's,
+  and the runner checks the first reading of every sensor at build: a list, a dict, an
+  unfrozen dataclass or a writable array is refused. The R-POL-4 walk test now descends into
+  `MappingProxyType` and bans `Landmark`, `WorldScene`, `TrueState` and `Sensor` by type. The
+  audit of this change found that the walk had never been able to fail at all -- its
+  try/except wrapped the recursive call and swallowed every assertion below the root -- so
+  the test now also smuggles each banned thing through and checks it is caught.
 - **Timing is now one rule for every sensor**: sampled once before tick 0 and then after
-  motion whenever `(tick + 1) % decimation == 0`, so a decimated sensor is fresh at ticks
-  0, d, 2d. The camera used to sample at the top of the tick from the same world state;
-  nothing a policy observes changed.
-- **Cost:** `obs.tof` / `obs.markers` are properties, not fields. `make_observation` accepts
+  motion and after the collision pass whenever `(tick + 1) % decimation == 0`, so a
+  decimated sensor is fresh at ticks 0, d, 2d and a drone that became terminal this tick is
+  not sampled. The camera used to sample at the top of the tick from the same world state,
+  so its readings are unchanged. **The tick-0 ring scan did change**: the old runner took it
+  lazily before the drone bodies had ever been added to the scene, so at tick 0 no drone saw
+  its neighbours; now it does, which is what the ring would see. Every later tick is
+  identical.
+- **Cost:** `obs.tof` / `obs.markers` are properties, not fields, and raise `AttributeError`
+  by name when the run does not carry that sensor. `make_observation` accepts
   `sensors={...}` and is otherwise unchanged. `Recorder(record_tof=, tof_every=)` became
   `Recorder(record_sensors=, sensor_every=)`. `load_run()["tof"]` became
   `load_run()["sensors"]["tof"]`, and every sensor file gains a `sample_tick` array so a
   held reading is distinguishable from a fresh one.
+- **Landmarks placed from a generated layout need a way to run.** `run(config, arena=...)`
+  and `Runner(config, arena=...)` accept a resolved arena in place of the generated one; it
+  is validated, and the header records `arena_source: "supplied"` with the full geometry, so
+  the run is reproducible from its log though not from its seed alone.
+- **A solid landmark is lethal at ground level too.** A drone that lands inside one crashes
+  rather than scoring -- the audit landed a drone on top of a 1.0 m marker from 1.2 m and
+  collected 15 points. The same check refuses a take-off position inside a body.
+- **Placed landmarks constrain generation and validation.** Walls and pillars keep their
+  gaps from a placed body, nothing is built over a flat mark, reachability counts solid
+  landmarks as blocking, and a landmark wearing a mission kind without being a generated
+  target is refused as a decoy.
 - **Cost:** a sensor whose reading has no fixed shape (a tuple of detections) cannot use the
   row recorder and is listed in the header as not recorded. The camera is such a sensor.
 - **Cost:** a solid placed landmark counts as structure for generation, so walls and pillars

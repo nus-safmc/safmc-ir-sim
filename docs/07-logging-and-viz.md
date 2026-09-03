@@ -18,8 +18,9 @@ runs/sdlw_s3/
 ```
 
 `run.jsonl` line 1 is the header, then one line per event, then the footer. The header carries
-the **complete resolved arena** — every wall, pillar and target — so the log is self-contained
-and does not depend on the generator producing the same arena again.
+the **complete resolved arena** — every wall, pillar, target and landmark, and whether it was
+generated from the seed or supplied to the run — so the log is self-contained and does not
+depend on the generator producing the same arena again.
 
 ```python
 from safmc_sim.recorder import load_run, score_from_log
@@ -29,7 +30,7 @@ run["states"]["lifecycle"]         # (T, N) int codes
 run["header"]["sensors"]           # every sensor: name, config type, rate, recorded?
 run["sensors"]["tof"]["ranges_m"]           # (T, N, 64) flattened (ranger, zone), CCW from the nose
 run["sensors"]["tof"]["zone_bearings_rad"]  # (64,) the bearing of each column. Use it -- see below.
-run["sensors"]["tof"]["sample_tick"]        # (T, N) the tick each row was sampled at; -1 before tick 0
+run["sensors"]["tof"]["sample_tick"]        # (T, N) the tick each row was sampled at; -1 is the pre-flight sample
 score_from_log("runs/sdlw_s3")     # recomputed from the log alone
 ```
 
@@ -55,8 +56,10 @@ has a bug.
 value is confined there, so `states.npz` is byte-identical between two runs of the same
 `(scenario, seed, policy, config)`. There is a test.
 
-Size, roughly: a 12-drone 180 s run is ~80 KB of states and ~280 KB of ToF. Recording can be
-disabled (`record=False`) and is tested not to change simulation results.
+Size, measured on a 12-drone 180 s run: about 0.7 MB of states and 3.2 MB of ToF — poses are
+float64 so offline re-scoring is exact, and the ring is 64 float32 values per drone per tick.
+Recording can be disabled (`record=False`) and is tested not to change simulation results,
+with the flown sensors and with a noisy custom one.
 
 ## The replay viewer
 
@@ -70,8 +73,9 @@ A single self-contained HTML file — no server, no dependencies, works from dis
 rendering path that can quietly disagree with the first.
 
 What it shows: the arena with walls, pillars, the Start Area band and the Unknown Search Area;
-every drone with heading and trail; live ToF rays from the collapsed scan; each target with
-its 1 m scoring radius, turning green when serviced; a scrubbable timeline with play/pause and
+every drone with heading and trail; live ToF rays from the recorded scans; each target with
+its 1 m scoring radius, turning green when serviced; every placed landmark, with id and kind
+on hover; a scrubbable timeline with play/pause and
 arrow-key stepping; the agent table with lifecycle and current command; the event log colour-
 coded for crashes, scores and rule violations; and the full score arithmetic.
 

@@ -23,11 +23,17 @@ world's side.
 
 Mission targets are landmarks with scoring semantics; see
 :class:`~safmc_sim.world.arena.Target`. Everything else is placed with
-``ArenaConfig(landmarks=...)`` or ``dataclasses.replace(arena, landmarks=...)``.
+``ArenaConfig(landmarks=...)``, or -- when placement depends on the generated layout -- with
+``dataclasses.replace(arena, landmarks=...)`` and ``run(config, arena=placed)``.
+
+Subclass ``Landmark`` if a sensor needs more than these fields (a tag family, an anchor's
+channel), but know that the log records only the base fields: a subclass round-trips out of
+``run.jsonl`` as a plain ``Landmark``, which is all scoring and replay need.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -61,6 +67,12 @@ class Landmark:
             raise ConfigError(f"landmark id must be a non-empty string, got {self.id!r}")
         if not isinstance(self.kind, str) or not self.kind:
             raise ConfigError(f"landmark {self.id!r}: kind must be a non-empty string")
+        for name in ("x", "y", "radius_m", "height_m"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ConfigError(
+                    f"landmark {self.id!r}: {name} must be a finite number, got {value!r}"
+                )
         if self.radius_m < 0.0 or self.height_m < 0.0:
             raise ConfigError(
                 f"landmark {self.id!r}: radius_m and height_m must be >= 0, "
