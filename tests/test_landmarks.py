@@ -314,6 +314,14 @@ def test_landing_onto_a_body_is_a_crash_not_a_score():
     assert crashes[0].detail["reason"] == "struck landmark post while landing"
     assert "drone_00" not in result.landed
 
+    # It is recorded where it stopped -- on top of the post -- not hovering at cruise.
+    with tempfile.TemporaryDirectory() as tmp:
+        run(RunConfig(seed=0, n_drones=10, duration_s=30.0, policy="_land_on_post",
+                      arena_config=ArenaConfig(landmarks=(post,)), sensors=(ToFConfig(),)),
+            recorder=Recorder(tmp))
+        pose = load_run(tmp)["states"]["pose"]
+    assert pose[-1, 0, 2] == pytest.approx(post.height_m)
+
 
 def test_a_flat_mark_is_kept_clear_of_generated_structure():
     mark = Landmark("start_00", "start_mark", 10.0, 9.0, radius_m=0.5)
@@ -338,3 +346,46 @@ def test_the_generated_arena_s_landmarks_are_in_the_header_too():
     assert header["arena"]["landmarks"] == [
         {"id": "tag_1", "kind": "nav_tag", "x": 3.0, "y": 9.0, "radius_m": 0.0, "height_m": 0.0}
     ]
+
+
+# -- second audit pass ---------------------------------------------------------------------------
+
+
+def test_landmark_invariants_are_re_checked_on_a_resolved_arena():
+    """A subclass that skipped super().__post_init__() must not reach the log."""
+
+    @dataclass(frozen=True)
+    class Sloppy(Landmark):
+        def __post_init__(self):
+            pass
+
+    arena = generate_arena(0)
+    for bad, match in (
+        (Sloppy("e", "", 5.0, 9.0), "kind"),
+        (Sloppy("n", "prop", 5.0, 9.0, radius_m=float("nan")), "finite"),
+        (Sloppy("neg", "prop", 5.0, 9.0, radius_m=-0.5, height_m=1.0), ">= 0"),
+        (Sloppy("", "prop", 5.0, 9.0), "id"),
+    ):
+        with pytest.raises(ArenaError, match=match):
+            validate_arena(dataclasses.replace(arena, landmarks=(bad,)))
+
+    @dataclass(frozen=True)
+    class SloppyTarget(Target):
+        def __post_init__(self):
+            pass
+
+    with pytest.raises(ArenaError, match="unknown kind"):
+        validate_arena(dataclasses.replace(
+            arena, targets=arena.targets + (SloppyTarget("t", "prop", 5.0, 9.0),)))
+
+
+def test_a_supplied_arena_s_config_replaces_the_dead_one_in_the_log():
+    arena = generate_arena(5, ArenaConfig(n_pillars_known=3))
+    cfg = RunConfig(seed=1, n_drones=10, duration_s=1.0, policy="sdlw",
+                    arena_config=ArenaConfig(n_pillars_known=0, n_inner_walls=0))
+    with tempfile.TemporaryDirectory() as tmp:
+        result = run(cfg, recorder=Recorder(tmp), arena=arena)
+        header = load_run(tmp)["header"]
+    assert result.config.arena_config == arena.config
+    assert header["config"]["arena_config"]["n_pillars_known"] == 3
+    assert header["seed"] == 1 and header["arena"]["seed"] == 5

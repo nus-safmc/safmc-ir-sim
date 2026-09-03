@@ -84,7 +84,7 @@ from ..constants import (
 )
 from ..errors import ArenaError, ConfigError
 from ..sensors.raycast import RayScene
-from .landmark import Landmark, occluder_scene
+from .landmark import Landmark, occluder_scene, validate_landmark_fields
 
 __all__ = [
     "Wall",
@@ -528,10 +528,10 @@ def generate_arena(
     walls = _boundary_walls(width, depth, thickness)
     structure = [w.polygon() for w in walls]
     # A placed landmark with a footprint -- a post, a start mark on the floor -- is a fixed
-    # feature of the venue, so the random layout is generated around it: walls and pillars
-    # keep their published gaps from it, targets are not dropped onto it, and the room is
-    # re-drawn if a wall would come too close. Bodies get the pillar gap; a flat mark just
-    # may not be built over.
+    # feature of the venue, so the random layout is generated around it: walls keep the wall
+    # gap from a body and pillars and the room the pillar gap, targets are not dropped onto
+    # it, and the room is re-drawn if a wall would come too close. A flat mark just may not
+    # be built over.
     bodies = [target_polygon(lm) for lm in cfg.landmarks if lm.solid]
     marks = [target_polygon(lm) for lm in cfg.landmarks if lm.radius_m > 0 and not lm.solid]
     structure.extend(bodies)
@@ -762,6 +762,11 @@ def validate_arena(spec: ArenaSpec, drone_radius_m: float = DRONE_RADIUS_M) -> N
 def _validate_landmarks(spec: ArenaSpec) -> None:
     seen: set[str] = set()
     for lm in spec.all_landmarks:
+        # Re-checked here, not trusted from construction: a subclass that skipped
+        # super().__post_init__() would otherwise put a NaN or an empty kind in the log.
+        validate_landmark_fields(lm, ArenaError)
+        if isinstance(lm, Target) and lm.kind not in TARGET_KINDS:
+            raise ArenaError(f"target {lm.id!r} has unknown kind {lm.kind!r}")
         if lm.id in seen:
             raise ArenaError(f"duplicate landmark id {lm.id!r}")
         seen.add(lm.id)

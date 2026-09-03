@@ -553,3 +553,149 @@ def test_the_header_types_every_sensor_config():
     assert header["config"]["sensors"][2]["type"].endswith("AltimeterConfig")
     assert header["config"]["sensors"][2]["name"] == "altimeter"
     assert header["arena_source"] == "generated"
+
+
+# -- second audit pass -------------------------------------------------------------------------------
+
+
+def test_readings_have_no_writable_base():
+    """read_only() used to return a view: the writable original was one `.base` away."""
+
+    @register_policy("_probes_base")
+    class ProbesBase(Policy):
+        def step(self, obs):
+            for array in (obs.tof.ranges_m, obs.tof.zone_bearings_rad, obs.tof.ranger_bearings_rad):
+                base = array
+                while base is not None:
+                    assert not base.flags.writeable
+                    base = base.base
+            return Velocity()
+
+    run(RunConfig(seed=0, policy="_probes_base", **SHORT))
+    from safmc_sim.testing import make_observation
+
+    scan = make_observation().tof
+    assert scan.ranges_m.base is None or not scan.ranges_m.base.flags.writeable
+
+
+@pytest.mark.parametrize("variant, match", [
+    ("view", "underneath"),
+    ("object", "object array"),
+])
+def test_arrays_with_a_writable_base_or_object_dtype_are_refused(variant, match):
+    class Leaky(Altimeter):
+        def sample(self, truth, world, tick):
+            if self.config.variant == "view":
+                owner = np.array([truth.z])           # writable, and kept alive by the view
+                view = owner.view()
+                view.flags.writeable = False
+                return Altitude(z_m=view, tick=tick)  # type: ignore[arg-type]
+            boxed = np.empty(1, dtype=object)
+            boxed[0] = truth.z
+            boxed.flags.writeable = False
+            return Altitude(z_m=boxed, tick=tick)     # type: ignore[arg-type]
+
+    @dataclass(frozen=True)
+    class LeakyConfig(AltimeterConfig):
+        name: str = "leaky"
+        variant: str = "view"
+
+        def build(self, rng):
+            return Leaky(self, rng)
+
+    runner = Runner(RunConfig(seed=0, policy="sdlw",
+                              sensors=(ToFConfig(), LeakyConfig(variant=variant)), **SHORT))
+    try:
+        with pytest.raises(ConfigError, match=match):
+            runner.build()
+    finally:
+        runner._teardown()
+
+
+def test_a_sloppy_config_s_rate_and_a_non_sequence_are_config_errors():
+    @dataclass(frozen=True)
+    class Sloppy(AltimeterConfig):
+        def __post_init__(self):
+            pass
+
+    for bad in ("4", float("nan"), True, -1.0):
+        with pytest.raises(ConfigError, match="rate_hz"):
+            RunConfig(sensors=(Sloppy(rate_hz=bad),))
+    with pytest.raises(ConfigError, match="sequence"):
+        RunConfig(sensors=None)
+
+
+def test_a_sensor_that_starts_unrecorded_cannot_start_recording_later():
+    from safmc_sim.errors import LogFormatError
+
+    class LateStarter(Altimeter):
+        def record(self, reading):
+            return None if reading.tick < 0 else {"z_m": np.array([reading.z_m])}
+
+    @dataclass(frozen=True)
+    class LateConfig(AltimeterConfig):
+        name: str = "late"
+        rate_hz: float | None = None
+
+        def build(self, rng):
+            return LateStarter(self, rng)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(LogFormatError, match="None at its first sample"):
+            run(RunConfig(seed=0, policy="sdlw", n_drones=10, duration_s=1.0,
+                          sensors=(LateConfig(),)), recorder=Recorder(tmp))
+
+
+def test_record_errors_and_non_numeric_statics_are_named():
+    from safmc_sim.errors import LogFormatError
+
+    class Raises(Altimeter):
+        def record(self, reading):
+            if reading.tick == 3:
+                raise RuntimeError("flaky")
+            return {"z_m": np.array([reading.z_m])}
+
+    class Stringy(Altimeter):
+        def record_static(self):
+            return {"units": "metres"}
+
+    @dataclass(frozen=True)
+    class RaisesConfig(AltimeterConfig):
+        name: str = "raises"
+        rate_hz: float | None = None
+
+        def build(self, rng):
+            return Raises(self, rng)
+
+    @dataclass(frozen=True)
+    class StringyConfig(AltimeterConfig):
+        name: str = "stringy"
+
+        def build(self, rng):
+            return Stringy(self, rng)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(LogFormatError, match="'raises' record\\(\\) raised at tick 3"):
+            run(RunConfig(seed=0, policy="sdlw", n_drones=10, duration_s=1.0,
+                          sensors=(RaisesConfig(),)), recorder=Recorder(tmp))
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(LogFormatError, match="dtype"):
+            run(RunConfig(seed=0, policy="sdlw", n_drones=10, duration_s=1.0,
+                          sensors=(StringyConfig(),)), recorder=Recorder(tmp))
+
+
+def test_a_log_written_before_the_sensor_suite_was_recorded_still_loads_its_ring():
+    """Pre-C8 logs have no `sensors` block in the header and always carried tof.npz."""
+    import json
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run(RunConfig(seed=0, policy="sdlw", n_drones=10, duration_s=1.0), recorder=Recorder(tmp))
+        path = Path(tmp) / "run.jsonl"
+        lines = path.read_text().splitlines()
+        header = json.loads(lines[0])
+        del header["sensors"]
+        lines[0] = json.dumps(header)
+        path.write_text("\n".join(lines) + "\n")
+        log = load_run(tmp)
+    assert log["sensors"]["tof"]["ranges_m"].shape[2] == 64

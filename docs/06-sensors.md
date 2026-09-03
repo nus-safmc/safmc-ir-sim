@@ -255,8 +255,11 @@ footprint, a target walled off by solid landmarks, and — on either path — a 
 mission kind that is not a generated target, because the camera would report it as a victim
 that can never score (R-WORLD-7). The run itself refuses a take-off position inside a body.
 
-**Solid means lethal at every altitude below its height, including zero.** A drone that
-lands inside a solid landmark crashes; it does not settle on top of it and score.
+**Solid means lethal at every altitude below its height, including zero.** Under the default
+`collision_behaviour="stop"`, a drone that lands inside a solid landmark crashes and is
+recorded where it stopped, on top of the body; it does not settle and score. Under
+`unobstructed` nothing collides -- that mode switches every crash off, this one included --
+so the landing stands.
 
 **The runner refuses a point landmark nobody can perceive.** A point exists only to be
 reported by a sensor that knows its kind, so if no configured sensor lists it, that is a
@@ -359,12 +362,15 @@ Things the contract refuses, and when — always before tick 4 000:
   tick rate. `RunConfig` re-checks the names itself, so a config that forgot
   `super().__post_init__()` gets caught too.
 - **At build:** a first reading a policy could write into — a list, a dict, an unfrozen
-  dataclass, a writable array; a point landmark whose kind no sensor lists; a take-off
-  position inside a body.
+  dataclass, a writable array, an array with a writable array underneath it, an object
+  array; a point landmark whose kind no sensor lists; a take-off position inside a body. Only
+  the *first* reading is checked: a sensor that returns a frozen reading once and a list
+  afterwards is its author's bug, and the runner does not pay to re-check every tick.
 - **When the run starts recording:** a `record()` key named `ticks` or `sample_tick`, or
-  shared with `record_static()`. Every sensor's row keys and shapes are fixed from its first
-  reading, and a later row that differs stops the run with the sensor, key, drone and tick
-  named. A refused run writes no log at all.
+  shared with `record_static()`; a non-numeric value in either. Every sensor's row keys and
+  shapes are fixed from its first reading, and a later row that differs — or a sensor that
+  returned `None` first and rows later — stops the run with the sensor, key, drone and tick
+  named. Everything is assembled before anything is written, so a refused run leaves no log.
 
 Things it cannot check and you must: that the reading is what the real device would report —
 the contract keeps the arena, the mission and other agents out of a sensor's reach, but a

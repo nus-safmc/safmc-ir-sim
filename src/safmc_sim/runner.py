@@ -63,6 +63,7 @@ from .sensors.base import (
     TrueState,
     check_reading_is_immutable,
     decimation,
+    validate_rate,
     validate_sensor_name,
 )
 from .sensors.marker_cam import MarkerCamConfig
@@ -157,7 +158,12 @@ class RunConfig:
                 f"collision_behaviour must be 'stop' or 'unobstructed', "
                 f"got {self.collision_behaviour!r}"
             )
-        object.__setattr__(self, "sensors", tuple(self.sensors))
+        try:
+            object.__setattr__(self, "sensors", tuple(self.sensors))
+        except TypeError:
+            raise ConfigError(
+                f"sensors must be a sequence of SensorConfig, got {type(self.sensors).__name__}"
+            ) from None
         names: list[str] = []
         for cfg in self.sensors:
             if not isinstance(cfg, SensorConfig):
@@ -169,6 +175,7 @@ class RunConfig:
             # super().__post_init__() could otherwise call itself "states" and overwrite
             # the run's own file. Case-insensitive because the name becomes a file name.
             validate_sensor_name(cfg.name)
+            validate_rate(cfg.rate_hz, cfg.name)
             if cfg.name.lower() in names:
                 raise ConfigError(
                     f"two sensors are named {cfg.name!r} (case-insensitively). Names are the "
@@ -252,7 +259,11 @@ class Runner:
     generated arena with landmarks placed by ``dataclasses.replace`` from its own layout --
     and the run uses it instead of regenerating from the seed. It is validated first, and the
     log header records it in full with ``arena_source: "supplied"``, so the run is still
-    reproducible from the log even though it is not reproducible from the seed alone.
+    reproducible from the log even though it is not reproducible from the seed alone. The
+    config's ``arena_config`` is then dead -- the arena carries its own -- so the runner
+    replaces it with the arena's, and ``RunResult.config`` and the header describe the arena
+    that was actually flown. ``header.seed`` still seeds the policies, sensors and take-off
+    grid; ``header.arena.seed`` is the arena's own.
     """
 
     def __init__(self, config: RunConfig, recorder=None, arena: ArenaSpec | None = None) -> None:
@@ -274,6 +285,7 @@ class Runner:
             validate_arena(arena)
             self.arena = arena
             self.arena_source = "supplied"
+            self.config = config = replace(config, arena_config=arena.config)
         self.mission = Mission(self.arena)
         self.blackboard: Blackboard = PerfectBlackboard()
         self.pose_source: PoseSource = POSE_SOURCES[config.pose_source](
@@ -372,7 +384,7 @@ class Runner:
             struck = self._landmark_strike(start[:2], 0.0)
             if struck is not None:
                 raise ConfigError(
-                    f"drone_{i:02d} would take off inside landmark {struck!r} at "
+                    f"drone_{i:02d} would take off inside landmark {struck.id!r} at "
                     f"({start[0]:.2f}, {start[1]:.2f}). Move the landmark, or change "
                     f"start_spacing_m."
                 )
@@ -632,7 +644,9 @@ class Runner:
         if self.config.collision_behaviour == "stop":
             struck = self._landmark_strike(agent.xy, 0.0)
             if struck is not None:
-                self._crash(agent, tick, sim_time, f"struck landmark {struck} while landing")
+                # It came down onto the body and stopped there, so that is where it is.
+                agent.robot._state[3, 0] = min(agent.z, struck.height_m)
+                self._crash(agent, tick, sim_time, f"struck landmark {struck.id} while landing")
                 return
         self._freeze(agent)
         agent.robot._state[3, 0] = 0.0
@@ -722,10 +736,10 @@ class Runner:
             return None
 
         struck = self._landmark_strike(agent.xy, agent.z)
-        return None if struck is None else f"struck landmark {struck}"
+        return None if struck is None else f"struck landmark {struck.id}"
 
-    def _landmark_strike(self, xy, z: float) -> str | None:
-        """The id of the solid landmark a drone body at ``(xy, z)`` is inside, or None.
+    def _landmark_strike(self, xy, z: float):
+        """The solid landmark a drone body at ``(xy, z)`` is inside, or None.
 
         Solid landmarks -- mission markers, any placed body -- are not ir-sim obstacles,
         because ir-sim's collision is strictly 2D and would make a 1.0 m marker impassable at
@@ -736,7 +750,7 @@ class Runner:
                 continue
             reach = K.DRONE_RADIUS_M + landmark.radius_m
             if float(np.hypot(xy[0] - landmark.x, xy[1] - landmark.y)) < reach:
-                return landmark.id
+                return landmark
         return None
 
     def _out_of_bounds(self, agent: AgentView) -> bool:

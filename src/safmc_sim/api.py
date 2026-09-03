@@ -152,9 +152,11 @@ class Observation:
     :class:`MarkerDetection`; those two have the shorthands :attr:`tof` and :attr:`markers`
     because the flown airframe carries them. Anything else is reached here under the name its
     config was given -- ``RunConfig(sensors=...)`` decides what a drone carries, and a reading
-    is whatever its sensor's author made it, so read that sensor's docstring. Every reading is
-    immutable: the runner refuses a sensor whose reading is a list, a dict, a mutable
-    dataclass or a writable array (R-SENS-12). What a reading *contains* is its author's
+    is whatever its sensor's author made it, so read that sensor's docstring. Readings are
+    meant to be immutable, and the runner checks each sensor's first reading at build --
+    refusing a list, a dict, an unfrozen dataclass or a writable array (R-SENS-12) -- which
+    catches the shape a sensor was written to return; a sensor that changes shape mid-run is
+    its author's bug, not something the runner re-checks every tick. What a reading *contains* is its author's
     honesty -- the contract keeps the arena, the mission and other agents out of a sensor's
     reach (R-SENS-15), but it cannot stop a sensor returning more than its physical
     counterpart could measure. That is what review and FIDELITY.md are for.

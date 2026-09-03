@@ -88,10 +88,15 @@ query (R-SENS-11, restated from the world's side).
   motion and after the collision pass whenever `(tick + 1) % decimation == 0`, so a
   decimated sensor is fresh at ticks 0, d, 2d and a drone that became terminal this tick is
   not sampled. The camera used to sample at the top of the tick from the same world state,
-  so its readings are unchanged. **The tick-0 ring scan did change**: the old runner took it
-  lazily before the drone bodies had ever been added to the scene, so at tick 0 no drone saw
-  its neighbours; now it does, which is what the ring would see. Every later tick is
-  identical.
+  so its readings are unchanged. **The tick-0 ring observation did change**: the old runner
+  took it lazily before the drone bodies had ever been added to the scene, so at tick 0 no
+  drone saw its neighbours; now it does, which is what the ring would see. The log never held
+  that pre-flight sample, and every recorded row and every later observation is identical --
+  a default reference-policy run is byte-identical to the pre-change tree.
+- **Two numbers moved for existing logs.** Solid landmarks -- mission markers included -- are
+  now in the occupancy grid, so `sensed_coverage` recomputed on an old log shifts by about
+  0.1 % relative (the markers' footprints leave the free-cell denominator). And a pre-C8 log
+  has no sensor block in its header, so `load_run` falls back to `tof.npz` for those.
 - **Cost:** `obs.tof` / `obs.markers` are properties, not fields, and raise `AttributeError`
   by name when the run does not carry that sensor. `make_observation` accepts
   `sensors={...}` and is otherwise unchanged. `Recorder(record_tof=, tof_every=)` became
@@ -102,9 +107,12 @@ query (R-SENS-11, restated from the world's side).
   and `Runner(config, arena=...)` accept a resolved arena in place of the generated one; it
   is validated, and the header records `arena_source: "supplied"` with the full geometry, so
   the run is reproducible from its log though not from its seed alone.
-- **A solid landmark is lethal at ground level too.** A drone that lands inside one crashes
-  rather than scoring -- the audit landed a drone on top of a 1.0 m marker from 1.2 m and
-  collected 15 points. The same check refuses a take-off position inside a body.
+- **A solid landmark is lethal at ground level too.** Under `collision_behaviour="stop"` a
+  drone that lands inside one crashes rather than scoring -- the audit landed a drone on top
+  of a 1.0 m marker from 1.2 m and collected 15 points -- and is recorded where it stopped, on
+  top of the body. Under `unobstructed` nothing collides and the landing stands; that mode is
+  the control in which crashes are switched off, and this is one of them. The same check
+  refuses a take-off position inside a body.
 - **Placed landmarks constrain generation and validation.** Walls and pillars keep their
   gaps from a placed body, nothing is built over a flat mark, reachability counts solid
   landmarks as blocking, and a landmark wearing a mission kind without being a generated

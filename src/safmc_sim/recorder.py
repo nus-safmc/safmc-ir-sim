@@ -152,12 +152,13 @@ class Recorder:
         self._agents = list(agent_ids)
         self._sensor_names = [s.name for s in sensors]
         for sensor in sensors:
-            static = {k: np.asarray(v) for k, v in sensor.record_static().items()}
-            for key in static:
+            static = {}
+            for key, value in sensor.record_static().items():
                 if key in _RESERVED_SENSOR_KEYS:
                     raise LogFormatError(
                         f"sensor {sensor.name!r} record_static() uses reserved key {key!r}"
                     )
+                static[key] = _numeric_array(value, f"sensor {sensor.name!r} record_static()[{key!r}]")
             self._sensor_static[sensor.name] = static
             if sample_readings is not None and sensor.name in sample_readings:
                 self._learn_schema(sensor, sensor.record(sample_readings[sensor.name]))
@@ -235,7 +236,7 @@ class Recorder:
                 raise LogFormatError(
                     f"sensor {name!r} uses key {key!r} in both record() and record_static()"
                 )
-            schema[key] = np.asarray(value, dtype=np.float32).shape
+            schema[key] = _numeric_array(value, f"sensor {name!r} record()[{key!r}]").shape
         if not schema:
             raise LogFormatError(
                 f"sensor {name!r} record() returned an empty mapping; return None to leave "
@@ -271,9 +272,20 @@ class Recorder:
         if self.record_sensors and tick % self.sensor_every == 0:
             self._sensor_ticks.append(tick)
             for j, name in enumerate(self._sensor_names):
+                try:
+                    rows = [a.sensors[j].record(a.readings[name]) for a in agents]
+                except Exception as exc:  # noqa: BLE001 -- re-raised with sensor and tick
+                    raise LogFormatError(
+                        f"sensor {name!r} record() raised at tick {tick}: {exc!r}"
+                    ) from exc
                 if name in self._sensors_skipped:
+                    if any(r is not None for r in rows):
+                        raise LogFormatError(
+                            f"sensor {name!r} record() returned None at its first sample and "
+                            f"rows at tick {tick}. A sensor is recorded for the whole run or "
+                            f"not at all; return rows from the first sample, or None always."
+                        )
                     continue
-                rows = [a.sensors[j].record(a.readings[name]) for a in agents]
                 if name not in self._schema:
                     # begin() was not given sample readings; learn from the first tick.
                     self._learn_schema(agents[0].sensors[j], rows[0])
@@ -379,6 +391,23 @@ _RESERVED_SENSOR_KEYS = frozenset({"ticks", "sample_tick"})
 _LANDMARK_FIELDS = ("id", "kind", "x", "y", "radius_m", "height_m")
 
 
+def _numeric_array(value, what: str) -> np.ndarray:
+    """A numeric ndarray, or a LogFormatError naming what was wrong.
+
+    An object array saves fine and then fails to load without ``allow_pickle`` -- the kind
+    of failure that surfaces a run later, on someone else's machine.
+    """
+    try:
+        array = np.asarray(value)
+    except Exception as exc:  # noqa: BLE001
+        raise LogFormatError(f"{what} is not array-like: {exc}") from exc
+    if array.dtype.kind not in "biuf":
+        raise LogFormatError(
+            f"{what} has dtype {array.dtype}; sensor arrays must be numeric or boolean"
+        )
+    return array
+
+
 def _landmark_row(landmark) -> dict[str, Any]:
     return {name: getattr(landmark, name) for name in _LANDMARK_FIELDS}
 
@@ -440,11 +469,17 @@ def load_run(directory: str | Path) -> dict[str, Any]:
     if states.exists():
         with np.load(states) as data:
             out["states"] = {k: data[k] for k in data.files}
-    for entry in header.get("sensors", []):
-        path = directory / f"{entry['name']}.npz"
-        if entry.get("recorded") and path.exists():
-            with np.load(path) as data:
-                out["sensors"][entry["name"]] = {k: data[k] for k in data.files}
+    if "sensors" in header:
+        for entry in header["sensors"]:
+            path = directory / f"{entry['name']}.npz"
+            if entry.get("recorded") and path.exists():
+                with np.load(path) as data:
+                    out["sensors"][entry["name"]] = {k: data[k] for k in data.files}
+    elif (directory / "tof.npz").exists():
+        # A log written before the sensor suite was recorded in the header (C8) carried the
+        # ring alone, always as tof.npz. Still readable; it has no sample_tick column.
+        with np.load(directory / "tof.npz") as data:
+            out["sensors"]["tof"] = {k: data[k] for k in data.files}
     return out
 
 

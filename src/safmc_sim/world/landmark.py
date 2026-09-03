@@ -42,7 +42,7 @@ import numpy as np
 from ..errors import ConfigError
 from ..sensors.raycast import RayScene
 
-__all__ = ["Landmark", "occluder_scene"]
+__all__ = ["Landmark", "occluder_scene", "validate_landmark_fields"]
 
 
 @dataclass(frozen=True)
@@ -63,27 +63,7 @@ class Landmark:
     height_m: float = 0.0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.id, str) or not self.id:
-            raise ConfigError(f"landmark id must be a non-empty string, got {self.id!r}")
-        if not isinstance(self.kind, str) or not self.kind:
-            raise ConfigError(f"landmark {self.id!r}: kind must be a non-empty string")
-        for name in ("x", "y", "radius_m", "height_m"):
-            value = getattr(self, name)
-            if not isinstance(value, (int, float)) or not math.isfinite(value):
-                raise ConfigError(
-                    f"landmark {self.id!r}: {name} must be a finite number, got {value!r}"
-                )
-        if self.radius_m < 0.0 or self.height_m < 0.0:
-            raise ConfigError(
-                f"landmark {self.id!r}: radius_m and height_m must be >= 0, "
-                f"got {self.radius_m} and {self.height_m}"
-            )
-        if self.height_m > 0.0 and self.radius_m <= 0.0:
-            raise ConfigError(
-                f"landmark {self.id!r} has height_m={self.height_m} but no footprint. "
-                f"height_m is the top of a body, and a point has no body -- give it a "
-                f"radius_m, or drop the height."
-            )
+        validate_landmark_fields(self)
 
     @property
     def solid(self) -> bool:
@@ -93,6 +73,35 @@ class Landmark:
     @property
     def xy(self) -> np.ndarray:
         return np.array([self.x, self.y])
+
+
+def validate_landmark_fields(lm: Landmark, error: type = ConfigError) -> None:
+    """The invariants every landmark must satisfy, as a function so they can be re-checked.
+
+    ``Landmark.__post_init__`` runs this at construction. ``validate_arena`` runs it again on
+    every landmark in a resolved arena, because a subclass that forgot
+    ``super().__post_init__()`` would otherwise reach the log with a NaN or an empty kind and
+    break offline re-scoring -- an auditor did exactly that.
+    """
+    if not isinstance(lm.id, str) or not lm.id:
+        raise error(f"landmark id must be a non-empty string, got {lm.id!r}")
+    if not isinstance(lm.kind, str) or not lm.kind:
+        raise error(f"landmark {lm.id!r}: kind must be a non-empty string")
+    for name in ("x", "y", "radius_m", "height_m"):
+        value = getattr(lm, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise error(f"landmark {lm.id!r}: {name} must be a finite number, got {value!r}")
+    if lm.radius_m < 0.0 or lm.height_m < 0.0:
+        raise error(
+            f"landmark {lm.id!r}: radius_m and height_m must be >= 0, "
+            f"got {lm.radius_m} and {lm.height_m}"
+        )
+    if lm.height_m > 0.0 and lm.radius_m <= 0.0:
+        raise error(
+            f"landmark {lm.id!r} has height_m={lm.height_m} but no footprint. height_m is "
+            f"the top of a body, and a point has no body -- give it a radius_m, or drop the "
+            f"height."
+        )
 
 
 def occluder_scene(landmarks: Iterable[Landmark]) -> RayScene:

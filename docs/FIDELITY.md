@@ -32,7 +32,7 @@ state and free communication"* — nothing stronger. See
 | F-6 | Camera is pitched 45° nose-down | Detector modelled as horizontal | Real camera sees the floor ahead, not the horizon; ground markers enter view differently |
 | F-7 | PX4 tracks setpoints with real closed-loop dynamics | First-order velocity lag, `tau` = 0.35 s | No overshoot, no attitude-induced translation, no tracking error under aggressive commands |
 | F-8 | Drones are 3D bodies with props | Circles of radius 0.18 m | Matches the radius the real VFH planner uses |
-| F-9 | Landing takes time and can fail | Instantaneous and always succeeds (F-16); a landing inside a solid landmark is a crash | Overstates landing reliability, which directly inflates score |
+| F-9 | Landing takes time and can fail | Instantaneous and always succeeds (F-16); under `stop` a landing inside a solid landmark is a crash, recorded on top of the body | Overstates landing reliability, which directly inflates score |
 | F-10 | Link loss disarms motors after 3 s | Not modelled (no comms model) | Removes a real failure mode |
 
 ## 3. Assumptions — values chosen without published data

@@ -125,8 +125,9 @@ bounds and a robot will silently leave the world otherwise [src: verified in rec
 a `Landmark`: an id, a kind, a finite position, a finite footprint radius and a finite height.
 A landmark with both a footprint and a height is **solid** and MUST occlude ranging through the
 height gate of R-SENS-6 and MUST be collidable at altitudes below its height -- including
-altitude zero, so a landing inside a solid landmark is a collision, not a score; a landmark
-without both MUST do neither. Mission targets MUST be landmarks. A placed landmark that would
+altitude zero, so under `collision_behaviour="stop"` a landing inside a solid landmark is a
+collision, not a score (under `unobstructed` nothing collides, by definition of that mode); a
+landmark without both MUST do neither. Mission targets MUST be landmarks. A placed landmark that would
 be reported under a mission kind but is not a generated target MUST be refused. Validation
 MUST reject a landmark outside the field, a duplicate id, and a landmark with a footprint
 overlapping structure or another footprint.
@@ -134,7 +135,8 @@ overlapping structure or another footprint.
 **R-WORLD-8** *(added with ADR-0005)* Landmarks MUST be placeable at fixed positions through
 the scenario descriptor (`ArenaConfig.landmarks`), and a resolved `ArenaSpec` carrying
 landmarks MUST be usable in place of the generated one (`run(config, arena=...)`), validated
-first and recorded in full with its provenance. The generator MUST treat a placed landmark
+first -- every landmark invariant re-checked, whatever constructed it -- and recorded in full
+with its provenance and its own arena config. The generator MUST treat a placed landmark
 with a footprint as fixed: walls and pillars keep their published gaps from a body, nothing
 is built over a flat mark, and targets are not placed on either. Reachability validation
 (R-WORLD-4) MUST count solid landmarks as blocking, and a run MUST refuse a take-off position
@@ -269,8 +271,10 @@ than through its own geometric query.
 `sensors/base.py`: a frozen `SensorConfig` subclass carrying a unique `name`, a `rate_hz`
 (`None` for every tick) and `build(rng)`; and a `Sensor` subclass whose
 `sample(truth, world, tick)` returns an immutable reading. Readings MUST be immutable — a
-frozen dataclass or a tuple — and any numpy array in one MUST be read-only. The runner MUST
-check the first reading of every sensor at build and refuse a mutable one.
+frozen dataclass or a tuple — and any numpy array in one MUST be read-only with no writable
+array underneath it. The runner MUST check the first reading of every sensor at build and
+refuse a mutable one; a sensor that changes the shape of its reading afterwards is its
+author's defect, which the runner does not re-check every tick.
 
 **R-SENS-13** *(added with ADR-0005)* The runner MUST drive every sensor through the same path:
 one instance per drone per config, built with that drone's own generator; sampled once before
@@ -294,8 +298,10 @@ policy.
 
 **R-SENS-16** *(added with ADR-0005)* A sensor MAY be recorded by returning fixed-shape arrays
 from `record()`. The recorder MUST fix each sensor's row keys and shapes from its first
-reading before any tick is recorded, MUST refuse a later row that differs, and MUST write
-either the whole log or none of it. It writes `<name>.npz` holding `ticks`, a per-agent
+reading before any tick is recorded, MUST refuse a later row that differs -- including a
+sensor that returned `None` first and rows later -- MUST accept only numeric arrays, and MUST
+assemble every array before writing any file, so a failure while assembling leaves nothing on
+disk. (A failure of the disk itself mid-write can still leave a partial directory.) It writes `<name>.npz` holding `ticks`, a per-agent
 `sample_tick`, one stacked array per key, and any constants from `record_static()`; the header
 MUST list every sensor with its config type and whether it was recorded. `record()` MUST be
 pure: recording MUST NOT affect results (R-OBS-4).

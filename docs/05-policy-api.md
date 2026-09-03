@@ -101,7 +101,8 @@ Crashing will dominate your score before anything clever does, so know the rules
 - **Walls and pillars are taller than the ceiling**, so they always block and always hurt.
 - **Mission markers are 1.0 m tall bodies**, and any other solid landmark is as tall as it
   says: below that height you hit it, at or above it you fly over — and the ring sees it
-  under exactly the same rule. Landing inside one is a crash, not a rescue.
+  under exactly the same rule. Landing inside one is a crash, not a rescue (in `stop` mode;
+  `unobstructed` switches every crash off, this one included).
 - **`collision_behaviour="stop"`** (the default) means one touch ends that drone's run — there
   is no repair. `--collision unobstructed` turns collisions off entirely, and is the right
   control when you want to compare *search strategy* without crash rate confounding it.
@@ -115,9 +116,12 @@ drones to spend and *when* is the actual strategic problem.
 **Randomness comes from `self.rng`.** Every policy gets its own `numpy.random.Generator`.
 Calling `numpy.random.uniform(...)` directly breaks seeded replay.
 
-**Peer data is one tick old.** `self.publish(key, value)` becomes visible — to everyone,
-including you — on the *next* tick. That is not a latency model; it is what makes the result
-independent of the order agents happen to be indexed.
+**Peer data is one tick old, and read-only.** `self.publish(key, value)` becomes visible — to
+everyone, including you — on the *next* tick. That is not a latency model; it is what makes
+the result independent of the order agents happen to be indexed. What you read back is
+frozen: lists come back as tuples, dicts as read-only mappings, arrays read-only. Mutating a
+peer's value in place would have changed what the agents stepped after you saw this tick,
+which is the same order dependence from the other side.
 
 ## Coordinating a fleet
 

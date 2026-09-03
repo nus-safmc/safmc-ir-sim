@@ -78,6 +78,7 @@ __all__ = [
     "read_only",
     "decimation",
     "validate_sensor_name",
+    "validate_rate",
     "check_reading_is_immutable",
 ]
 
@@ -160,10 +161,7 @@ class SensorConfig(ABC):
 
     def __post_init__(self) -> None:
         validate_sensor_name(self.name)
-        if self.rate_hz is not None and not self.rate_hz > 0.0:
-            raise ConfigError(
-                f"sensor {self.name!r}: rate_hz must be > 0 or None, got {self.rate_hz}"
-            )
+        validate_rate(self.rate_hz, self.name)
 
     @property
     def landmark_kinds(self) -> tuple[str, ...]:
@@ -233,15 +231,17 @@ class Sensor(ABC):
 
 
 def read_only(array: np.ndarray) -> np.ndarray:
-    """A view that cannot be written through.
+    """A copy that cannot be written through -- not through ``.base`` either.
 
     A frozen dataclass blocks rebinding but not in-place numpy writes. Without this, a policy
     doing ``obs.tof.zone_bearings_rad[:] += 0.5`` would permanently re-aim its own ring,
-    silently and irrecoverably.
+    silently and irrecoverably. It is a copy rather than a view because a read-only *view*
+    still exposes the writable original as ``.base`` -- an auditor re-aimed the ring through
+    ``zone_bearings_rad.base[:] += 0.5``. A fresh copy owns its memory and has no base.
     """
-    view = np.asarray(array).view()
-    view.flags.writeable = False
-    return view
+    copy = np.array(array, copy=True)
+    copy.flags.writeable = False
+    return copy
 
 
 _IMMUTABLE_SCALARS = (str, bytes, int, float, bool, complex, type(None), np.generic)
@@ -258,12 +258,21 @@ def check_reading_is_immutable(sensor_name: str, reading: Any, path: str = "read
     if isinstance(reading, _IMMUTABLE_SCALARS):
         return
     if isinstance(reading, np.ndarray):
-        if reading.flags.writeable:
+        if reading.dtype == object:
             raise ConfigError(
-                f"sensor {sensor_name!r}: {path} is a writable array. A reading is held "
-                f"between samples and recorded, so a policy could edit its own next "
-                f"observation through it. Wrap it: read_only(array)."
+                f"sensor {sensor_name!r}: {path} is an object array, which can hold anything "
+                f"mutable and cannot be recorded. Use a numeric array or a tuple."
             )
+        base = reading
+        while base is not None:
+            if base.flags.writeable:
+                raise ConfigError(
+                    f"sensor {sensor_name!r}: {path} is a writable array"
+                    + ("" if base is reading else " underneath (its .base is writable)")
+                    + ". A reading is held between samples and recorded, so a policy could "
+                    f"edit its own next observation through it. Wrap it: read_only(array)."
+                )
+            base = base.base
         return
     if isinstance(reading, (tuple, frozenset)):
         for i, item in enumerate(reading):
@@ -284,12 +293,22 @@ def check_reading_is_immutable(sensor_name: str, reading: Any, path: str = "read
     )
 
 
+def validate_rate(rate_hz: object, name: str) -> None:
+    """``None`` or a finite positive number. Re-checked by ``RunConfig`` like the name."""
+    if rate_hz is None:
+        return
+    if isinstance(rate_hz, bool) or not isinstance(rate_hz, (int, float)) \
+            or not np.isfinite(rate_hz) or rate_hz <= 0:
+        raise ConfigError(
+            f"sensor {name!r}: rate_hz must be None or a finite number > 0, got {rate_hz!r}"
+        )
+
+
 def decimation(rate_hz: float | None, tick_hz: float, name: str) -> int:
     """Turn a sample rate into a whole number of ticks, or refuse (R-TIME-3)."""
+    validate_rate(rate_hz, name)
     if rate_hz is None:
         return 1
-    if rate_hz <= 0:
-        raise ConfigError(f"{name}: rate_hz must be > 0, got {rate_hz}")
     ratio = tick_hz / rate_hz
     nearest = round(ratio)
     if nearest < 1 or abs(ratio - nearest) > 1e-9:

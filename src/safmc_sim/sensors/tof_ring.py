@@ -191,8 +191,9 @@ class ToFRing(Sensor):
             self._ranger_bearings[:, None] + self._zone_offsets[None, :]
         )
         # Handed to policies inside every ToFScan. A frozen dataclass blocks rebinding but not
-        # in-place writes, and these are the sensor's own arrays -- a policy doing
-        # `obs.tof.zone_bearings_rad[:] += 0.5` would permanently re-aim the ring.
+        # in-place writes, and these describe the sensor's own geometry -- a policy doing
+        # `obs.tof.zone_bearings_rad[:] += 0.5` would permanently re-aim the ring. read_only
+        # copies, so the sensor's own arrays are never reachable from a reading at all.
         self._zone_bearings_ro = read_only(self._zone_bearings)
         self._ranger_bearings_ro = read_only(self._ranger_bearings)
 
@@ -247,4 +248,4 @@ class ToFRing(Sensor):
     def record_static(self):
         # Constant for the run, but the replay needs them to draw a ray, and a log that
         # cannot be drawn without the simulator is not self-contained (R-OBS-3).
-        return {"zone_bearings_rad": self._zone_bearings.reshape(-1)}
+        return {"zone_bearings_rad": self._zone_bearings.reshape(-1).copy()}

@@ -97,7 +97,9 @@ Coverage is reported **two ways** because they measure different things:
   *path-proximity* measure, not "area sensed", and its absolute numbers are consequently tiny.
   Kept for comparability.
 - `sensed_coverage` — cells actually swept by line of sight, cast with the same engine the
-  sensor uses. For a search mission this is the honest one.
+  sensor uses. For a search mission this is the honest one. Since C8 the free-cell
+  denominator excludes solid landmarks, mission markers included, so a number recomputed
+  from a pre-C8 log moves by about 0.1 % relative.
 
 ### The normalisation problem, stated honestly
 

@@ -367,8 +367,15 @@ placed body, validation, and a fence of 0.6 m posts that kills a fleet at 0.4 m 
 0.9 m. The R-POL-4 walk now descends into mappings and bans `Landmark`, `Target`, `WorldScene`,
 `TrueState` and `Sensor`.
 
-**Verified — MEASURED.** Full suite 43 s (38 s at C7 with 200 tests). The example runs 60 s of
+**Verified — MEASURED.** Full suite 45 s (38 s at C7 with 200 tests). The example runs 60 s of
 10 drones with three sensors and writes `beacons.npz` shaped `(1200, 10, 4)`.
+
+Against the pre-change tree (`3a24398`, run in a separate process from a `git archive` of its
+`src/`): the default arena is **identical for every seed 0–29** — walls, pillars, targets and
+room; and a default `sdlw` run (seed 3, 10 drones, 30 s) is **byte-identical** in
+`states.npz`, in every recorded ToF row including row 0, and in every event. The tick-0
+change below is to the *observation* a policy is handed before the first step, which the log
+never held; the reference policy climbs before it reads the ring, so nothing it did changed.
 
 **Found while building.** The R-POL-4 walk did not descend into a `MappingProxyType` (it is
 not a `dict`), so the new `sensors` mapping would have been skipped. Other drones never
@@ -376,9 +383,11 @@ occluded the camera (now F-21). A solid landmark placed by config had to become 
 the generator — on seed 7 a random inner wall landed on one, caught by a test.
 
 **Behaviour that changed.** The camera samples at the end of tick t−1 instead of the top of
-tick t: same world state, its readings are identical. The **tick-0 ring scan** is different:
-the old runner sampled it lazily before the drone bodies had been added to the scene, so at
-tick 0 no drone saw its neighbours; now every drone does. Later ticks are identical. A marker
+tick t: same world state, its readings are identical. The **tick-0 ring observation** is
+different: the old runner sampled it lazily before the drone bodies had been added to the
+scene, so at tick 0 no drone saw its neighbours; now every drone does. The recorded rows are
+unaffected (row 0 was always the post-step scan) and later observations are identical; the
+byte-identical comparison above is the measurement. A marker
 strike is reported as `struck landmark <id>`, not `struck marker`.
 `Recorder(record_tof=, tof_every=)` is `Recorder(record_sensors=, sensor_every=)`;
 `load_run()["tof"]` is `load_run()["sensors"]["tof"]`, which also gains `sample_tick`.
@@ -419,7 +428,36 @@ walk never inspected any reading" (it walked `obs.tof`; what it never did was fa
 reserved-key check happens at run start, not construction; `docs/04`'s diagram placed the
 sensors inside ir-sim; `docs/08` still described the six-command API removed at C7;
 FIDELITY F-9, F-13 and F-14 described the removed descent and controllers; `docs/07`'s log
-sizes were ten times stale. **263 tests.**
+sizes were ten times stale.
+
+**Audited again.** A second pass on the fixes, told to re-create each hole and its
+neighbours. What it found, all now fixed and under test:
+
+- `read_only()` returned a *view*: the writable original was one `.base` away, and
+  `obs.tof.zone_bearings_rad.base[:] += 0.5` re-aimed the ring for the run. It copies now,
+  `RayScene` owns copies, and the build-time check follows the `.base` chain and refuses
+  object arrays.
+- A `Landmark` subclass that skipped `super().__post_init__()` reached the log with an empty
+  kind or a NaN and broke offline re-scoring. Every invariant is re-checked on the resolved
+  arena, and a `Target` subclass with an unknown kind is refused too.
+- Published blackboard values were mutable by *readers*: an agent that appended to a peer's
+  list changed what the agents stepped after it saw in the same tick (pre-existing).
+  Published containers are frozen at commit.
+- Pre-C8 logs lost their `tof.npz` in `load_run`. They fall back to it.
+- The walk test's depth cap ran before its bans, and it treated `frozenset` and object
+  arrays as leaves. Bans first, deeper cap, both containers walked; eight smuggling cases.
+- A sensor returning `None` at its first sample and rows later was silently unrecorded; a
+  `record_static()` returning a string saved and then failed to load; a `record()` that
+  raised lost its sensor and tick. All refused by name.
+- A supplied arena left the config's `arena_config` in the header describing an arena that
+  was never flown; the arena's own config replaces it. A drone that crashed while landing
+  was recorded hovering at cruise; it is recorded on top of the body.
+- A sloppy config's `rate_hz="4"` and `sensors=None` raised bare `TypeError`s; `ConfigError`.
+
+Design choices the pass questioned, kept and now stated: under `unobstructed` a landing
+inside a body stands, because that mode switches every crash off; only a sensor's *first*
+reading is checked for immutability; `sensed_coverage` on old logs shifts ~0.1 % because
+markers now occupy the grid. **274 tests.**
 
 **Open.** No sensor beyond the flown two is a model of anything; the example is a template.
 A sensor that feeds localisation — flow, UWB, nav tags — is half a feature until a

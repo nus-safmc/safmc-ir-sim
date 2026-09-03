@@ -108,7 +108,7 @@ published data, is in **[docs/FIDELITY.md](docs/FIDELITY.md)**. Read it before q
 ## Tests
 
 ```bash
-python -m pytest tests -q      # 239 tests
+python -m pytest tests -q      # 274 tests
 ```
 
 Runtime is very platform-sensitive: ~37 s on the Linux machine it was developed on, but 2-6
