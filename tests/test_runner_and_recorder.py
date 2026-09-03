@@ -49,9 +49,12 @@ def test_fleet_size_outside_the_published_range_is_rejected(n):
 
 def test_a_sensor_rate_that_does_not_divide_the_tick_rate_is_rejected():
     """R-TIME-3: no silent rounding of a sensor rate."""
+    from safmc_sim.sensors.marker_cam import MarkerCamConfig
+    from safmc_sim.sensors.tof_ring import ToFConfig
+
     with pytest.raises(ConfigError, match="does not divide"):
-        RunConfig(tick_hz=20.0, marker_rate_hz=3.0)
-    RunConfig(tick_hz=20.0, marker_rate_hz=2.0)
+        RunConfig(tick_hz=20.0, sensors=(ToFConfig(), MarkerCamConfig(rate_hz=3.0)))
+    RunConfig(tick_hz=20.0, sensors=(ToFConfig(), MarkerCamConfig(rate_hz=2.0)))
 
 
 def test_unknown_collision_behaviour_is_rejected():
@@ -315,7 +318,10 @@ def test_log_contains_everything_the_spec_requires(tmp_path):
     assert states["pose"].shape == (n_ticks, 10, 4)      # x, y, z, theta
     assert states["lifecycle"].shape == (n_ticks, 10)
     assert states["command_kind"].shape == (n_ticks, 10)
-    assert log["tof"]["ranges_m"].shape == (n_ticks, 10, 64)
+    assert log["sensors"]["tof"]["ranges_m"].shape == (n_ticks, 10, 64)
+    assert log["sensors"]["tof"]["sample_tick"].shape == (n_ticks, 10)
+    assert [s["name"] for s in header["sensors"]] == ["tof", "markers"]
+    assert header["sensors"][0]["recorded"] and not header["sensors"][1]["recorded"]
 
     kinds = {e["kind"] for e in log["events"]}
     assert {"departed", "mission_started"} <= kinds

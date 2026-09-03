@@ -13,7 +13,7 @@ One directory per run:
 runs/sdlw_s3/
 ├── run.jsonl      header (config + full arena + versions) · events · footer (score)
 ├── states.npz     per-tick pose, velocity, lifecycle, command
-├── tof.npz        per-tick 64-bin collapsed scans
+├── tof.npz        per-tick ring scans -- one <sensor>.npz per recorded sensor
 └── replay.html    generated on demand
 ```
 
@@ -26,10 +26,17 @@ from safmc_sim.recorder import load_run, score_from_log
 run = load_run("runs/sdlw_s3")
 run["states"]["pose"]              # (T, N, 4) -> x, y, z, theta
 run["states"]["lifecycle"]         # (T, N) int codes
-run["tof"]["ranges_m"]             # (T, N, 64) flattened (ranger, zone), CCW from the nose
-run["tof"]["zone_bearings_rad"]    # (64,) the bearing of each column. Use it -- see below.
+run["header"]["sensors"]           # every sensor: name, config type, rate, recorded?
+run["sensors"]["tof"]["ranges_m"]           # (T, N, 64) flattened (ranger, zone), CCW from the nose
+run["sensors"]["tof"]["zone_bearings_rad"]  # (64,) the bearing of each column. Use it -- see below.
+run["sensors"]["tof"]["sample_tick"]        # (T, N) the tick each row was sampled at; -1 before tick 0
 score_from_log("runs/sdlw_s3")     # recomputed from the log alone
 ```
+
+A sensor you add appears the same way, as `run["sensors"][name]`, if its `record()` returns
+fixed-shape arrays — see [06-sensors.md](06-sensors.md#adding-a-sensor). `sample_tick` is
+there so a held reading (a 2 Hz sensor between samples, a crashed drone) is never mistaken
+for a fresh one.
 
 > **`ranges_m` columns are not firmware bin indices.** They are `(ranger, zone)` order,
 > anticlockwise from the nose; the firmware's `tof_scan_collapsed_t` holds the same 64 values

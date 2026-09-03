@@ -71,7 +71,8 @@ Full guide: **[docs/05-policy-api.md](docs/05-policy-api.md)**.
 |---|---|
 | **Arena** | Seeded generation from the 2026 rulebook — 20×20 m, a walled 10×10 m unknown room, pillars, randomised per seed, self-validating |
 | **Drone** | 2.5D `[x, y, θ, z, vx, vy]`, first-order velocity lag, 1.4 m ceiling, `ACTIVE` / `LANDED` / `CRASHED` |
-| **Sensing** | 8 × VL53L5CX ring, 8 zones each, reproducing the flown geometry and gating. Height-gated occlusion |
+| **Sensing** | 8 × VL53L5CX ring, 8 zones each, reproducing the flown geometry and gating; a geometric AprilTag camera. Height-gated occlusion. Both on one sensor contract, so a sensor of your own is one file |
+| **Landmarks** | Things placed for sensors to find — mission markers, and any nav tag, start mark or anchor you add. Solid ones occlude and can be hit; points do neither |
 | **Mission** | Victims, bonus victims, fires, the fire-suppression coupling, and the relay's 2× multiplier |
 | **Observability** | Structured log, offline re-scoring, metrics, a self-contained HTML replay |
 | **Toolbox** | Opt-in helpers — frame rotation, sensor reduction, a log-odds grid. The framework never imports them |
@@ -101,13 +102,13 @@ published data, is in **[docs/FIDELITY.md](docs/FIDELITY.md)**. Read it before q
 | [docs/FIDELITY.md](docs/FIDELITY.md) | Every divergence and assumption |
 | [docs/07-logging-and-viz.md](docs/07-logging-and-viz.md) | Logs, metrics, replay |
 | [docs/08-porting-to-ros.md](docs/08-porting-to-ros.md) | Taking a policy to real drones |
-| [docs/adr/](docs/adr/) | Why ir-sim, why one ToF sensor, why these seams |
+| [docs/adr/](docs/adr/) | Why ir-sim, why one ToF sensor, why these seams, why sensors and landmarks are primitives |
 | [docs/SPEC.md](docs/SPEC.md) | The numbered contract the tests check against |
 
 ## Tests
 
 ```bash
-python -m pytest tests -q      # 193 tests
+python -m pytest tests -q      # 239 tests
 ```
 
 Runtime is very platform-sensitive: ~37 s on the Linux machine it was developed on, but 2-6

@@ -30,9 +30,11 @@ flowchart TB
     end
 
     subgraph WORLD["THE WORLD — geometry and sensing"]
-        ARENA["world/arena.py"]
+        ARENA["world/arena.py<br/>world/landmark.py"]
+        BASE["sensors/base.py<br/><i>the sensor contract</i>"]
         RING["sensors/tof_ring.py"]
         CAM["sensors/marker_cam.py"]
+        YOURS["your sensor<br/><i>one file</i>"]
         RAY["sensors/raycast.py"]
     end
 
@@ -42,7 +44,8 @@ flowchart TB
     POL -.->|"optional"| TB
     RUN -->|"calls step(obs)"| POL
     RUN --> MIS & REC & BB & PS
-    RUN --> RING & CAM
+    RUN -->|"sample(truth, world)"| BASE
+    BASE --- RING & CAM & YOURS
     RUN -->|"env.step(velocity)"| IRSIM
     RING & CAM --> RAY
     ARENA --> RAY
@@ -57,6 +60,10 @@ flowchart TB
 **Read it as four bands.** You write the green. You import the blue. The grey runs your code and
 you never call into it. The orange is geometry — you meet it only through what your sensors
 report. `ir-sim` is the library underneath that moves things and decides what bumped into what.
+
+The orange band has one seam of its own: every sensor, flown or yours, is driven through the
+contract in `sensors/base.py`, and the runner never learns what any of them are. Adding a
+sensor, or a landmark for it to find, is one file — [docs/06-sensors.md](docs/06-sensors.md#adding-a-sensor).
 
 The single rule that keeps this honest: **arrows never go up from grey into green.** No plumbing
 imports your policy or the toolbox, so nothing the framework does can silently depend on a
@@ -75,7 +82,9 @@ choice a strategy made. There is a test that fails if that is ever violated.
 | **Scoring** | `mission.py` | Read if curious | Which targets counted and why |
 | **Observability** | `recorder.py`, `metrics.py`, `tools/viz.py` | Use the outputs | The log, the numbers, the replay page |
 | **Deferred seams** | `pose.py`, `blackboard.py` | Extend later | Where pose noise and a lossy radio will go |
-| **The world** | `world/arena.py`, `sensors/` | Rarely | Arena generation, ranging, marker detection |
+| **Sensors** | `sensors/base.py`, `sensors/tof_ring.py`, `sensors/marker_cam.py` | **Extend** | The contract every sensor implements, and the two the airframe carries |
+| **Landmarks** | `world/landmark.py` | **Extend** | Things placed in the world for sensors to find: markers, nav tags, anchors |
+| **The world** | `world/arena.py`, `sensors/raycast.py`, `sensors/scene.py` | Rarely | Arena generation, ray casting, the world as a sensor sees it |
 | **Foundations** | `constants.py`, `frames.py`, `errors.py` | Look things up | Every published number, angle conventions, exception types |
 
 **The seams that matter most** are `pose.py` and `blackboard.py`. Today they hand out perfect
@@ -106,8 +115,10 @@ classDiagram
         +pose: Pose
         +velocity_xy: tuple
         +lifecycle: str
-        +tof: ToFScan
-        +markers: tuple
+        +sensors: Mapping~name, reading~
+        +stale_ticks: Mapping~name, int~
+        +tof: ToFScan (shorthand)
+        +markers: tuple (shorthand)
         +peers: Mapping
         +arena: ArenaInfo
     }
@@ -158,7 +169,7 @@ sequenceDiagram
     participant B as blackboard
     participant P as your policy
     participant S as ir-sim
-    participant SEN as ToF ring
+    participant SEN as every sensor
     participant M as mission
 
     Note over R,B: 1. freeze the noticeboard
@@ -176,8 +187,8 @@ sequenceDiagram
     S-->>R: new positions
 
     Note over R,SEN: 6. sense AFTER moving
-    R->>SEN: step(pose)
-    SEN-->>R: ranges
+    R->>SEN: sample(truth, world)
+    SEN-->>R: a frozen reading each
 
     Note over R,M: 7. score and record
     R->>M: update(landed drones)
@@ -192,7 +203,8 @@ this tick appears next tick. Without that, drone 0's message reaches drone 1 but
 reverse, and results would depend on the order drones happen to be numbered.
 
 **Sensing happens after moving.** Every drone senses the same world, so nobody is measured
-against a staler picture than anyone else.
+against a staler picture than anyone else. Every sensor — the ring, the camera, one you add —
+goes through the same call; the runner does not know what any of them are.
 
 **Landing freezes the drone in place immediately.** Not just its command — its stored velocity
 too. Zeroing only the command let a drone that landed while still moving keep sliding about
@@ -243,7 +255,7 @@ your file unless you say so.
 runs/mine_s0/
 ├── run.jsonl      the setup, every event, the final score
 ├── states.npz     where every drone was, every tick
-├── tof.npz        what every drone's sensor saw
+├── tof.npz        what every drone's ring saw — one <sensor>.npz per recorded sensor
 └── replay.html    generated on demand — open it in a browser
 ```
 
@@ -261,6 +273,7 @@ and checking they agree is the point — if they ever diverge, one of them is wr
 |---|---|
 | **Write a strategy** | [docs/05-policy-api.md](docs/05-policy-api.md) |
 | Know what the sensors report | [docs/06-sensors.md](docs/06-sensors.md) |
+| Add a sensor, or something for it to sense | [docs/06-sensors.md#adding-a-sensor](docs/06-sensors.md#adding-a-sensor), [examples/03_custom_sensor.py](examples/03_custom_sensor.py) |
 | Know what the competition asks for | [docs/01-competition.md](docs/01-competition.md) |
 | Know what is *not* simulated | [docs/FIDELITY.md](docs/FIDELITY.md) — **read before quoting a number** |
 | Understand the logs and metrics | [docs/07-logging-and-viz.md](docs/07-logging-and-viz.md) |

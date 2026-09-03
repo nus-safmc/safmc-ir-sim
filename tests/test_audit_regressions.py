@@ -21,7 +21,7 @@ from safmc_sim.frames import wrap_pi
 from safmc_sim.mission import Mission
 from safmc_sim.recorder import Recorder, load_run, score_from_log
 from safmc_sim.runner import RunConfig, Runner, run
-from safmc_sim.sensors.marker_cam import MarkerCam
+from safmc_sim.sensors.marker_cam import MarkerCamConfig, detect_markers
 from safmc_sim.sensors.raycast import RayScene
 from safmc_sim.world.arena import Target, generate_arena
 from safmc_sim.world.arena import validate_arena
@@ -308,9 +308,8 @@ def test_a_drone_cannot_leave_the_field_even_unobstructed():
 @pytest.mark.parametrize("z", [0.5, 1.0, 1.2, 1.39])
 def test_markers_are_visible_at_every_legal_altitude(z):
     """An altitude cut-off copied from the ToF ring made a drone above 1.0 m totally blind."""
-    cam = MarkerCam()
     target = Target("v0", "victim", 2.0, 0.0)
-    detections = cam.detect(np.array([0.0, 0.0]), 0.0, z, [target], RayScene())
+    detections = detect_markers(MarkerCamConfig(), np.array([0.0, 0.0]), 0.0, z, [target], RayScene())
     assert detections and detections[0].marker_id == "v0"
 
 
@@ -418,10 +417,10 @@ def test_every_config_field_declares_its_units():
     allowed = ("_m", "_rad", "_s", "_ms", "_hz", "_rads", "_index", "_ticks")
     dimensionless = {
         "n_rangers", "zones_per_ranger", "front_index", "seed", "n_drones", "policy",
-        "policy_config", "arena_config", "quad_params", "tof_config", "marker_config",
+        "policy_config", "arena_config", "quad_params", "sensors", "name", "kinds",
         "collision_behaviour", "record", "pose_source", "n_inner_walls", "n_pillars_known",
         "n_unknown_walls", "n_pillars_unknown", "n_victims", "n_bonus_victims", "n_fires",
-        "max_placement_attempts", "tick_hz", "marker_rate_hz",
+        "max_placement_attempts", "tick_hz", "landmarks",
         "duration_s",
     }
     for cls in (RunConfig, QuadParams, ToFConfig, MarkerCamConfig, ArenaConfig):
@@ -456,7 +455,8 @@ def test_each_drone_carries_exactly_one_ring_owned_by_the_runner():
     runner = Runner(RunConfig(seed=0, n_drones=10, policy="sdlw")).build()
     try:
         for agent in runner.agents:
-            assert isinstance(agent.ring, ToFRing)
+            rings = [s for s in agent.sensors if isinstance(s, ToFRing)]
+            assert len(rings) == 1
             assert not agent.robot.sensors, "the ring must not be plugged into ir-sim"
     finally:
         runner._teardown()

@@ -71,14 +71,27 @@ def test_observation_exposes_no_route_to_ground_truth():
         zone_bearings_rad=np.zeros((8, 8)),
         ranger_bearings_rad=np.zeros(8),
     )
+    from collections.abc import Mapping
+    from types import MappingProxyType
+
+    from safmc_sim.sensors.marker_cam import MarkerDetection
+
     obs = Observation(
         agent_id="drone_00", tick=0, sim_time_s=0.0,
         pose=Pose(1.0, 2.0, 0.5, 0.0), velocity_xy=(0.0, 0.0), lifecycle="ACTIVE",
-        tof=scan, markers=(), peers={},
+        sensors=MappingProxyType({
+            "tof": scan,
+            "markers": (MarkerDetection("victim_0", "victim", 1.5, 0.1),),
+        }),
+        stale_ticks=MappingProxyType({"tof": 0, "markers": 3}),
+        peers=MappingProxyType({"drone_01": MappingProxyType({"goal": [1.0, 2.0]})}),
         arena=ArenaInfo(20.0, 20.0, 1.4, 6.0, 600.0),
     )
 
-    banned = ("ArenaSpec", "Mission", "Runner", "AgentView", "EnvBase", "ObjectBase", "World")
+    # The world objects a reading must never carry: a Landmark or Target in an observation
+    # would be a ground-truth position with an id on it.
+    banned = ("ArenaSpec", "Mission", "Runner", "AgentView", "EnvBase", "ObjectBase", "World",
+              "Landmark", "Target", "WorldScene", "TrueState", "Sensor")
     seen: set[int] = set()
 
     def walk(obj, path, depth=0):
@@ -88,7 +101,9 @@ def test_observation_exposes_no_route_to_ground_truth():
         assert type(obj).__name__ not in banned, f"{path} reaches {type(obj).__name__}"
         if isinstance(obj, (str, bytes, int, float, bool, type(None), np.ndarray)):
             return
-        if isinstance(obj, dict):
+        # A mappingproxy is not a dict; the old `isinstance(obj, dict)` never descended into
+        # `sensors` or `peers`, so this walk was silently not looking at the readings.
+        if isinstance(obj, Mapping):
             for k, v in obj.items():
                 walk(v, f"{path}[{k!r}]", depth + 1)
             return
@@ -106,8 +121,12 @@ def test_observation_exposes_no_route_to_ground_truth():
 
     walk(obs, "obs")
     # And the obvious names are simply absent.
-    for attribute in ("env", "arena_spec", "mission", "targets", "obstacles", "world"):
+    for attribute in ("env", "arena_spec", "mission", "targets", "obstacles", "world",
+                      "landmarks", "truth"):
         assert not hasattr(obs, attribute)
+    # The shorthands are the mapping, not a second copy of it.
+    assert obs.tof is obs.sensors["tof"]
+    assert obs.markers is obs.sensors["markers"]
 
 
 def test_registry_overwrites_with_a_warning_rather_than_raising():

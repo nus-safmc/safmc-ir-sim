@@ -320,3 +320,68 @@ survives independently. They are **not** a current claim about anything.
 
 **Open.** Rebuild a comparison once the team has written its own policies — that is now the
 intended shape.
+
+---
+
+## C8 — sensors and landmarks become primitives
+
+**Why.** Two sensors, two unrelated interfaces, five files to edit for a third, and an "Adding
+a sensor" section in `docs/06-sensors.md` that described an ir-sim factory patch removed at C3.
+The team wants mocked cameras, optical flow and UWB, and things in the arena for them to
+perceive — start marks, surveyed AprilTags, vision cues. [ADR-0005](adr/0005-sensor-and-landmark-primitives.md).
+
+**Built.**
+
+- `sensors/base.py` — the contract: `SensorConfig` (frozen, named, rated, `build(rng)`),
+  `Sensor` (`sample(truth, world, tick)`, optional `record`), `TrueState`, `read_only`,
+  `decimation`. One timing rule for every sensor: sampled before tick 0, then after motion when
+  `(t + 1) % d == 0`.
+- `world/landmark.py` — `Landmark(id, kind, x, y, radius_m, height_m)`; solid ⇔ footprint and
+  height; solid ones occlude and collide, points do neither. `Target` is now a `Landmark`.
+- `sensors/scene.py` — `WorldScene` carries the landmark list and is the only world a sensor sees.
+- The ring and the camera ported onto the contract. The camera detects landmarks **by kind**
+  (`MarkerCamConfig.kinds`), so a nav tag is a landmark plus one config entry.
+- `runner.py` — `RunConfig.sensors` (default `flown_sensors()`), one `_sense` path for every
+  sensor, per-(drone, sensor) generators, solid-landmark collision, and a refusal of any point
+  landmark no configured sensor can report.
+- `api.py` — `Observation.sensors` and `stale_ticks`; `tof` and `markers` become shorthands
+  that raise by name when the run does not carry that sensor.
+- `recorder.py` — `<name>.npz` per recorded sensor with `sample_tick`; header `sensors` block;
+  landmarks in the arena block. `load_run()["sensors"][name]`.
+- `world/arena.py` — `ArenaConfig.landmarks`, `ArenaSpec.landmarks` / `all_landmarks` /
+  `landmark_scene()`; solid placed landmarks are structure to the generator; validation.
+- `examples/03_custom_sensor.py` — a range-only beacon sensor, four anchors, a policy that
+  reads it by name. A template, not a model (F-22).
+- Spec: R-SENS-12..16, R-WORLD-7..8; R-POL-3 and R-OBS-2 amended. Docs 04–08, ARCHITECTURE,
+  FIDELITY (F-21, F-22), README.
+
+**Verified — TESTED.** 239 tests. `tests/test_sensor_primitive.py` builds a sensor the way the
+docs say to and checks: names and rates refused at construction; a custom reading reaches the
+policy by name with the documented staleness; per-drone instances and generators; adding a
+sensor does not perturb earlier sensors' streams (R-DET-3); byte-identical runs with a noisy
+custom sensor (R-DET-1); the log by name with `sample_tick`; reserved keys refused; a spy
+sensor is handed `TrueState` and `WorldScene` and nothing with `arena`/`mission`/`agents`; the
+camera reports only its configured kinds; two cameras under two names. `tests/test_landmarks.py`
+covers solid vs point, the height gate, config and `replace` placement, generation around a
+placed body, validation, and a fence of 0.6 m posts that kills a fleet at 0.4 m and not at
+0.9 m. The R-POL-4 walk now descends into mappings and bans `Landmark`, `Target`, `WorldScene`,
+`TrueState` and `Sensor`.
+
+**Verified — MEASURED.** Full suite 43 s (38 s at C7 with 200 tests). The example runs 60 s of
+10 drones with three sensors and writes `beacons.npz` shaped `(1200, 10, 4)`.
+
+**Found while building.** The R-POL-4 walk had never inspected `peers` or any reading: a
+`MappingProxyType` is not a `dict`, so the old `isinstance(obj, dict)` branch skipped it. Other
+drones never occluded the camera (now F-21). A solid landmark placed by config had to become
+structure for the generator — on seed 7 a random inner wall landed on one, caught by a test.
+
+**Behaviour that changed.** The camera samples at the end of tick t−1 instead of the top of
+tick t: same world state, nothing a policy observes differs. A marker strike is reported as
+`struck landmark <id>`, not `struck marker`. `Recorder(record_tof=, tof_every=)` is
+`Recorder(record_sensors=, sensor_every=)`; `load_run()["tof"]` is
+`load_run()["sensors"]["tof"]`, which also gains `sample_tick`.
+
+**Open.** No sensor beyond the flown two is a model of anything; the example is a template.
+A sensor that feeds localisation — flow, UWB, nav tags — is half a feature until a
+`PoseSource` consumes it (ADR-0003). The CLI has no `--sensors`; custom sensors are configured
+in Python, as `examples/03_custom_sensor.py` shows.

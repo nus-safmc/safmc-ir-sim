@@ -78,8 +78,9 @@ the real information budget, and `Observation` was built to match it.
 | `pose.theta` | `ATTITUDE.yaw` (convert heading → ARENA yaw) |
 | `velocity_xy` | `LOCAL_POSITION_NED.vx/vy` |
 | `lifecycle` | `HEARTBEAT` armed flag + `custom_main_mode`, plus your own state machine |
-| `tof` | `tof_get_collapsed_scan()` — the 64-bin scan, already the right shape |
-| `markers` | AprilTag detections, id + pose, converted to range and bearing |
+| `sensors["tof"]` (`obs.tof`) | `tof_get_collapsed_scan()` — the 64-bin scan, already the right shape |
+| `sensors["markers"]` (`obs.markers`) | AprilTag detections, id + pose, converted to range and bearing |
+| `sensors[<yours>]` | One subscription per sensor you added; its reading dataclass is the message you must fill |
 | `peers` | Whatever your `Blackboard` implementation is backed by |
 | `arena` | Static configuration |
 

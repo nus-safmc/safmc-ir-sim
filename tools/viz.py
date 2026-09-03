@@ -44,7 +44,7 @@ def build_payload(directory: Path, tof_every: int = 10, pose_every: int = 1) -> 
     times = states["time_s"][::pose_every]
     kinds = states["command_kind"][::pose_every]
 
-    tof = run.get("tof")
+    tof = run.get("sensors", {}).get("tof")
     tof_frames, tof_ticks, zone_bearings = [], [], []
     if tof is not None:
         stride = max(tof_every // pose_every, 1)

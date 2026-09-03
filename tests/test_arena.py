@@ -163,7 +163,7 @@ def test_scenes_separate_structure_from_markers(arenas):
     """R-MISS-2: markers occlude sensing but must never block line of sight."""
     for a in arenas:
         structural = a.structural_scene()
-        markers = a.marker_scene()
+        markers = a.landmark_scene()
         assert len(markers.circles) == len(a.targets)
         assert len(structural.circles) == len(a.pillars)
         assert len(structural.segments) == 4 * len(a.walls)

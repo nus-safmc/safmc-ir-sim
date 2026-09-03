@@ -1,5 +1,29 @@
 # Sensor models
 
+## What a sensor is
+
+Every sensor in this simulator is the same shape. It is a function from the drone's **true**
+state and the world to a frozen reading, sampled at a rate that divides the tick rate. The
+runner owns it, samples it after motion, and hands the latest reading to your policy as
+`obs.sensors[name]`. That contract lives in `sensors/base.py`, both flown sensors are written
+against it, and [adding one of your own](#adding-a-sensor) is one file.
+
+The rule the contract enforces: **truth enters a sensor; only readings leave it.** A sensor is
+handed the exact pose because that is what a physical sensor is bolted to. A policy is never
+handed it. There are exactly two paths from ground truth to a policy — the pose source
+(`obs.pose`, R-SEAM-1) and sensor readings (R-SENS-15) — and both are seams. See
+[ADR-0005](adr/0005-sensor-and-landmark-primitives.md).
+
+```python
+obs.sensors            # {"tof": ToFScan, "markers": (MarkerDetection, ...), ...}
+obs.stale_ticks        # {"tof": 0, "markers": 7, ...}  ticks since each last sampled
+obs.tof                # shorthand for obs.sensors["tof"]
+obs.markers            # shorthand for obs.sensors["markers"]
+```
+
+`RunConfig(sensors=...)` decides what a drone carries. The default is `flown_sensors()`: the
+ring and the camera below, with the flown geometry and rates.
+
 ## The ToF ring
 
 Eight **ST VL53L5CX** multizone sensors. One raycast per drone computes all of them.
@@ -98,11 +122,14 @@ strictly 2D and `ObjectBase.z` is dead code.
 | Inner wall, Unknown-area wall | 2.0 m | yes |
 | Pillar | 2.0 m | yes |
 | **Mission marker** | **1.0 m** | **yes at 0.5 m, no above 1.0 m** |
-| Another drone | its own altitude ±0.05 m | only if at a similar altitude |
+| Any other solid landmark | its own `height_m` | below its height only |
+| Point landmark (a tag, a mark, an anchor) | none | never — a ray cannot hit a point |
+| Another drone | **every altitude** | always, matching the 2D collision model |
 
 Since the rules cap flight at 1.4 m and every wall is at least 1.5 m, structure is never
-overflyable — 2D is exact for navigation. Altitude earns its keep for markers and for other
-drones.
+overflyable — 2D is exact for navigation. Altitude earns its keep for markers and other placed
+bodies. Drones occlude each other at every altitude deliberately: collision is ir-sim's and
+strictly 2D, so what can kill you is what you can see.
 
 ### Accuracy
 
@@ -117,7 +144,7 @@ identical.
 
 ### Noise
 
-`ToFConfig(noise_std_m=...)` adds Gaussian range noise from the agent's own generator, applied
+`ToFConfig(noise_std_m=...)` adds Gaussian range noise from the sensor's own generator, applied
 before gating and **never** to a no-return — perturbing "nothing is there" is meaningless.
 
 Off by default, because the target paper's arenas are noiseless and reproducing it is our
@@ -129,7 +156,8 @@ something the paper lists as future work.
 The ring is sampled **synchronously at the tick rate**. The real ring is round-robin, one
 sensor per 8 ms, so each refreshes at ~15 Hz and the ring is **skewed by up to 64 ms** across
 sensors — it is never a synchronous snapshot. That matters for scan-matching and for a drone
-turning fast, and not much for reactive avoidance. Assumption A-8.
+turning fast, and not much for reactive avoidance. Assumption A-8. `ToFConfig(rate_hz=...)`
+will at least decimate it.
 
 Also absent: `range_sigma_mm`, `reflectance`, `ambient_per_spad` (the firmware discards them
 too); the firmware's conservative "substitute 0.40 m for an unreliable return"; and any
@@ -147,8 +175,16 @@ for m in obs.markers:
 
 Range is measured to the marker's **near surface**, not its centre. Occlusion is tested to
 just short of that surface, so a marker never occludes itself but another marker can occlude
-it. Default rate is 2 Hz, the measured AprilTag rate on the real hardware — nominally 10 Hz,
-but the detector task runs at the lowest priority in the system.
+it. Other drones do not occlude it (F-21). Default rate is 2 Hz, the measured AprilTag rate on
+the real hardware — nominally 10 Hz, but the detector task runs at the lowest priority in the
+system — so `obs.markers` is fresh every tenth tick and `obs.stale_ticks["markers"]` counts
+1–9 in between.
+
+**It detects landmarks by kind.** `MarkerCamConfig.kinds` defaults to the three mission-marker
+kinds. The real detector also reads the surveyed navigation tags (ids 12–29 in
+`laptop/setup.yaml`); in the simulator that is a [landmark](#landmarks) of kind `"nav_tag"`
+plus one entry in `kinds`, and the detection comes back with `kind == "nav_tag"` so a policy
+can tell it from a victim — exactly as the real one can from the id range.
 
 Reporting `kind` is not cheating: the markers are team-supplied and the flown configuration
 assigns tag ids by role (0-11 landing targets, 8-11 bonus). A drone that reads a tag id does
@@ -168,21 +204,175 @@ A-5 (camera FOV, 1.0 rad) is derived from the QVGA intrinsics rather than measur
 real camera is pitched 45° nose-down while ours is modelled horizontal (F-6) — so it sees the
 floor ahead rather than the horizon, and ground markers enter view differently.
 
+## Landmarks
+
+Structure — walls and pillars — is what a drone must not hit. A **landmark** is everything
+else deliberately in the arena: a mission marker with a tag on its face, a surveyed tag on a
+wall, a start-point mark on the floor, a radio anchor in a corner. `world/landmark.py`.
+
+```python
+from safmc_sim.world.landmark import Landmark
+
+Landmark("tag_12", "nav_tag", x=3.0, y=9.0)                      # a point: a tag on a wall
+Landmark("start_00", "start_mark", 2.0, 2.0, radius_m=0.2)       # a flat mark with an extent
+Landmark("anchor_0", "uwb_anchor", 1.0, 19.0, radius_m=0.05, height_m=0.8)   # a body
+```
+
+Two rules:
+
+- **Solid means footprint *and* height.** A solid landmark occludes rays through the same
+  height gate as a marker and can be struck below its height. Everything else is a point:
+  the ring cannot see it and a drone cannot hit it. One predicate — `Landmark.solid` —
+  decides both, so what can kill you is exactly what the ring can see. Mission targets are
+  solid landmarks (0.30 m footprint, 1.0 m tall) with scoring semantics: `Target` subclasses
+  `Landmark`.
+- **A landmark reaches a policy only through a sensor's geometric query.** The ring sees
+  solid ones as anonymous circles. The camera reports id, kind, range and bearing for the
+  kinds it is configured for and nothing for the rest. A UWB anchor is invisible to a camera
+  because a camera does not detect radio, not because someone remembered to hide it.
+
+**Placing them.** Fixed, surveyed positions go in the scenario:
+
+```python
+RunConfig(arena_config=ArenaConfig(landmarks=(Landmark("tag_12", "nav_tag", 3.0, 9.0),)),
+          sensors=(ToFConfig(), MarkerCamConfig(kinds=TARGET_KINDS + ("nav_tag",))))
+```
+
+A placement that depends on the generated layout — a tag on each doorway of the Unknown
+Search Area — is generated first and then placed with `dataclasses.replace(arena,
+landmarks=...)`; `tests/test_landmarks.py` shows it. A solid placed landmark counts as
+structure for generation: walls and pillars keep their published gaps from it and the room is
+drawn around it. Validation rejects a landmark outside the field, a duplicate id, and a solid
+one overlapping structure or another body (R-WORLD-7).
+
+**The runner refuses a point landmark nobody can perceive.** A point exists only to be
+reported by a sensor that knows its kind, so if no configured sensor lists it, that is a
+configuration mistake and you get a `ConfigError` naming the kind at build time, rather than an
+afternoon wondering why the camera never sees your tags.
+
+Every landmark is written to the log header with the arena, so a replay knows where they were.
+
 ## Adding a sensor
 
-ir-sim has no sensor registry — `SensorFactory.create_sensor` is a hardcoded if/elif — so
-registration is a narrow patch applied at import, in `tof_ring.install()`. Copy that pattern.
+Three parts, one file, then one tuple entry. `examples/03_custom_sensor.py` is the complete
+runnable version; `sensors/base.py` has the contract's docstring. Nothing in the runner, the
+policy API or the recorder needs to know your sensor exists.
 
-The duck-typed contract is small: `.step(state_3x1)`, `.sensor_type`, `.parent` (assigned for
-you), and `.plot` / `.step_plot` / `.plot_clear` if you want to be drawn.
+**1. The reading** — a frozen dataclass. It is the only thing a policy will ever see of your
+sensor, so make it what the real device reports and nothing more. Wrap arrays in
+`read_only()`: a frozen dataclass stops rebinding but not in-place writes.
 
-Two things to get right:
+```python
+@dataclass(frozen=True)
+class BeaconRanges:
+    anchor_ids: tuple[str, ...]
+    ranges_m: np.ndarray        # inf where out of range -- same convention as the ring
+```
 
-- Read the world through `self._world_scene`, and get altitude from `self.parent.state[3, 0]`.
-  ir-sim hands `step()` only `[x, y, theta]`.
-- Do not name your `sensor_type` `lidar2d` or `fmcw_lidar2d` unless you want ir-sim to elect
-  it as `obj.lidar`, which changes what `env.get_lidar_scan()` and `FogMap` use.
+**2. The config** — a frozen `SensorConfig` subclass. Default `name` (its key under
+`obs.sensors`), default `rate_hz` (`None` means every tick; anything else must divide the tick
+rate or the run refuses to start), validated in `__post_init__` after
+`super().__post_init__()`, and a `build`. Field names carry their units. If the sensor
+reports landmarks by kind, say which kinds in `landmark_kinds` so the runner can check that
+your anchors are perceivable.
 
-A `SensorRegistry` mirroring ir-sim's existing `GridMapGenerator` auto-registration would be
-roughly a 30-line upstream PR and would remove the patch entirely. Worth doing if anyone has
-an afternoon.
+```python
+@dataclass(frozen=True)
+class BeaconConfig(SensorConfig):
+    name: str = "beacons"
+    rate_hz: float | None = 10.0
+    kind: str = "uwb_anchor"
+    max_range_m: float = 15.0
+    noise_std_m: float = 0.10
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.max_range_m <= 0:
+            raise ConfigError(f"max_range_m must be > 0, got {self.max_range_m}")
+
+    @property
+    def landmark_kinds(self):
+        return (self.kind,)
+
+    def build(self, rng):
+        return BeaconRanger(self, rng)
+```
+
+**3. The sensor** — a `Sensor` subclass with `sample(truth, world, tick)`. `truth` is the
+carrying drone's exact `TrueState`; `world` is a `WorldScene`, which offers
+`sensing_scene(exclude_object_id=truth.object_id)` for anything a ray can hit and
+`landmarks_of(kind)` for placed things. Noise comes from `self.rng`, never `numpy.random`.
+Keep the geometry in a pure function and let `sample` be the adapter — the pure function is
+what you unit-test. Return fixed-shape arrays from `record()` and the reading appears in the
+log as `<name>.npz`.
+
+```python
+class BeaconRanger(Sensor):
+    def sample(self, truth, world, tick):
+        anchors = world.landmarks_of(self.config.kind)
+        ranges = range_to_anchors(anchors, truth.xy, self.config.max_range_m)
+        hit = np.isfinite(ranges)
+        ranges = np.where(hit, ranges + self.rng.normal(0, self.config.noise_std_m, ranges.shape), ranges)
+        return BeaconRanges(tuple(a.id for a in anchors), read_only(ranges))
+
+    def record(self, reading):
+        return {"ranges_m": reading.ranges_m}
+```
+
+**4. Wire it in.** Extend the flown suite rather than replacing it, put something in the
+arena for it to sense, and read it by name.
+
+```python
+RunConfig(sensors=flown_sensors() + (BeaconConfig(),),
+          arena_config=ArenaConfig(landmarks=ANCHORS))
+
+def step(self, obs):
+    beacons = obs.sensors["beacons"]
+    ...
+```
+
+**Testing a policy that reads it** needs no simulator:
+`make_observation(sensors={"beacons": BeaconRanges(...)})`.
+
+Things the contract will refuse, at construction rather than at tick 4 000: a name that is not
+an identifier or collides with `states`/`run`; two sensors with one name; a rate that does not
+divide the tick rate; a `record()` key named `ticks` or `sample_tick`; a point landmark whose
+kind no sensor lists. Things it cannot check and you must: that the reading is what the real
+device would report, and that the physics is defensible — say so in the module docstring and
+in [FIDELITY.md](FIDELITY.md), the way the two flown sensors do.
+
+### Timing, exactly
+
+Every sensor samples once before the first tick, then after motion at the end of each tick `t`
+for which `(t + 1) % decimation == 0`. A 2 Hz sensor on the 20 Hz loop is therefore fresh in
+the observations at ticks 0, 10, 20, … and `obs.stale_ticks[name]` counts up between. All
+drones sample the same post-move world, so no drone is measured against a staler picture than
+another. A terminal drone stops sampling and its last reading is held; the log's `sample_tick`
+column says which rows are held.
+
+## Sensors we expect to add
+
+None of these exist. Each is a config and a `sample()` away, and each needs a number nobody
+has measured. Listed so the shape of the work is visible and so the fidelity questions are
+asked before the code is written.
+
+| Sensor | Reading | Perceives | Needs before it is a model rather than a template |
+|---|---|---|---|
+| **Nav-tag camera** | already the marker detector: `Landmark(kind="nav_tag")` + `MarkerCamConfig(kinds=...)` | `nav_tag` landmarks | The same A-4/A-5 measurements; a pose-fit error model if the detection is to feed a `PoseSource` |
+| **Vision cues** | a `(cue_id, kind, bearing, apparent size)` tuple from a nose-down camera | `vision_cue` / `start_mark` landmarks | The 45° pitch (F-6) actually modelled, so a floor mark enters view at a range set by altitude |
+| **Optical flow** | body-frame velocity plus a quality flag; reads `truth.vx, truth.vy, truth.z` | nothing placed — the floor | Flow-quality vs altitude and texture; this is what PX4 already fuses for the real height, so it belongs with a `PoseSource`, not just a sensor |
+| **UWB ranging** | range-only to each anchor, `inf` out of range | `uwb_anchor` landmarks | Ranging noise, NLOS bias behind walls, anchor placement the venue would allow. `examples/03_custom_sensor.py` is the template |
+| **Altimeter / downward ranger** | `z` with noise | the floor | Whether it sees a marker top as the floor; the real airframe gets height from PX4, not from a sensor the ESP reads |
+
+A sensor whose reading feeds *localisation* rather than *search* — flow, UWB, nav tags used
+for re-localisation — is only half a feature until there is a `PoseSource` that consumes it.
+That seam is [ADR-0003](adr/0003-ground-truth-pose-and-perfect-comms.md), and it is the
+highest-value single class in the project.
+
+## In the log
+
+Every sensor is listed in the header's `sensors` block with its config type, its rate and
+whether it was recorded. A recorded sensor gets `<name>.npz` with `ticks`, a per-agent
+`sample_tick`, one array per `record()` key stacked to `(ticks, agents, ...)`, and any
+constants from `record_static()`. The ring is always recorded; the camera is not, because a
+tuple of detections has no fixed shape. See [07-logging-and-viz.md](07-logging-and-viz.md).

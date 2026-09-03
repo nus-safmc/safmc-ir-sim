@@ -30,7 +30,9 @@ missions or logs. The split follows that line exactly.
                         │    world · STRtree collision · YAML     │
                         │    render · fixed-step integration      │
                         │    ├─ kinematics.py  @register_kinematics
-                        │    └─ sensors/       ToFRing, MarkerCam │
+                        │    └─ sensors/  base.py contract        │
+                        │         ├─ ToFRing, MarkerCam   (flown) │
+                        │         └─ yours          (one file)    │
                         └─────────────────────────────────────────┘
 ```
 
@@ -42,9 +44,12 @@ Everything crossing a horizontal line is a typed, frozen dataclass. Nothing belo
 |---|---|---|
 | `frames.py` | ARENA frame, angle wrapping, the NED bijection | R-FRAME-1..5 |
 | `kinematics.py` | The 2.5D quad model, registered with ir-sim | R-DRONE-1..8 |
+| `sensors/base.py` | The sensor contract: `SensorConfig`, `Sensor`, `TrueState` | R-SENS-12..16 |
+| `sensors/scene.py` | The world as a sensor sees it: ray-castable geometry plus landmarks | R-SENS-15 |
 | `sensors/raycast.py` | Vectorised closed-form ray casting with height gating | R-SENS-6, R-SENS-7 |
-| `sensors/tof_ring.py` | The 8-ranger ring; zones, statuses, 64-bin collapsed scan | R-SENS-1..5 |
-| `sensors/marker_cam.py` | Marker detection with FOV + LOS + range | R-SENS-10 |
+| `sensors/tof_ring.py` | The 8-ranger ring, on the contract | R-SENS-1..5 |
+| `sensors/marker_cam.py` | Landmark detection by kind with FOV + LOS + range, on the contract | R-SENS-10 |
+| `world/landmark.py` | `Landmark`: what a sensor may perceive that is not structure | R-WORLD-7, R-WORLD-8 |
 | `world/arena.py` | Seeded arena generation and validation; emits ir-sim YAML | R-WORLD-1..6 |
 | `api.py` | `Observation`, `Command`, `Policy`, the policy registry | R-POL-1..7 |
 | `blackboard.py` | Double-buffered perfect shared store | R-POL-8, R-SEAM-2 |
@@ -61,16 +66,18 @@ One tick is exactly this, and the order is load-bearing:
 1. **Snapshot the blackboard.** Every agent this tick reads the same immutable view. Writes go to
    the back buffer and become visible next tick. Without this, agent 0's publication would be
    visible to agent 1 but not vice versa, and results would depend on index order (R-POL-8).
-2. **Build each agent's `Observation`** from its `PoseSource`, its sensors' last sample, and the
-   blackboard snapshot. Sensors that are decimated return their most recent sample, with `stale_ticks`
-   set so a policy can tell.
+2. **Build each agent's `Observation`** from its `PoseSource`, every sensor's last reading under
+   `sensors[name]`, and the blackboard snapshot. A decimated sensor's reading is held, with
+   `stale_ticks[name]` set so a policy can tell.
 3. **Call each policy's `step(obs)`.** Exceptions propagate — a crashed policy aborts the run with
    agent id, tick and traceback. It is never swallowed into a hover (R-POL-9).
 4. **Resolve commands to ir-sim actions** through the lifecycle state machine. A `LANDED` agent
    ignores its command permanently. Take-off is checked against the two-wave rule.
-5. **`env.step(actions)`** — ir-sim integrates every object, rebuilds the STRtree, steps sensors.
-6. **Update the mission**: landings, scoring, LOS, rule violations.
-7. **Record.** Then swap the blackboard buffers.
+5. **`env.step(actions)`** — ir-sim integrates every object and rebuilds the STRtree.
+6. **Sense.** Every due sensor on every active drone samples the post-motion world through one
+   contract; the runner does not know what any sensor is.
+7. **Update the mission**: landings, scoring, LOS, rule violations.
+8. **Record.** Then swap the blackboard buffers.
 
 ## Where the seams are, and why they are drawn there
 
@@ -84,9 +91,14 @@ the seam is the *only* path.
 **`Blackboard`** is the single channel between agents. A policy holds no reference to another
 policy or another agent's object. Adding loss and range limits means writing one class.
 
+**`Sensor`** is the only other path from truth to a policy. A sensor is handed the exact state
+and a `WorldScene` — geometry plus landmarks — and returns a frozen reading; a policy gets the
+reading and never the inputs (R-SENS-15). Adding a sensor, or something in the world for it to
+find, means writing one file — [ADR-0005](adr/0005-sensor-and-landmark-primitives.md).
+
 These are enforced structurally, not by convention: `Observation` is frozen and contains only
 plain data, and R-POL-4 requires that an auditor can enumerate everything reachable from an
-`Observation` and find no environment, arena, mission or peer object.
+`Observation` and find no environment, arena, mission, landmark or peer object.
 
 ## Determinism
 
