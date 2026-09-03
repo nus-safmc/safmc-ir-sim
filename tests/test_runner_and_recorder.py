@@ -302,8 +302,11 @@ def test_recording_does_not_change_the_simulation(tmp_path):
 
 def test_log_contains_everything_the_spec_requires(tmp_path):
     """R-OBS-2."""
+    # 40 s, not 20: the test asserts a "departed" event, and departure needs a climb plus a
+    # traverse out of the Start Area. At 20 s seed 1 was marginal -- it fired for every other
+    # seed but not this one, so the test was passing on luck rather than on the log's contents.
     result = run(
-        RunConfig(seed=1, policy="sdlw", n_drones=10, duration_s=20.0),
+        RunConfig(seed=1, policy="sdlw", n_drones=10, duration_s=40.0),
         recorder=Recorder(tmp_path / "r"),
     )
     log = load_run(tmp_path / "r")

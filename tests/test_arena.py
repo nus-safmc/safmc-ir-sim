@@ -52,7 +52,7 @@ def test_perimeter_wall_is_on_three_sides_and_the_south_edge_is_net(arenas):
 def test_wall_and_pillar_heights_are_the_published_values(arenas):
     for a in arenas:
         for w in a.walls:
-            if w.kind in ("inner_wall", "unknown_wall"):
+            if w.kind in ("inner_wall", "unknown_wall", "maze_wall"):
                 assert w.height_m == K.INNER_WALL_HEIGHT_M
         for p in a.pillars:
             assert p.height_m == K.PILLAR_HEIGHT_M
@@ -138,7 +138,7 @@ def test_validation_rejects_a_walled_off_target():
     """Seal the Unknown Search Area completely and its targets must become unreachable."""
     a = generate_arena(0)
     x0, y0, x1, y1 = a.unknown_area
-    sealed = tuple(w for w in a.walls if w.kind != "unknown_wall") + (
+    sealed = tuple(w for w in a.walls if w.kind not in ("unknown_wall", "maze_wall")) + (
         Wall(x0, y0, x1, y0, 0.1, K.INNER_WALL_HEIGHT_M, "unknown_wall"),
         Wall(x1, y0, x1, y1, 0.1, K.INNER_WALL_HEIGHT_M, "unknown_wall"),
         Wall(x1, y1, x0, y1, 0.1, K.INNER_WALL_HEIGHT_M, "unknown_wall"),
@@ -361,7 +361,7 @@ def test_maze_walls_are_merged_into_long_runs(arenas):
     no change in geometry.
     """
     for a in arenas:
-        unknown = [w for w in a.walls if w.kind == "unknown_wall"]
+        unknown = [w for w in a.walls if w.kind == "maze_wall"]
         assert len(unknown) <= 24, f"seed {a.seed}: {len(unknown)} unknown walls, unmerged?"
 
 
@@ -384,8 +384,8 @@ def test_anchor_gap_knob_spans_both_readings_of_the_two_metre_rule():
     """maze_anchor_gap_m=min_gap_wall_m degenerates to free-floating islands."""
     anchored = generate_arena(3)
     islands = generate_arena(3, ArenaConfig(maze_anchor_gap_m=K.MIN_GAP_WALL_TO_WALL_M))
-    room_anchored = [w for w in anchored.walls if w.kind == "unknown_wall"]
-    room_islands = [w for w in islands.walls if w.kind == "unknown_wall"]
+    room_anchored = [w for w in anchored.walls if w.kind == "maze_wall"]
+    room_islands = [w for w in islands.walls if w.kind == "maze_wall"]
     # Retracting both ends of every run can only shorten or delete walls.
     assert sum(w.length_m for w in room_islands) < sum(w.length_m for w in room_anchored)
 

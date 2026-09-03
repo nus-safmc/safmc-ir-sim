@@ -234,11 +234,18 @@ def generate_maze(
     :mod:`safmc_sim.world.arena` passes its own ``Wall``. Injecting it keeps this module free of
     a circular import back into ``arena``.
 
-    The returned walls are tagged ``kind="unknown_wall"`` deliberately. ``_validate_gaps``
-    applies the 2 m rule all-pairs to every ``inner_wall``, and a maze T-junction has a mutual
-    distance of exactly zero, so tagging them ``inner_wall`` would raise on the first seed.
-    ``unknown_wall`` places them in the structural group -- true to the rulebook, since 3.3.9 r.2
-    guarantees walls in this room -- and keeps them inside the published height assertion.
+    The returned walls are tagged ``kind="maze_wall"``. They must not be ``inner_wall``:
+    ``_validate_gaps`` applies the 2 m rule all-pairs to that kind, and a maze T-junction has a
+    mutual distance of exactly zero, so it would raise on the first seed. ``maze_wall`` joins
+    the *structural* group alongside the room shell, which is the honest reading -- 3.3.9 r.2
+    guarantees walls in this room, and a maze is one connected structure whose parts meet by
+    design.
+
+    An earlier cut reused ``unknown_wall``, the room shell's kind, to inherit its checks. That
+    made the shell and its interior indistinguishable, which matters once arenas are durable
+    artefacts you save, view and analyse -- telling them apart needed a geometric predicate
+    rather than a field read. It also silently widened the room-versus-perimeter gap check to
+    interior walls that are trivially clear of the perimeter. Two kinds, both structural.
     """
     if wall_factory is None:  # pragma: no cover - arena always supplies one
         raise ValueError("generate_maze requires a wall_factory")

@@ -260,14 +260,20 @@ def test_solid_landmarks_block_the_grid_and_a_fence_walls_a_target_off():
             # North of the Start Area by the whole fence: every free Start Area cell is
             # reachable by definition, so a fence overlapping it would not enclose anything.
             and arena.start_area_depth_m + clear_m < t.y < arena.depth_m - clear_m
+            # In the Known Search Area: a fence is a team-placed thing, and 3.3.1 r.17 bars
+            # teams from the Unknown Search Area, so a target in the room cannot be fenced.
+            and arena.in_known_area(t.x, t.y)
         )
 
-    for seed in range(12):
+    # Scanned rather than fixed, because which seed offers a target with 2 m of clear space
+    # is an accident of the generator. The range is wide enough to survive a reseeding: the
+    # maze and the three-stream split both reshuffled every arena, and a range of 12 did not.
+    for seed in range(64):
         arena = generate_arena(seed)
         target = next((t for t in arena.targets if far_from_everything(arena, t)), None)
         if target is not None:
             break
-    assert target is not None, "no seed in 0..11 has a target with 2 m of clear space"
+    assert target is not None, "no seed in 0..63 has a target with 2 m of clear space"
     angles = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
     fence = tuple(
         Landmark(f"fence_{i}", "prop", target.x + ring_m * np.cos(a), target.y + ring_m * np.sin(a),

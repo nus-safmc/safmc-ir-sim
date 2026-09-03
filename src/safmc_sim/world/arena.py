@@ -329,6 +329,13 @@ class ArenaSpec:
     landmarks: tuple[Landmark, ...] = ()
     """Non-mission landmarks. Targets are landmarks too, but they live in ``targets`` because
     the mission owns them; ``all_landmarks`` is the union a sensor sees."""
+
+    layout_seed: int | None = None
+    unknown_seed: int | None = None
+    mission_seed: int | None = None
+    """The per-stream seeds this arena was built with, or ``None`` where the stream was derived
+    from :attr:`seed`. Recorded so an arena built with overrides can be *regenerated*, not
+    merely replayed: ``seed`` alone would not reproduce it. See :func:`generate_arena`."""
     config: ArenaConfig = field(default_factory=ArenaConfig)
 
     # -- landmarks ------------------------------------------------------------------------
@@ -611,16 +618,61 @@ def _room_walls(
 
 
 def generate_arena(
-    seed: int, config: ArenaConfig | None = None, validate: bool = True
+    seed: int,
+    config: ArenaConfig | None = None,
+    validate: bool = True,
+    *,
+    layout_seed: int | None = None,
+    unknown_seed: int | None = None,
+    mission_seed: int | None = None,
 ) -> ArenaSpec:
-    """Build one arena from a seed. Deterministic: same seed, same arena.
+    """Build one arena from a seed. Deterministic: same seeds, same arena.
 
     Raises :class:`ArenaError` if a layout satisfying every published constraint could not be
     found, rather than returning a degraded arena. An arena that violates its own constraints
     would invalidate every run performed on it, so there is nothing useful to fall back to.
+
+    Three independent streams, not one
+    ----------------------------------
+    ``seed`` alone reproduces a whole arena, as before. But an arena is three separable things,
+    and holding one fixed while resampling another is how you attribute a result to the thing
+    you actually varied:
+
+    ``layout_seed``
+        The Known Search Area, and the room's *position*. The room is a 2 m walled box in plain
+        sight -- the team walks around it during setup -- so where it sits is public geometry
+        that shapes the known area's corridor ring. Only its interior is unknown.
+    ``unknown_seed``
+        The maze inside the room and the pillars in it. Everything 3.2 calls "intentionally
+        NOT shown".
+    ``mission_seed``
+        Victim, bonus-victim and fire placement. Undisclosed independently of either layout
+        (3.3.3 r.1, 3.3.5 r.1).
+
+    Each defaults to a child of ``seed`` via ``SeedSequence.spawn`` (R-DET-3), so omitting all
+    three is exactly the old single-stream behaviour with a different, equally arbitrary
+    mapping from seed to arena. Passing one pins that stream and leaves the others free::
+
+        # ten known areas, one fixed unknown interior
+        [generate_arena(0, layout_seed=k, unknown_seed=7) for k in range(10)]
+        # one known area, twenty different mazes
+        [generate_arena(0, layout_seed=3, unknown_seed=j) for j in range(20)]
+
+    A fixed set of maps is a *development* set. Policies overfit to it, which is the failure
+    the rulebook's withholding exists to punish, so quote final numbers from seeds you have
+    never inspected.
     """
     cfg = config or ArenaConfig()
-    rng = np.random.default_rng(seed)
+    base = np.random.SeedSequence(seed).spawn(3)
+    rng_layout = np.random.default_rng(
+        base[0] if layout_seed is None else np.random.SeedSequence(layout_seed)
+    )
+    rng_unknown = np.random.default_rng(
+        base[1] if unknown_seed is None else np.random.SeedSequence(unknown_seed)
+    )
+    rng_mission = np.random.default_rng(
+        base[2] if mission_seed is None else np.random.SeedSequence(mission_seed)
+    )
 
     width, depth = FIELD_WIDTH_M, FIELD_DEPTH_M
     thickness = cfg.wall_thickness_m
@@ -658,8 +710,8 @@ def generate_arena(
             f"{width} x {depth} m field with a {START_AREA_DEPTH_M} m Start Area"
         )
     for attempt in range(cfg.max_placement_attempts):
-        room_y0 = float(rng.uniform(y_lo, max(y_hi, y_lo)))
-        room_x0 = float(rng.uniform(x_lo, max(x_hi, x_lo)))
+        room_y0 = float(rng_layout.uniform(y_lo, max(y_hi, y_lo)))
+        room_x0 = float(rng_layout.uniform(x_lo, max(x_hi, x_lo)))
         # The maze lattice depends on where the room landed, so it is planned per attempt and
         # handed to _room_walls, which snaps each doorway to a whole cell.
         grid = (
@@ -668,7 +720,7 @@ def generate_arena(
             else None
         )
         room = _room_walls(
-            room_x0, room_y0, UNKNOWN_AREA_SIZE_M, thickness, rng,
+            room_x0, room_y0, UNKNOWN_AREA_SIZE_M, thickness, rng_layout,
             UNKNOWN_AREA_DOORWAYS, UNKNOWN_AREA_DOORWAY_M, grid,
         )
         polys = [w.polygon() for w in room]
@@ -690,9 +742,9 @@ def generate_arena(
 
     if grid is not None:
         maze = generate_maze(
-            rng, grid,
+            rng_unknown, grid,
             height_m=INNER_WALL_HEIGHT_M,
-            kind="unknown_wall",
+            kind="maze_wall",
             n_loops=cfg.n_maze_loops,
             anchor_gap_m=cfg.maze_anchor_gap_m,
             wall_factory=Wall,
@@ -703,7 +755,7 @@ def generate_arena(
         # placed afterwards, which is what keeps pillars and targets out of the wall faces.
         structure.extend(w.polygon() for w in maze)
 
-    def _sample_wall(bounds, length_range) -> Wall | None:
+    def _sample_wall(bounds, length_range, rng) -> Wall | None:
         bx0, by0, bx1, by1 = bounds
         length = float(rng.uniform(*length_range))
         angle = float(rng.choice([0.0, math.pi / 2.0])) if rng.random() < 0.75 else float(
@@ -718,12 +770,12 @@ def generate_arena(
             thickness, INNER_WALL_HEIGHT_M, "inner_wall",
         )
 
-    def _place_walls(n: int, bounds, forbid_room: bool) -> None:
+    def _place_walls(n: int, bounds, forbid_room: bool, rng) -> None:
         placed = 0
         for _ in range(cfg.max_placement_attempts):
             if placed >= n:
                 return
-            wall = _sample_wall(bounds, cfg.inner_wall_length_range_m)
+            wall = _sample_wall(bounds, cfg.inner_wall_length_range_m, rng)
             poly = wall.polygon()
             bx0, by0, bx1, by1 = poly.bounds
             if bx0 < 0 or by0 < 0 or bx1 > width or by1 > depth:
@@ -743,17 +795,18 @@ def generate_arena(
             )
 
     known_bounds = (1.0, START_AREA_DEPTH_M + 1.0, width - 1.0, depth - 1.0)
-    _place_walls(cfg.n_inner_walls, known_bounds, forbid_room=True)
+    _place_walls(cfg.n_inner_walls, known_bounds, forbid_room=True, rng=rng_layout)
     inset = thickness + 0.5
     _place_walls(
         cfg.n_unknown_walls,
         (unknown_area[0] + inset, unknown_area[1] + inset, unknown_area[2] - inset, unknown_area[3] - inset),
         forbid_room=False,
+        rng=rng_unknown,
     )
 
     pillars: list[Pillar] = []
 
-    def _place_pillars(n: int, bounds, forbid_room: bool = False) -> None:
+    def _place_pillars(n: int, bounds, rng, forbid_room: bool = False) -> None:
         bx0, by0, bx1, by1 = bounds
         placed = 0
         for _ in range(cfg.max_placement_attempts):
@@ -780,23 +833,27 @@ def generate_arena(
     # do. The result was that 94% of seeds leaked known-area pillars into the Unknown Search
     # Area, 2.27 of them on average, so the room held ~4.3 pillars against a configured 2 and
     # the two areas' obstacle densities were both wrong.
-    _place_pillars(cfg.n_pillars_known, known_bounds, forbid_room=True)
+    _place_pillars(cfg.n_pillars_known, known_bounds, rng_layout, forbid_room=True)
     if grid is not None:
         # In a 2.40 m corridor a pillar's centre must sit within a 0.75 m band on the
         # centreline to clear both walls by the published 1 m, so uniform rejection sampling
         # over the room wastes most of its attempts. Cell centres are the exact points that
         # maximise clearance, so they are drawn without replacement instead.
-        _place_pillars_at_cells(cfg.n_pillars_unknown, grid, rng, pillars, structure, cfg)
+        _place_pillars_at_cells(cfg.n_pillars_unknown, grid, rng_unknown, pillars, structure, cfg)
     else:
         _place_pillars(
             cfg.n_pillars_unknown,
             (unknown_area[0] + inset, unknown_area[1] + inset, unknown_area[2] - inset, unknown_area[3] - inset),
+            rng_unknown,
         )
 
-    targets = _place_targets(rng, cfg, structure + marks, unknown_area, width, depth)
+    targets = _place_targets(rng_mission, cfg, structure + marks, unknown_area, width, depth)
 
     spec = ArenaSpec(
         seed=seed,
+        layout_seed=layout_seed,
+        unknown_seed=unknown_seed,
+        mission_seed=mission_seed,
         width_m=width,
         depth_m=depth,
         ceiling_m=CEILING_M,
@@ -1109,7 +1166,7 @@ def _validate_gaps(spec: ArenaSpec) -> None:
     independent = [(p, "inner_wall") for p in groups.get("inner_wall", [])]
     structural = [
         (p, kind)
-        for kind in ("perimeter_wall", "unknown_wall", "net")
+        for kind in ("perimeter_wall", "unknown_wall", "maze_wall", "net")
         for p in groups.get(kind, [])
     ]
     for i, (poly, _) in enumerate(independent):
@@ -1125,6 +1182,9 @@ def _validate_gaps(spec: ArenaSpec) -> None:
     # structures, so the gap rule applies between them -- and it was previously unchecked,
     # which is how a systematic 1.95 m north gap survived in every seed. The room's south face
     # is exempt: it looks at the Start Area boundary, which is a virtual line, not a wall.
+    # The room's shell only. Maze walls are a separate kind precisely so this check stays
+    # about the two independently placed structures it was written for; an interior maze wall
+    # is trivially clear of the perimeter and testing it here proved nothing.
     room = groups.get("unknown_wall", [])
     perimeter = groups.get("perimeter_wall", [])
     for room_poly in room:

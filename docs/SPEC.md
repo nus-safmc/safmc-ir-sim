@@ -147,6 +147,27 @@ construction.
 
 ## 6. Drone model
 
+**R-WORLD-9** Arena generation MUST expose three independent RNG streams — `layout_seed` (the
+Known Search Area and the room's position), `unknown_seed` (the maze and the pillars inside the
+room) and `mission_seed` (victim, bonus-victim and fire placement) — each defaulting to a child
+of the arena seed via `SeedSequence.spawn` (R-DET-3). Pinning one stream MUST leave the others
+free, so that a result can be attributed to the factor that was varied. The maze pattern MUST be
+invariant, in room-relative coordinates, to `layout_seed`: moving the room translates the maze
+rather than resampling it. The seeds actually used MUST be recorded on the `ArenaSpec`, so an
+arena built with overrides is regenerable and not merely replayable.
+
+> A fixed set of maps is a *development* set. Policies overfit to it, which is the failure the
+> rulebook's withholding exists to punish, so final numbers MUST be quoted from seeds that were
+> never inspected.
+
+**R-WORLD-10** An arena MUST be serialisable to, and restorable from, a standalone file
+independent of any run log. The file MUST carry the geometry, the per-stream seeds and the full
+`ArenaConfig` — a standalone map has no run header to fall back on, so a dropped config would let
+revalidation re-check a map against gaps it was never generated under. Config fields MUST be
+serialised from `dataclasses.fields`, so a knob added later cannot silently vanish. Loading MUST
+validate by default, and MUST refuse a file whose schema differs or whose config carries fields
+this build does not know, rather than dropping them silently.
+
 **R-DRONE-1** Drone state MUST be `[x, y, theta, z, vx, vy]` where `vx, vy` are ARENA-frame
 velocities carried as state so that a first-order velocity lag can be modelled.
 
