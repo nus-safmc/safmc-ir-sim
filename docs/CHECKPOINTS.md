@@ -352,8 +352,9 @@ perceive — start marks, surveyed AprilTags, vision cues. [ADR-0005](adr/0005-s
   `landmark_scene()`; solid placed landmarks are structure to the generator; validation.
 - `examples/03_custom_sensor.py` — a range-only beacon sensor, four anchors, a policy that
   reads it by name. A template, not a model (F-22).
-- Spec: R-SENS-12..16, R-WORLD-7..8; R-POL-3 and R-OBS-2 amended. Docs 04–08, ARCHITECTURE,
-  FIDELITY (F-21, F-22), README.
+- Spec: R-SENS-12..16, R-WORLD-7..8; R-POL-3 and R-OBS-2 amended. A new guide,
+  `docs/10-adding-sensors-and-landmarks.md`, in the reading order beside "Writing a policy";
+  `docs/06` keeps the flown models. Docs 04–08, ARCHITECTURE, FIDELITY (F-21, F-22), README.
 
 **Verified — TESTED.** 239 tests. `tests/test_sensor_primitive.py` builds a sensor the way the
 docs say to and checks: names and rates refused at construction; a custom reading reaches the

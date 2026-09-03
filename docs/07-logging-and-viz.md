@@ -35,7 +35,7 @@ score_from_log("runs/sdlw_s3")     # recomputed from the log alone
 ```
 
 A sensor you add appears the same way, as `run["sensors"][name]`, if its `record()` returns
-fixed-shape arrays — see [06-sensors.md](06-sensors.md#adding-a-sensor). `sample_tick` is
+fixed-shape arrays — see [Adding a sensor](10-adding-sensors-and-landmarks.md#adding-a-sensor). `sample_tick` is
 there so a held reading (a 2 Hz sensor between samples, a crashed drone) is never mistaken
 for a fresh one.
 

@@ -65,6 +65,35 @@ and shipping them would mean every policy silently inherited the same ones.
 
 Full guide: **[docs/05-policy-api.md](docs/05-policy-api.md)**.
 
+## Adding a sensor, or something for it to sense
+
+Every sensor is one contract: a frozen config, a `sample(truth, world, tick)` that returns a
+frozen reading, and the runner drives it. A **landmark** is anything you place in the arena
+for a sensor to find. Adding either is one file and one line of `RunConfig`:
+
+```python
+@dataclass(frozen=True)
+class BeaconConfig(SensorConfig):
+    name: str = "beacons"                      # obs.sensors["beacons"]
+    rate_hz: float | None = 10.0               # must divide the 20 Hz tick
+    def build(self, rng): return BeaconRanger(self, rng)
+
+class BeaconRanger(Sensor):
+    def sample(self, truth, world, tick):      # truth: exact pose. world: geometry + landmarks
+        anchors = world.landmarks_of("uwb_anchor")
+        ranges = range_to(anchors, truth.xy)   # your geometry, your noise (from self.rng)
+        return BeaconRanges(ranges_m=read_only(ranges))
+
+RunConfig(sensors=flown_sensors() + (BeaconConfig(),),
+          arena_config=ArenaConfig(landmarks=(Landmark("anchor_0", "uwb_anchor", 0.5, 0.5),)))
+```
+
+The policy reads `obs.sensors["beacons"]`; the log gains `beacons.npz`; nothing in the runner,
+the API or the recorder knows the sensor exists. A surveyed AprilTag is a `Landmark` of kind
+`"nav_tag"` plus one entry in the camera's `kinds`. Full guide:
+**[docs/10-adding-sensors-and-landmarks.md](docs/10-adding-sensors-and-landmarks.md)**;
+runnable template: [examples/03_custom_sensor.py](examples/03_custom_sensor.py).
+
 ## What is modelled
 
 | | |
@@ -97,7 +126,8 @@ published data, is in **[docs/FIDELITY.md](docs/FIDELITY.md)**. Read it before q
 | [**ARCHITECTURE.md**](ARCHITECTURE.md) | **The map — what the pieces are and what happens when you press run** |
 | [**REVIEW.md**](REVIEW.md) | How to review this work, and what to be skeptical of |
 | [docs/05-policy-api.md](docs/05-policy-api.md) | Writing a strategy |
-| [docs/06-sensors.md](docs/06-sensors.md) | Exactly what the sensors report |
+| [docs/10-adding-sensors-and-landmarks.md](docs/10-adding-sensors-and-landmarks.md) | Adding a sensor, or something for it to sense |
+| [docs/06-sensors.md](docs/06-sensors.md) | Exactly what the flown sensors report |
 | [docs/01-competition.md](docs/01-competition.md) | The rules this is built against |
 | [docs/FIDELITY.md](docs/FIDELITY.md) | Every divergence and assumption |
 | [docs/07-logging-and-viz.md](docs/07-logging-and-viz.md) | Logs, metrics, replay |

@@ -17,10 +17,11 @@ decide whether a strategy works.
 | 3 | [ir-sim](03-irsim.md) | What the library gives us, what it does not, and its landmines |
 | 4 | [Architecture](04-architecture.md) | How the pieces fit; which layer owns what |
 | 5 | [**Writing a policy**](05-policy-api.md) | **Start here if you are a dev writing search strategy** |
-| 6 | [Sensor models](06-sensors.md) | Exactly what the ToF ring and marker detector produce, and how to add a sensor or a landmark |
+| 6 | [Sensor models](06-sensors.md) | Exactly what the ToF ring and marker detector produce |
 | 7 | [Logging and visualisation](07-logging-and-viz.md) | The log schema and the replay viewer |
 | 8 | [Porting to ROS 2](08-porting-to-ros.md) | The seam that keeps this from being a dead end |
 | 9 | [Related work](09-related-work.md) | The two papers/codebases this must be able to host |
+| 10 | [**Adding a sensor or a landmark**](10-adding-sensors-and-landmarks.md) | **Start here if you are adding a sensor, or placing something for one to find** |
 
 ## Normative and process documents
 

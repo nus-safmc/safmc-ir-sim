@@ -15,6 +15,7 @@ flowchart TB
     subgraph YOURS["YOURS — you write this"]
         POL["your policy<br/><i>policies/</i>"]
         TB["toolbox<br/><i>optional helpers</i>"]
+        SEN["your sensor + landmarks<br/><i>one file</i>"]
     end
 
     subgraph CONTRACT["THE CONTRACT — the only thing you import"]
@@ -34,7 +35,6 @@ flowchart TB
         BASE["sensors/base.py<br/><i>the sensor contract</i>"]
         RING["sensors/tof_ring.py"]
         CAM["sensors/marker_cam.py"]
-        YOURS["your sensor<br/><i>one file</i>"]
         RAY["sensors/raycast.py"]
     end
 
@@ -45,7 +45,9 @@ flowchart TB
     RUN -->|"calls step(obs)"| POL
     RUN --> MIS & REC & BB & PS
     RUN -->|"sample(truth, world)"| BASE
-    BASE --- RING & CAM & YOURS
+    BASE --- RING & CAM
+    SEN -->|"implements"| BASE
+    SEN -.->|"places"| ARENA
     RUN -->|"env.step(velocity)"| IRSIM
     RING & CAM --> RAY
     ARENA --> RAY
@@ -57,13 +59,15 @@ flowchart TB
     style WORLD fill:#faf0e0,stroke:#b08a3c
 ```
 
-**Read it as four bands.** You write the green. You import the blue. The grey runs your code and
-you never call into it. The orange is geometry — you meet it only through what your sensors
-report. `ir-sim` is the library underneath that moves things and decides what bumped into what.
+**Read it as four bands.** You write the green — a policy, and if you need one, a sensor with
+the landmarks it perceives. You import the blue. The grey runs your code and you never call
+into it. The orange is geometry — you meet it only through what your sensors report. `ir-sim`
+is the library underneath that moves things and decides what bumped into what.
 
 The orange band has one seam of its own: every sensor, flown or yours, is driven through the
 contract in `sensors/base.py`, and the runner never learns what any of them are. Adding a
-sensor, or a landmark for it to find, is one file — [docs/06-sensors.md](docs/06-sensors.md#adding-a-sensor).
+sensor, or a landmark for it to find, is one file —
+[docs/10-adding-sensors-and-landmarks.md](docs/10-adding-sensors-and-landmarks.md).
 
 The single rule that keeps this honest: **arrows never go up from grey into green.** No plumbing
 imports your policy or the toolbox, so nothing the framework does can silently depend on a
@@ -273,7 +277,7 @@ and checking they agree is the point — if they ever diverge, one of them is wr
 |---|---|
 | **Write a strategy** | [docs/05-policy-api.md](docs/05-policy-api.md) |
 | Know what the sensors report | [docs/06-sensors.md](docs/06-sensors.md) |
-| Add a sensor, or something for it to sense | [docs/06-sensors.md#adding-a-sensor](docs/06-sensors.md#adding-a-sensor), [examples/03_custom_sensor.py](examples/03_custom_sensor.py) |
+| **Add a sensor, or something for it to sense** | [docs/10-adding-sensors-and-landmarks.md](docs/10-adding-sensors-and-landmarks.md), [examples/03_custom_sensor.py](examples/03_custom_sensor.py) |
 | Know what the competition asks for | [docs/01-competition.md](docs/01-competition.md) |
 | Know what is *not* simulated | [docs/FIDELITY.md](docs/FIDELITY.md) — **read before quoting a number** |
 | Understand the logs and metrics | [docs/07-logging-and-viz.md](docs/07-logging-and-viz.md) |
