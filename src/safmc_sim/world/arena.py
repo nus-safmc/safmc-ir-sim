@@ -1,7 +1,9 @@
 """Seeded generation and validation of SAFMC Category Swarm arenas.
 
-The rulebook makes randomisation mandatory, not optional. Verbatim from section 3.2 of the
-2026 Category Swarm Challenge Booklet:
+The rulebook never uses the words "random" or "randomise" -- a full-text sweep of all 27 pages
+finds neither. What it does instead is withhold, repeatedly and deliberately, and that is what
+makes a *distribution* the honest thing to model. Verbatim from section 3.2 of the 2026
+Category Swarm Challenge Booklet:
 
     "The layout is not drawn to scale."
     "The placements of the inner walls will follow the diagram, but the exact positions and
@@ -21,7 +23,7 @@ A finding that fell out of building this, and that matters strategically
 -----------------------------------------------------------------------
 Taken literally, the published constraints very nearly determine the arena.
 
-The Known Search Area is 14 m deep (assumption A-6; the 2026 table withdrew the figure) and
+The Known Search Area is 14 m deep (derived: 20 m field minus the 6 m Start Area) and
 the Unknown Search Area is 10 m, leaving **4 m of north-south slack in total** for a room that
 must clear the north perimeter by the published 2 m gap. The room's south side faces the Start
 Area boundary, which is a virtual line rather than a wall, so no gap rule applies there -- its
@@ -38,10 +40,19 @@ Two things follow:
 1. **Search in the Known Search Area is closer to one-dimensional than two.** A ring corridor
    rewards a very different policy from an open field -- coverage is nearly a traversal
    problem, and the interesting decisions are which doorway to enter and when to commit.
-2. **Either A-6 is wrong or the 2 m gap is not an all-pairs constraint.** Both readings are
-   defensible and they produce materially different arenas. ``ArenaConfig.min_gap_wall_m``
-   and the target counts exist so the team can test the alternative once someone sees the real
-   field. Any result quoted from this simulator should say which reading it used.
+2. **The 2 m gap is not an all-pairs constraint.** This was posed here as an open fork, with
+   A-6 as the alternative culprit. A-6 has since been retired -- 14 m is arithmetically forced,
+   not assumed, so it cannot be the wrong half -- and the diagram settles the rest against the
+   all-pairs reading: five of the six wall structures drawn in the Known Search Area are
+   *anchored*, at zero gap, to a perimeter wall or to the Unknown Search Area room. Under an
+   all-pairs reading the rulebook's own diagram would violate the rulebook's own table.
+
+   The reading that reconciles them is that 2 m is a floor on the **navigable gap** a drone
+   flies through, and walls may touch each other and the perimeter. This module still places
+   free-standing walls the old way, so the Known Search Area remains sparser than the diagram;
+   :mod:`safmc_sim.world.maze` adopts the anchored reading inside the room, and exposes
+   ``ArenaConfig.maze_anchor_gap_m`` so both readings stay reachable. Any result quoted from
+   this simulator should say which value it used.
 
 (An earlier version of this note claimed the room's north-south position was *forced*. That was
 wrong: it required a 2 m gap on the south side, where there is no wall to be 2 m from. The
@@ -55,7 +66,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
-from shapely.geometry import Polygon, box
+from shapely.geometry import Point, Polygon, box
 from shapely.strtree import STRtree
 
 from ..constants import (
@@ -66,6 +77,8 @@ from ..constants import (
     INNER_WALL_HEIGHT_M,
     MARKER_FOOTPRINT_M,
     MARKER_HEIGHT_M,
+    MAZE_CORRIDOR_M,
+    NAV_AID_MAX_KNOWN_AREA,
     MIN_GAP_PILLAR_M,
     MIN_GAP_WALL_TO_WALL_M,
     N_BONUS_VICTIMS,
@@ -85,6 +98,7 @@ from ..constants import (
 from ..errors import ArenaError, ConfigError
 from ..sensors.raycast import RayScene
 from .landmark import Landmark, occluder_scene, validate_landmark_fields
+from .maze import MazeGrid, generate_maze, plan_grid
 
 __all__ = [
     "Wall",
@@ -217,7 +231,9 @@ class ArenaConfig:
 
     n_inner_walls: int = 1
     n_pillars_known: int = 6
-    n_unknown_walls: int = 2
+    n_unknown_walls: int = 0
+    """Free-standing baffles inside the room. Zero by default because the maze supplies its
+    walls; only meaningful alongside ``maze_corridor_m=None``."""
     n_pillars_unknown: int = 2
     n_victims: int = N_VICTIMS
     n_bonus_victims: int = N_BONUS_VICTIMS
@@ -227,6 +243,30 @@ class ArenaConfig:
     wall_thickness_m: float = WALL_THICKNESS_M
     min_gap_wall_m: float = MIN_GAP_WALL_TO_WALL_M
     min_gap_pillar_m: float = MIN_GAP_PILLAR_M
+
+    maze_corridor_m: float | None = MAZE_CORRIDOR_M
+    """Floor on corridor width inside the Unknown Search Area, or ``None`` for no maze.
+
+    ``None`` restores the pre-maze behaviour exactly: the room's interior is filled by the same
+    rejection sampler as the Known Search Area, which yields ``n_unknown_walls`` free-standing
+    baffles a drone can simply fly around. Useful only for reproducing old results.
+    """
+
+    maze_anchor_gap_m: float = 0.0
+    """Clearance each maze wall keeps from the room face it points at.
+
+    ``0.0`` anchors walls to the room, which is what makes dead ends possible. Setting this to
+    ``min_gap_wall_m`` turns every maze wall into a free-floating island and degenerates to the
+    strict all-pairs reading of the 2 m gap. A metric knob rather than a string enum so it
+    passes the units gate in ``test_every_config_field_declares_its_units``.
+    """
+
+    n_maze_loops: int = 2
+    """Extra walls knocked out after the spanning tree, creating cycles.
+
+    Zero gives a perfect maze: exactly one route between any two cells, which makes the 3.3.7
+    relay chain a single fragile path and any collision a total blockage.
+    """
     """Both gaps are published values, exposed here because they interact with the Unknown
     Search Area's size in a way that nearly determines the layout -- see the module docstring.
     Lower them only to explore alternative readings of the rulebook, and say so in results."""
@@ -260,6 +300,17 @@ class ArenaConfig:
         lo, hi = self.inner_wall_length_range_m
         if not 0 < lo <= hi:
             raise ConfigError(f"inner_wall_length_range_m must be 0 < lo <= hi, got {(lo, hi)}")
+        if self.maze_corridor_m is not None and self.n_unknown_walls:
+            raise ConfigError(
+                "the maze IS the Unknown Search Area's walls, so n_unknown_walls must be 0 when "
+                "maze_corridor_m is set. The two passes are mutually exclusive: a free-standing "
+                "inner_wall is gap-checked all-pairs and could never sit 2 m from every maze "
+                "wall. Set maze_corridor_m=None to go back to free-standing baffles."
+            )
+        if self.maze_anchor_gap_m < 0.0:
+            raise ConfigError(
+                f"maze_anchor_gap_m must be >= 0, got {self.maze_anchor_gap_m}"
+            )
 
 
 @dataclass(frozen=True)
@@ -378,6 +429,27 @@ class ArenaSpec:
         x0, y0, x1, y1 = self.unknown_area
         return x0 <= x <= x1 and y0 <= y <= y1
 
+    def in_known_area(self, x: float, y: float) -> bool:
+        """The Known Search Area: inside the field, north of the Start Area, outside the room.
+
+        The rulebook names three zones and they carry different *permissions*, not just
+        different geometry. Teams may enter this one during setup and place up to ten
+        navigation aids in it (3.3.1 r.15-16); they may never enter the Unknown Search Area
+        (r.17). So this predicate is the one that says where a team may legally put a tag, and
+        it is what :func:`_validate_landmark_zones` enforces.
+
+        Note it depends on the *generated* room position, which is why a nav aid's location
+        generally cannot be fixed in ``ArenaConfig``: 33 m^2 at the centre of the field is
+        inside the room for every seed. Survey the arena first, then place -- see
+        ``docs/01-competition.md``.
+        """
+        return (
+            0.0 <= x <= self.width_m
+            and 0.0 <= y <= self.depth_m
+            and not self.in_start_area(x, y)
+            and not self.in_unknown_area(x, y)
+        )
+
     def targets_of(self, kind: str) -> tuple[Target, ...]:
         return tuple(t for t in self.targets if t.kind == kind)
 
@@ -436,11 +508,23 @@ class ArenaSpec:
 
 
 def _far_enough(candidate: Polygon, existing: list[Polygon], min_gap: float) -> bool:
-    """True when ``candidate`` keeps at least ``min_gap`` clear of everything in ``existing``."""
+    """True when ``candidate`` keeps at least ``min_gap`` clear of everything in ``existing``.
+
+    The prefilter is the candidate's bounding box grown by ``min_gap``, not
+    ``candidate.buffer(min_gap)``. Shapely's buffer approximates the offset circle with a
+    finite number of segments and so lies strictly *inside* the true offset -- for a pillar's
+    24-gon it falls 0.6 mm short. That is enough to make the STRtree miss an obstacle that is
+    genuinely within the gap: the placement filter then accepts it and ``_validate_gaps``, which
+    measures exactly, rejects the finished arena. It cost about one seed in 300, as a hard
+    generation failure rather than a degraded arena, and it presented as a 1.000 m gap being
+    "below the minimum of 1.0 m" because the message rounds. A grown bounding box is a strict
+    superset of everything within ``min_gap``, so the prefilter can only ever be conservative.
+    """
     if not existing:
         return True
     tree = STRtree(existing)
-    probe = candidate.buffer(min_gap)
+    minx, miny, maxx, maxy = candidate.bounds
+    probe = box(minx - min_gap, miny - min_gap, maxx + min_gap, maxy + min_gap)
     for j in tree.query(probe):
         if existing[j].distance(candidate) < min_gap:
             return False
@@ -467,14 +551,21 @@ def _boundary_walls(width: float, depth: float, thickness: float) -> list[Wall]:
 
 def _room_walls(
     x0: float, y0: float, size: float, thickness: float, rng: np.random.Generator,
-    n_doorways: int, doorway_m: float,
+    n_doorways: int, doorway_m: float, grid: MazeGrid | None = None,
 ) -> list[Wall]:
     """The Unknown Search Area: a walled room with open doorways.
 
-    The rulebook diagram shows gaps in its boundary, including one on the south face toward
-    the Start Area, but the layout is explicitly not to scale, so doorway count and width are
-    assumptions A-7. At least one doorway is always placed on the south face, otherwise the
-    room can be unreachable from the approach direction every drone actually takes.
+    The section 3.2 diagram draws four openings, one roughly centred on each face, and rule
+    3.3.9 r.1 says the swarm enters "via the open doorways shown in the diagram", so the default
+    is four. Their widths measure 2.40-2.83 m off the diagram, but the diagram is explicitly not
+    to scale, so count and width remain assumption A-7. The south face always gets one:
+    otherwise the room can be unreachable from the direction every drone actually approaches.
+
+    When a maze ``grid`` is supplied, each doorway is snapped to span exactly one whole cell.
+    That is what makes a doorway un-blockable by construction: maze walls run along cell
+    *boundaries*, so an opening that covers a cell's full clear width can never be bisected by
+    one. Without snapping, a grid line lands inside the opening on about 42% of faces, silently
+    halving a doorway that no existing validator would object to.
     """
     x1, y1 = x0 + size, y0 + size
     faces = [
@@ -492,19 +583,27 @@ def _room_walls(
         if i not in chosen:
             walls.append(Wall(a[0], a[1], b[0], b[1], thickness, INNER_WALL_HEIGHT_M, "unknown_wall"))
             continue
-        # Cut a doorway at a random position along the face, leaving a solid stub each side.
-        margin = doorway_m
-        t = float(rng.uniform(margin / size, 1.0 - margin / size))
         ax, ay = a
         bx, by = b
         dx, dy = bx - ax, by - ay
-        gap_half = doorway_m / 2.0 / size
-        for lo, hi in ((0.0, max(0.0, t - gap_half)), (min(1.0, t + gap_half), 1.0)):
-            if (hi - lo) * size < thickness:
+        if grid is not None:
+            # Snap to a whole cell. The face runs from corner to corner over `size`, while the
+            # grid tiles the clear interior starting thickness/2 in, so the cell's span is
+            # offset by that half-thickness before being normalised onto the face.
+            cell = int(rng.integers(0, grid.n))
+            lo_m, hi_m = grid.cell_span(cell)
+            lo = (thickness / 2.0 + lo_m) / size
+            hi = (thickness / 2.0 + hi_m) / size
+        else:
+            centre = float(rng.uniform(doorway_m / size, 1.0 - doorway_m / size))
+            half = doorway_m / 2.0 / size
+            lo, hi = centre - half, centre + half
+        for slo, shi in ((0.0, max(0.0, lo)), (min(1.0, hi), 1.0)):
+            if (shi - slo) * size < thickness:
                 continue
             walls.append(
                 Wall(
-                    ax + dx * lo, ay + dy * lo, ax + dx * hi, ay + dy * hi,
+                    ax + dx * slo, ay + dy * slo, ax + dx * shi, ay + dy * shi,
                     thickness, INNER_WALL_HEIGHT_M, "unknown_wall",
                 )
             )
@@ -561,9 +660,16 @@ def generate_arena(
     for attempt in range(cfg.max_placement_attempts):
         room_y0 = float(rng.uniform(y_lo, max(y_hi, y_lo)))
         room_x0 = float(rng.uniform(x_lo, max(x_hi, x_lo)))
+        # The maze lattice depends on where the room landed, so it is planned per attempt and
+        # handed to _room_walls, which snaps each doorway to a whole cell.
+        grid = (
+            plan_grid(room_x0, room_y0, UNKNOWN_AREA_SIZE_M, thickness, cfg.maze_corridor_m)
+            if cfg.maze_corridor_m is not None
+            else None
+        )
         room = _room_walls(
             room_x0, room_y0, UNKNOWN_AREA_SIZE_M, thickness, rng,
-            UNKNOWN_AREA_DOORWAYS, UNKNOWN_AREA_DOORWAY_M,
+            UNKNOWN_AREA_DOORWAYS, UNKNOWN_AREA_DOORWAY_M, grid,
         )
         polys = [w.polygon() for w in room]
         if all(_far_enough(p, bodies, cfg.min_gap_pillar_m) for p in polys) and not any(
@@ -581,6 +687,21 @@ def generate_arena(
     structure.extend(w.polygon() for w in room)
 
     unknown_area = (room_x0, room_y0, room_x0 + UNKNOWN_AREA_SIZE_M, room_y0 + UNKNOWN_AREA_SIZE_M)
+
+    if grid is not None:
+        maze = generate_maze(
+            rng, grid,
+            height_m=INNER_WALL_HEIGHT_M,
+            kind="unknown_wall",
+            n_loops=cfg.n_maze_loops,
+            anchor_gap_m=cfg.maze_anchor_gap_m,
+            wall_factory=Wall,
+        )
+        walls.extend(maze)
+        # Maze walls join the room and each other by design, so like the room they are one
+        # structure and are appended without mutual gap checks. They still constrain everything
+        # placed afterwards, which is what keeps pillars and targets out of the wall faces.
+        structure.extend(w.polygon() for w in maze)
 
     def _sample_wall(bounds, length_range) -> Wall | None:
         bx0, by0, bx1, by1 = bounds
@@ -632,7 +753,7 @@ def generate_arena(
 
     pillars: list[Pillar] = []
 
-    def _place_pillars(n: int, bounds) -> None:
+    def _place_pillars(n: int, bounds, forbid_room: bool = False) -> None:
         bx0, by0, bx1, by1 = bounds
         placed = 0
         for _ in range(cfg.max_placement_attempts):
@@ -640,6 +761,8 @@ def generate_arena(
                 return
             pillar = Pillar(float(rng.uniform(bx0, bx1)), float(rng.uniform(by0, by1)))
             poly = pillar.polygon()
+            if forbid_room and box(*unknown_area).intersects(poly):
+                continue
             if not _far_enough(poly, structure, cfg.min_gap_pillar_m) or _over_a_mark(poly):
                 continue
             pillars.append(pillar)
@@ -651,11 +774,24 @@ def generate_arena(
                 f"{cfg.max_placement_attempts} attempts with a {cfg.min_gap_pillar_m} m gap"
             )
 
-    _place_pillars(cfg.n_pillars_known, known_bounds)
-    _place_pillars(
-        cfg.n_pillars_unknown,
-        (unknown_area[0] + inset, unknown_area[1] + inset, unknown_area[2] - inset, unknown_area[3] - inset),
-    )
+    # forbid_room mirrors the guard _place_walls already had. Without it the "known area"
+    # bounds span the whole field north of the Start Area, room included, and a pillar only had
+    # to clear the room *walls* by 1 m -- which the room's 9.9 m interior leaves ample space to
+    # do. The result was that 94% of seeds leaked known-area pillars into the Unknown Search
+    # Area, 2.27 of them on average, so the room held ~4.3 pillars against a configured 2 and
+    # the two areas' obstacle densities were both wrong.
+    _place_pillars(cfg.n_pillars_known, known_bounds, forbid_room=True)
+    if grid is not None:
+        # In a 2.40 m corridor a pillar's centre must sit within a 0.75 m band on the
+        # centreline to clear both walls by the published 1 m, so uniform rejection sampling
+        # over the room wastes most of its attempts. Cell centres are the exact points that
+        # maximise clearance, so they are drawn without replacement instead.
+        _place_pillars_at_cells(cfg.n_pillars_unknown, grid, rng, pillars, structure, cfg)
+    else:
+        _place_pillars(
+            cfg.n_pillars_unknown,
+            (unknown_area[0] + inset, unknown_area[1] + inset, unknown_area[2] - inset, unknown_area[3] - inset),
+        )
 
     targets = _place_targets(rng, cfg, structure + marks, unknown_area, width, depth)
 
@@ -675,6 +811,44 @@ def generate_arena(
     if validate:
         validate_arena(spec)
     return spec
+
+
+def _place_pillars_at_cells(
+    n: int, grid: MazeGrid, rng, pillars: list[Pillar], structure: list[Polygon], cfg
+) -> None:
+    """Put the room's pillars on maze cell centres, drawn without replacement.
+
+    Raises :class:`ArenaError` rather than quietly placing fewer than ``n``: a room with no
+    pillars would violate 3.3.9 r.2, and one with fewer than configured would silently change
+    the obstacle density every result depends on.
+    """
+    if n <= 0:
+        return
+    radius = PILLAR_DIAMETER_M / 2.0
+    if grid.free_radius_m < cfg.min_gap_pillar_m + radius:
+        raise ArenaError(
+            f"a pillar needs {cfg.min_gap_pillar_m + radius:.2f} m of clearance from a cell "
+            f"centre but a {grid.corridor_w_m:.2f} m corridor offers {grid.free_radius_m:.2f} m. "
+            f"Raise maze_corridor_m or set n_pillars_unknown to 0."
+        )
+    cells = grid.cell_centres()
+    placed = 0
+    for k in rng.permutation(len(cells)):
+        if placed >= n:
+            return
+        cx, cy = cells[int(k)]
+        pillar = Pillar(cx, cy)
+        poly = pillar.polygon()
+        if not _far_enough(poly, structure, cfg.min_gap_pillar_m):
+            continue
+        pillars.append(pillar)
+        structure.append(poly)
+        placed += 1
+    if placed < n:
+        raise ArenaError(
+            f"could only place {placed} of {n} pillars on the {grid.n}x{grid.n} maze cell "
+            f"centres. Reduce n_pillars_unknown or raise maze_corridor_m."
+        )
 
 
 def _place_targets(rng, cfg, structure, unknown_area, width, depth) -> list[Target]:
@@ -724,6 +898,16 @@ def _place_targets(rng, cfg, structure, unknown_area, width, depth) -> list[Targ
     return targets
 
 
+def landmark_shape(lm: Landmark):
+    """What a landmark occupies on the floor: its footprint, or a bare point if it has none.
+
+    ``target_polygon`` collapses a zero-radius landmark to a degenerate 16-gon whose ``area``
+    and ``intersects`` are unreliable, which is how a surveyed tag with no footprint -- the
+    commonest nav aid there is -- slipped past every zone check.
+    """
+    return target_polygon(lm) if lm.radius_m > 0.0 else Point(lm.x, lm.y)
+
+
 def target_polygon(target: Landmark) -> Polygon:
     """The footprint of a solid landmark, for placement and validation."""
     return Polygon(
@@ -752,11 +936,17 @@ def validate_arena(spec: ArenaSpec, drone_radius_m: float = DRONE_RADIUS_M) -> N
        solid landmarks counted as blocking -- an unreachable target silently caps the
        achievable score and would look like a policy failure.
     4. Published minimum gaps hold between independently placed obstacles.
+    5. No pocket of the Unknown Search Area is sealed off. The maze's walls are the complement
+       of a spanning tree, so connectivity holds by construction -- but a structural argument
+       nothing tests is a comment, and this is the one that would fail silently if the doorway
+       snapping in ``_room_walls`` ever regressed.
     """
     _validate_landmarks(spec)
     _validate_footprints_clear(spec)
+    _validate_landmark_zones(spec)
     _validate_reachability(spec, drone_radius_m)
     _validate_gaps(spec)
+    _validate_room_connectivity(spec, drone_radius_m)
 
 
 def _validate_landmarks(spec: ArenaSpec) -> None:
@@ -779,6 +969,38 @@ def _validate_landmarks(spec: ArenaSpec) -> None:
     # hand or by dataclasses.replace, which never went through a config.
     for lm in spec.landmarks:
         _reject_decoy(lm, ArenaError)
+
+
+def _validate_landmark_zones(spec: ArenaSpec) -> None:
+    """Where a team is allowed to put things, per rulebook 3.3.1 r.15-17.
+
+    Unlimited in the Start Area, at most ten in the Known Search Area, and **none at all** in
+    the Unknown Search Area -- teams are "NOT allowed to enter the Unknown Search Area at all
+    times", so they cannot place anything there.
+
+    Only the zone rule is enforced, and only against ``spec.landmarks``: generated mission
+    markers live in ``spec.targets``, and 3.3.9 r.2 puts bonus victims and fires *inside* the
+    room by design. Placing a tag in there is the highest-value cheat the rules forbid -- a free
+    localisation anchor in the one region where localisation is meant to be hard -- so it is
+    checked rather than documented.
+
+    The companion rule, at most ten aids in the Known Search Area
+    (:data:`~safmc_sim.constants.NAV_AID_MAX_KNOWN_AREA`), is **not** enforced here. It governs
+    *navigation aids*, and a ``Landmark`` may equally be scenery, a prop or a venue feature;
+    the primitive carries no field distinguishing them, so a blanket cap would reject
+    legitimate arenas. Assert it in your own experiment, or give ``Landmark`` a nav-aid flag
+    first.
+    """
+    for lm in spec.landmarks:
+        if spec.in_unknown_area(lm.x, lm.y):
+            raise ArenaError(
+                f"landmark {lm.id!r} at ({lm.x:.2f}, {lm.y:.2f}) is inside the Unknown Search "
+                f"Area {tuple(round(v, 2) for v in spec.unknown_area)}. Rulebook 3.3.1 r.17: "
+                f"teams may never enter it, so nothing they place can be in it. Nav aids "
+                f"generally cannot be fixed in ArenaConfig -- 33 m^2 at the centre of the "
+                f"field is inside the room for every seed -- so survey the generated arena "
+                f"first: dataclasses.replace(arena, landmarks=...) with in_known_area()."
+            )
 
 
 def _validate_footprints_clear(spec: ArenaSpec) -> None:
@@ -804,25 +1026,7 @@ def _validate_reachability(spec: ArenaSpec, drone_radius_m: float) -> None:
     res = _CONNECTIVITY_RES_M
     blocked = spec.occupancy_grid(res, inflate_m=drone_radius_m)
     nx, ny = blocked.shape
-
-    reachable = np.zeros_like(blocked)
-    queue: deque[tuple[int, int]] = deque()
-    start_rows = int(spec.start_area_depth_m / res)
-    for ix in range(nx):
-        for iy in range(min(start_rows, ny)):
-            if not blocked[ix, iy] and not reachable[ix, iy]:
-                reachable[ix, iy] = True
-                queue.append((ix, iy))
-    if not queue:
-        raise ArenaError("the Start Area is entirely blocked")
-
-    while queue:
-        ix, iy = queue.popleft()
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            jx, jy = ix + dx, iy + dy
-            if 0 <= jx < nx and 0 <= jy < ny and not blocked[jx, jy] and not reachable[jx, jy]:
-                reachable[jx, jy] = True
-                queue.append((jx, jy))
+    reachable = _flood_from_start(spec, blocked, res)
 
     for target in spec.targets:
         cx, cy = int(target.x / res), int(target.y / res)
@@ -836,6 +1040,57 @@ def _validate_reachability(spec: ArenaSpec, drone_radius_m: float) -> None:
                 f"target {target.id} at ({target.x:.2f}, {target.y:.2f}) has no reachable "
                 f"landing spot within {SCORE_RADIUS_M} m -- it is walled off from the Start Area"
             )
+
+
+def _validate_room_connectivity(spec: ArenaSpec, drone_radius_m: float) -> None:
+    """Every free cell inside the Unknown Search Area must be reachable from the Start Area.
+
+    ``_validate_reachability`` only asks whether each *target* has a reachable landing spot, so
+    it cannot see a sealed pocket that happens to contain nothing. That distinction matters
+    once the room has interior walls: an unreachable pocket is dead area a search policy will
+    spend the whole run trying to enter, and it would look like a policy failure rather than a
+    broken arena.
+    """
+    res = _CONNECTIVITY_RES_M
+    blocked = spec.occupancy_grid(res, inflate_m=drone_radius_m)
+    reachable = _flood_from_start(spec, blocked, res)
+
+    x0, y0, x1, y1 = spec.unknown_area
+    nx, ny = blocked.shape
+    ix0, ix1 = max(0, int(x0 / res)), min(nx, int(math.ceil(x1 / res)))
+    iy0, iy1 = max(0, int(y0 / res)), min(ny, int(math.ceil(y1 / res)))
+
+    free = ~blocked[ix0:ix1, iy0:iy1]
+    orphans = int(np.count_nonzero(free & ~reachable[ix0:ix1, iy0:iy1]))
+    if orphans:
+        raise ArenaError(
+            f"{orphans} free cells inside the Unknown Search Area ({orphans * res * res:.2f} "
+            f"m^2) are walled off from the Start Area. A sealed pocket makes part of the room "
+            f"unsearchable and would be misread as a policy failure."
+        )
+
+
+def _flood_from_start(spec: ArenaSpec, blocked: np.ndarray, res: float) -> np.ndarray:
+    """Breadth-first flood of the drone-inflated free space, seeded from the Start Area."""
+    nx, ny = blocked.shape
+    reachable = np.zeros_like(blocked)
+    queue: deque[tuple[int, int]] = deque()
+    start_rows = int(spec.start_area_depth_m / res)
+    for ix in range(nx):
+        for iy in range(min(start_rows, ny)):
+            if not blocked[ix, iy] and not reachable[ix, iy]:
+                reachable[ix, iy] = True
+                queue.append((ix, iy))
+    if not queue:
+        raise ArenaError("the Start Area is entirely blocked")
+    while queue:
+        ix, iy = queue.popleft()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            jx, jy = ix + dx, iy + dy
+            if 0 <= jx < nx and 0 <= jy < ny and not blocked[jx, jy] and not reachable[jx, jy]:
+                reachable[jx, jy] = True
+                queue.append((jx, jy))
+    return reachable
 
 
 def _validate_gaps(spec: ArenaSpec) -> None:

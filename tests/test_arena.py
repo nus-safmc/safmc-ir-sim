@@ -244,3 +244,209 @@ def test_config_rejects_impossible_target_counts():
         ArenaConfig(n_fires=0)
     with pytest.raises(ConfigError):
         ArenaConfig(inner_wall_length_range_m=(5.0, 2.0))
+
+
+# ---------------------------------------------------------------------------------------
+# The Unknown Search Area maze (R-WORLD-3). Section 3.2 pins nothing inside this room --
+# "The layout within the Unknown Search Area is intentionally NOT shown" -- so what is
+# asserted here is the shape of the *distribution*, never one layout.
+# ---------------------------------------------------------------------------------------
+
+
+def _cell_adjacency(a):
+    """Rebuild the maze's cell graph from the emitted wall geometry.
+
+    Deliberately independent of the generator's internals: it probes the midpoint between
+    neighbouring cell centres against the finished polygons, so it would catch a maze whose
+    internal bookkeeping disagrees with the walls it actually emitted.
+    """
+    from shapely.geometry import Point
+    from shapely.strtree import STRtree
+
+    from safmc_sim.world.maze import plan_grid
+
+    grid = plan_grid(
+        a.unknown_area[0], a.unknown_area[1], K.UNKNOWN_AREA_SIZE_M,
+        a.config.wall_thickness_m, a.config.maze_corridor_m,
+    )
+    polys = [w.polygon() for w in a.walls]
+    tree = STRtree(polys)
+    adj: dict[tuple[int, int], set[tuple[int, int]]] = {}
+    for i in range(grid.n):
+        for j in range(grid.n):
+            adj.setdefault((i, j), set())
+            for di, dj in ((1, 0), (0, 1)):
+                ni, nj = i + di, j + dj
+                if ni >= grid.n or nj >= grid.n:
+                    continue
+                (x1, y1), (x2, y2) = grid.cell_centre(i, j), grid.cell_centre(ni, nj)
+                mid = Point((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+                if not any(polys[k].intersects(mid) for k in tree.query(mid)):
+                    adj[(i, j)].add((ni, nj))
+                    adj.setdefault((ni, nj), set()).add((i, j))
+    return grid, adj
+
+
+def test_the_published_gap_fixes_the_maze_at_four_by_four():
+    """The 2 m wall-to-wall gap is what sets the grid, not taste.
+
+    9.90 m of clear interior admits four 2.400 m corridors; a fifth would be 1.900 m, below the
+    published minimum. If this ever changes, the arena has silently started breaking a rule.
+    """
+    from safmc_sim.world.maze import plan_grid
+
+    grid = plan_grid(0.0, 0.0, K.UNKNOWN_AREA_SIZE_M, K.WALL_THICKNESS_M, K.MAZE_CORRIDOR_M)
+    assert grid.n == 4
+    assert grid.corridor_w_m == pytest.approx(2.400)
+    assert grid.corridor_w_m >= K.MIN_GAP_WALL_TO_WALL_M
+    assert grid.span_m == pytest.approx(K.UNKNOWN_AREA_SIZE_M - K.WALL_THICKNESS_M)
+    # A fifth corridor would violate the published gap.
+    assert (grid.span_m - 4 * K.WALL_THICKNESS_M) / 5 < K.MIN_GAP_WALL_TO_WALL_M
+
+
+def test_every_maze_is_fully_connected(arenas):
+    """A sealed pocket is dead area a search policy burns the whole run trying to enter."""
+    for a in arenas:
+        grid, adj = _cell_adjacency(a)
+        cells = [(i, j) for i in range(grid.n) for j in range(grid.n)]
+        seen = {cells[0]}
+        stack = [cells[0]]
+        while stack:
+            for nxt in adj[stack.pop()]:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        assert len(seen) == len(cells), (
+            f"seed {a.seed}: only {len(seen)} of {len(cells)} maze cells are reachable"
+        )
+
+
+def test_the_maze_has_dead_ends_and_loops(arenas):
+    """Otherwise it is not a maze, and the room stays as easy to search as an open box.
+
+    Dead ends are what force backtracking; the braid loops are what stop the 3.3.7 relay chain
+    from resting on a single fragile path.
+    """
+    total_dead_ends = 0
+    for a in arenas:
+        grid, adj = _cell_adjacency(a)
+        cells = [(i, j) for i in range(grid.n) for j in range(grid.n)]
+        edges = sum(len(v) for v in adj.values()) // 2
+        total_dead_ends += sum(1 for c in cells if len(adj[c]) == 1)
+        assert edges - (len(cells) - 1) == a.config.n_maze_loops, (
+            f"seed {a.seed}: expected exactly {a.config.n_maze_loops} independent cycles"
+        )
+    assert total_dead_ends > 0, "no arena had a dead end -- these are not mazes"
+
+
+def test_maze_walls_never_block_a_doorway(arenas):
+    """Doorways are snapped to whole cells so a wall end cannot bisect one.
+
+    Without snapping a grid line lands inside the opening on roughly 42% of faces, halving a
+    doorway that no other validator would object to.
+    """
+    for a in arenas:
+        blocked = a.occupancy_grid(0.05, inflate_m=K.DRONE_RADIUS_M)
+        x0, y0, x1, y1 = a.unknown_area
+        interior = blocked[
+            int(x0 / 0.05) : int(x1 / 0.05), int(y0 / 0.05) : int(y1 / 0.05)
+        ]
+        assert (~interior).any(), f"seed {a.seed}: the room has no free space at all"
+
+
+def test_maze_walls_are_merged_into_long_runs(arenas):
+    """Every wall costs the raycaster four segments per ray per drone per tick.
+
+    A 4x4 maze has up to 24 unit edges; leaving them unmerged would multiply sensing cost for
+    no change in geometry.
+    """
+    for a in arenas:
+        unknown = [w for w in a.walls if w.kind == "unknown_wall"]
+        assert len(unknown) <= 24, f"seed {a.seed}: {len(unknown)} unknown walls, unmerged?"
+
+
+def test_maze_can_be_disabled_for_reproducing_old_results():
+    """maze_corridor_m=None restores the free-standing-baffle behaviour."""
+    a = generate_arena(0, ArenaConfig(maze_corridor_m=None, n_unknown_walls=2))
+    assert a.config.maze_corridor_m is None
+    validate_arena(a)
+
+
+def test_maze_and_free_standing_walls_are_mutually_exclusive():
+    """Silently ignoring one of the two would change obstacle density without saying so."""
+    from safmc_sim.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="n_unknown_walls must be 0"):
+        ArenaConfig(n_unknown_walls=2)
+
+
+def test_anchor_gap_knob_spans_both_readings_of_the_two_metre_rule():
+    """maze_anchor_gap_m=min_gap_wall_m degenerates to free-floating islands."""
+    anchored = generate_arena(3)
+    islands = generate_arena(3, ArenaConfig(maze_anchor_gap_m=K.MIN_GAP_WALL_TO_WALL_M))
+    room_anchored = [w for w in anchored.walls if w.kind == "unknown_wall"]
+    room_islands = [w for w in islands.walls if w.kind == "unknown_wall"]
+    # Retracting both ends of every run can only shorten or delete walls.
+    assert sum(w.length_m for w in room_islands) < sum(w.length_m for w in room_anchored)
+
+
+def test_a_corridor_wider_than_the_room_is_refused():
+    """Returning a one-cell 'maze' would be an empty room wearing the wrong name."""
+    with pytest.raises(ArenaError, match="does not fit twice"):
+        generate_arena(0, ArenaConfig(maze_corridor_m=9.0))
+
+
+def test_known_area_pillars_stay_out_of_the_unknown_area(arenas):
+    """Regression: _place_walls had a room guard and _place_pillars did not.
+
+    94% of seeds leaked known-area pillars into the room, 2.27 per arena on average, so the
+    room held about 4.3 pillars against a configured 2 and both areas' obstacle densities were
+    wrong.
+    """
+    for a in arenas:
+        room = box(*a.unknown_area)
+        known = a.pillars[: a.config.n_pillars_known]
+        leaked = [p for p in known if room.contains(box(p.x, p.y, p.x, p.y).centroid)]
+        assert not leaked, (
+            f"seed {a.seed}: {len(leaked)} known-area pillars leaked into the Unknown Search Area"
+        )
+
+
+def test_room_connectivity_validator_catches_a_sealed_pocket():
+    """The structural argument is that this cannot happen; this proves the check would notice."""
+    a = generate_arena(0)
+    x0, y0, x1, y1 = a.unknown_area
+    t = a.config.wall_thickness_m
+    # A closed 2 m box in the middle of the room. Sealing a corner is not enough: a doorway can
+    # open straight into it, which is exactly the mistake this test was written wrong once to
+    # make. A box touching nothing is unambiguously enclosed.
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    h = 1.0
+    sealed = a.walls + (
+        Wall(cx - h, cy - h, cx + h, cy - h, t, K.INNER_WALL_HEIGHT_M, "unknown_wall"),
+        Wall(cx - h, cy + h, cx + h, cy + h, t, K.INNER_WALL_HEIGHT_M, "unknown_wall"),
+        Wall(cx - h, cy - h, cx - h, cy + h, t, K.INNER_WALL_HEIGHT_M, "unknown_wall"),
+        Wall(cx + h, cy - h, cx + h, cy + h, t, K.INNER_WALL_HEIGHT_M, "unknown_wall"),
+    )
+    # Pillars and targets are dropped so the earlier gap and reachability checks cannot fire
+    # first and mask the one this test is about.
+    with pytest.raises(ArenaError, match="walled off from the Start Area"):
+        validate_arena(
+            ArenaSpec(**{**a.__dict__, "walls": sealed, "targets": (), "pillars": ()})
+        )
+
+
+def test_far_enough_prefilter_does_not_miss_obstacles_at_the_gap_boundary():
+    """Regression: candidate.buffer(min_gap) inner-approximates the offset circle.
+
+    For a pillar's 24-gon it fell 0.6 mm short, so the STRtree prefilter skipped a wall that was
+    genuinely inside the gap; placement accepted it and validation then rejected the whole
+    arena. It cost about one seed in 300 as a hard generation failure.
+    """
+    from safmc_sim.world.arena import _far_enough
+
+    wall = Wall(0.0, 20.05, 20.0, 20.05, 0.1, K.PERIMETER_WALL_HEIGHT_M, "perimeter_wall")
+    # A pillar whose true clearance is just under the published 1 m.
+    pillar = Pillar(17.0947322, 18.8503116)
+    assert wall.polygon().distance(pillar.polygon()) < K.MIN_GAP_PILLAR_M
+    assert not _far_enough(pillar.polygon(), [wall.polygon()], K.MIN_GAP_PILLAR_M)

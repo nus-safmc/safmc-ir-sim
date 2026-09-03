@@ -24,8 +24,8 @@ Indoor, Singapore EXPO Hall 2B. No GNSS. Netting on all sides, safety net 8 m up
 |---|---|
 | Play field | 20.0 m x 20.0 m |
 | Start Area | 20.0 m x 6.0 m, full width of the south edge |
-| Known Search Area | 20.0 m x 14.0 m (derived; **the 2026 table withdrew this figure**) |
-| Unknown Search Area | 10.0 m x 10.0 m walled room with open doorways |
+| Known Search Area | 20.0 m x 14.0 m (**derived**: 20 field - 6 Start Area; never published in v1 or v2, and never withdrawn) |
+| Unknown Search Area | 10.0 m x 10.0 m walled room, four open doorways (one per face, ~2.4 m); interior layout undisclosed and therefore sampled |
 | Perimeter wall | 1.5 m tall, **three sides only** (W, N, E); south edge is netting |
 | Inner wall | 2.0 m tall |
 | Pillar | 0.30 m diameter, 2.0 m tall, on a 0.50 m x 0.15 m weighted base |
@@ -113,12 +113,51 @@ room where the highest-value targets live. Localisation there is dead-reckoning 
 sensing, full stop. That is precisely the regime a sensing-focused simulator exists to explore —
 and precisely what v0.1 defers by using ground-truth pose. See [FIDELITY.md](FIDELITY.md).
 
+`validate_arena` enforces the zone half of this: a `Landmark` in `ArenaConfig.landmarks` or in
+`dataclasses.replace(arena, landmarks=...)` may not lie inside the Unknown Search Area. Generated
+mission markers are exempt, because 3.3.9 r.2 requires bonus victims and fires in there. The
+count half — at most ten — is **not** enforced, because a `Landmark` may equally be scenery or a
+venue feature and the primitive carries no field saying which; assert it yourself with
+`arena.in_known_area(x, y)` and `NAV_AID_MAX_KNOWN_AREA`.
+
+A nav aid's position generally **cannot** be fixed in `ArenaConfig`. The room's position is
+sampled per seed, and 33 m² at the centre of the field falls inside it for *every* seed, so a
+fixed coordinate there can never be legal. That inverts the real ordering, where the room is built
+first and the team surveys it during setup. Model it the same way round: generate, then place.
+
+```python
+arena = generate_arena(seed)
+aids = tuple(Landmark(f"aid_{i}", "nav_tag", x, y)
+             for i, (x, y) in enumerate(spots) if arena.in_known_area(x, y))
+arena = dataclasses.replace(arena, landmarks=aids)
+```
+
+### The three zones differ in permission, not just geometry
+
+| Zone | Team may enter | Aids | Layout known to the team |
+|---|---|---|---|
+| Start Area | yes | unlimited | fully |
+| Known Search Area | **at setup only** | ≤10 | **yes — surveyed at setup** |
+| Unknown Search Area | **never** | **zero** | interior never |
+
+The last column is the one the simulator does not yet honour. `ArenaInfo` hands a policy the field
+size, the ceiling, the Start Area depth and the run duration — and nothing else. But a team walks
+the Known Search Area during setup: it sees the inner walls, the pillars, and the outside of the
+10 x 10 m room, including where its doorways are. Withholding that models a fog the competition
+does not have, and it makes search look harder than it is — a real swarm flies straight at a
+doorway it has already seen.
+
+What must stay hidden is narrower than what is hidden today: the room's **interior**, and the
+number and positions of victims and fires (3.3.3 r.1, 3.3.5 r.1). Widening `ArenaInfo` to carry a
+known-area briefing is an open design decision, not a settled one — it adds a third path from
+ground truth to a policy alongside the pose source and the sensor contract, so it needs an ADR.
+
 ## 2025 to 2026 drift — the best available signal for 2027
 
 | | 2025 Cat E | 2026 Swarm |
 |---|---|---|
 | Unknown Search Area | 8 x 8 m | **10 x 10 m** |
-| Known Search Area dims | published | **withdrawn** |
+| Known Search Area dims | never published | never published (v1 and v2 tables are character-identical) |
 | Hazard mechanic | Danger Zones, −2 pts | **removed** |
 | Fires | — | **added**, +10, and zero out victims within 2.5 m |
 | Relay | — | **added**, 2x multiplier |
