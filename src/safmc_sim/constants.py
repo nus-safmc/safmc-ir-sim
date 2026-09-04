@@ -26,6 +26,13 @@ PERIMETER_WALL_HEIGHT_M = 1.5   # sec 3.2, three sides only: west, north, east
 INNER_WALL_HEIGHT_M = 2.0       # sec 3.2
 PILLAR_DIAMETER_M = 0.30        # sec 3.2
 PILLAR_HEIGHT_M = 2.0           # sec 3.2
+PILLAR_BASE_DIAMETER_M = 0.50   # sec 3.2, "includes a weighted circular base of 0.5m diameter
+PILLAR_BASE_HEIGHT_M = 0.15     # and 0.15m height". Staging hardware -- a heavy foot so a 2 m
+                                # column does not topple -- not an obstacle feature, so the
+                                # published >= 1 m pillar gap is measured off the 0.30 m shaft,
+                                # which is the only part inside the flight envelope. The base is
+                                # modelled as a second, low height band so a drone descending to
+                                # land beside a pillar meets it; see world/arena.py Pillar.
 
 MIN_GAP_WALL_TO_WALL_M = 2.0    # sec 3.2
 MIN_GAP_PILLAR_M = 1.0          # sec 3.2, pillar-to-pillar and pillar-to-wall
@@ -171,8 +178,6 @@ without ever leaving the Start Area. Real drones are placed by hand with room ar
 # throw away the research; leaving them unlabelled would imply the simulator honours them.
 # If you start using one, move it up into the block above.
 # --------------------------------------------------------------------------------------
-PILLAR_BASE_DIAMETER_M = 0.50   # sec 3.2, weighted base, 0.15 m tall
-PILLAR_BASE_HEIGHT_M = 0.15     # sec 3.2
 DRONE_BBOX_M = 0.30             # sec 6, must fit a 30 cm cube including propellers
 TOF_RATE_HZ = 15.0              # tof_task.c:475, 8 sensors x 8 ms round robin. Also the
                                 # VL53L5CX's own max rate at 8x8 (it does 60 Hz only at 4x4)

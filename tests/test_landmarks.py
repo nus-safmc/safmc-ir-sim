@@ -66,7 +66,9 @@ def test_landmarks_placed_by_config_reach_the_arena_and_the_scene():
     world = WorldScene.from_arena(arena)
     assert world.landmarks == arena.all_landmarks
     assert world.landmarks_of("nav_tag", "uwb_anchor") == (tag, post)
-    assert len(world.static_sensing_scene.circles) == len(arena.pillars) + len(arena.targets) + 1
+    # 2 circles per pillar (shaft + weighted base), plus the targets, plus the one
+    # solid placed landmark.
+    assert len(world.static_sensing_scene.circles) == 2 * len(arena.pillars) + len(arena.targets) + 1
 
 
 def test_derived_placement_is_a_dataclass_replace():

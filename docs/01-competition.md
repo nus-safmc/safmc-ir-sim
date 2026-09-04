@@ -28,7 +28,7 @@ Indoor, Singapore EXPO Hall 2B. No GNSS. Netting on all sides, safety net 8 m up
 | Unknown Search Area | 10.0 m x 10.0 m walled room, four open doorways (one per face, ~2.4 m); interior layout undisclosed and therefore sampled |
 | Perimeter wall | 1.5 m tall, **three sides only** (W, N, E); south edge is netting |
 | Inner wall | 2.0 m tall |
-| Pillar | 0.30 m diameter, 2.0 m tall, on a 0.50 m x 0.15 m weighted base |
+| Pillar | 0.30 m diameter, 2.0 m tall, on a 0.50 m x 0.15 m weighted base — modelled as two height bands, so the foot is real below 0.15 m and invisible at the 0.5 m cruise altitude |
 | Min gap, wall to wall | 2.0 m |
 | Min gap, pillar to pillar / pillar to wall | 1.0 m |
 | **Max flight height** | **1.4 m** — "Drones are not allowed to fly over walls" |

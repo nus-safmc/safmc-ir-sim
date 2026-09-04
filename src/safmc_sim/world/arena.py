@@ -85,6 +85,8 @@ from ..constants import (
     N_FIRES,
     N_VICTIMS,
     PERIMETER_WALL_HEIGHT_M,
+    PILLAR_BASE_DIAMETER_M,
+    PILLAR_BASE_HEIGHT_M,
     PILLAR_DIAMETER_M,
     PILLAR_HEIGHT_M,
     SAFETY_NET_HEIGHT_M,
@@ -168,10 +170,31 @@ class Wall:
 
 @dataclass(frozen=True)
 class Pillar:
+    """A 2.0 m column on a weighted foot: in profile an upside-down T.
+
+    The rulebook gives the Pillar Obstacle as "0.3m diameter, 2m height (includes a weighted
+    circular base of 0.5m diameter and 0.15m height)". The base is staging hardware -- a heavy
+    foot so a 2 m column does not topple, the same reason a flagpole has one -- not an obstacle
+    feature, and it lives entirely below 0.15 m.
+
+    That split decides where each part belongs:
+
+    - :meth:`polygon` is the **shaft only**, and it is what placement, the published gap checks
+      and the occupancy grid consume. Those all answer "can a drone fly through here", and a
+      drone cruises at 0.5 m, well above the foot. Folding the base in would tighten every gap
+      by 0.10 m per side against a 1.0 m rule and shrink the maze lattice for a body no drone
+      at cruise altitude can reach.
+    - The base *is* real to a drone that descends to land beside a pillar, so it is emitted as a
+      second, low height band in :meth:`ArenaSpec.structural_scene`. The raycaster is already
+      banded (``z_min <= z < height``), so this costs one extra circle and nothing else.
+    """
+
     x: float
     y: float
     radius_m: float = PILLAR_DIAMETER_M / 2.0
     height_m: float = PILLAR_HEIGHT_M
+    base_radius_m: float = PILLAR_BASE_DIAMETER_M / 2.0
+    base_height_m: float = PILLAR_BASE_HEIGHT_M
 
     def polygon(self) -> Polygon:
         return Polygon(
@@ -351,19 +374,32 @@ class ArenaSpec:
     # -- scenes ---------------------------------------------------------------------------
 
     def structural_scene(self) -> RayScene:
-        """Walls and pillars only. Blocks both sensing and line of sight."""
+        """Walls and pillars only. Blocks both sensing and line of sight.
+
+        A pillar contributes **two** circles, not one: the 0.30 m shaft over its full height,
+        and the 0.50 m weighted base below 0.15 m. So a drone at the 0.5 m cruise altitude
+        ranges against the shaft alone -- exact -- while one descending to land beside a pillar
+        meets the wider foot it would really clip. The bands are what make that free: a
+        primitive occludes only while ``z_min <= z < height_m``.
+        """
         segments = (
             np.vstack([w.segments() for w in self.walls])
             if self.walls
             else np.zeros((0, 4))
         )
         seg_h = np.concatenate([np.full(4, w.height_m) for w in self.walls]) if self.walls else np.zeros(0)
-        circles = (
-            np.array([[p.x, p.y, p.radius_m] for p in self.pillars])
-            if self.pillars
-            else np.zeros((0, 3))
-        )
-        circ_h = np.array([p.height_m for p in self.pillars]) if self.pillars else np.zeros(0)
+        rows: list[list[float]] = []
+        heights: list[float] = []
+        for p in self.pillars:
+            rows.append([p.x, p.y, p.radius_m])
+            heights.append(p.height_m)
+            # Only when the foot is genuinely wider than the shaft; a degenerate ring would be
+            # an invisible primitive the raycaster still pays for on every ray.
+            if p.base_radius_m > p.radius_m and p.base_height_m > 0.0:
+                rows.append([p.x, p.y, p.base_radius_m])
+                heights.append(p.base_height_m)
+        circles = np.array(rows, dtype=float) if rows else np.zeros((0, 3))
+        circ_h = np.array(heights, dtype=float) if heights else np.zeros(0)
         return RayScene(
             circles=circles, circle_heights=circ_h, segments=segments, segment_heights=seg_h
         )

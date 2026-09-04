@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 import pytest
-from shapely.geometry import box
+from shapely.geometry import Point, box
 
 from safmc_sim import constants as K
 from safmc_sim.errors import ArenaError
@@ -165,7 +165,14 @@ def test_scenes_separate_structure_from_markers(arenas):
         structural = a.structural_scene()
         markers = a.landmark_scene()
         assert len(markers.circles) == len(a.targets)
-        assert len(structural.circles) == len(a.pillars)
+        # Two circles per pillar: the 0.30 m shaft over its full height, and the 0.50 m
+        # weighted base below 0.15 m. The rulebook's Pillar Obstacle is an upside-down T.
+        assert len(structural.circles) == 2 * len(a.pillars)
+        shafts = sorted(round(c[2], 3) for c in structural.circles)
+        assert shafts == sorted(
+            [round(K.PILLAR_DIAMETER_M / 2, 3)] * len(a.pillars)
+            + [round(K.PILLAR_BASE_DIAMETER_M / 2, 3)] * len(a.pillars)
+        )
         assert len(structural.segments) == 4 * len(a.walls)
         # No marker leaks into the line-of-sight scene.
         for t in a.targets:
@@ -553,3 +560,50 @@ def test_far_enough_prefilter_does_not_miss_obstacles_at_the_gap_boundary():
     pillar = Pillar(17.0947322, 18.8503116)
     assert wall.polygon().distance(pillar.polygon()) < K.MIN_GAP_PILLAR_M
     assert not _far_enough(pillar.polygon(), [wall.polygon()], K.MIN_GAP_PILLAR_M)
+
+
+def test_the_pillar_base_blocks_only_below_its_own_height(arenas):
+    """The Pillar Obstacle is a 0.30 m shaft on a 0.50 m weighted foot 0.15 m tall.
+
+    The foot is staging hardware, not an obstacle feature, and it lives entirely below 0.15 m.
+    So it must be invisible at the 0.5 m cruise altitude — otherwise every pillar would read
+    0.10 m wider per side to the ring, and the published >= 1 m gap would be measured off the
+    wrong body — but real to a drone descending to land beside a pillar, which would clip it.
+    """
+    from safmc_sim.sensors.raycast import cast_rays
+
+    a = arenas[0]
+    p = a.pillars[0]
+    scene = a.structural_scene()
+    shaft, base = p.radius_m, p.base_radius_m
+    assert base > shaft and 0.0 < p.base_height_m < K.CRUISE_ALT_M
+
+    # A ray grazing the annulus between the shaft and the foot, cast from close in so nothing
+    # else in the arena can be the thing it hits.
+    offset = (shaft + base) / 2.0
+    origin = np.array([[p.x - 1.0, p.y + offset]])
+    direction = np.array([[1.0, 0.0]])
+    reach = 2.0
+
+    low = cast_rays(scene, origin, direction, p.base_height_m / 2.0, reach)[0]
+    cruise = cast_rays(scene, origin, direction, K.CRUISE_ALT_M, reach)[0]
+    assert math.isfinite(low), "the weighted base must block a ray below its own height"
+    assert not math.isfinite(cruise), "the base must be invisible at cruise altitude"
+
+    # The shaft blocks at every altitude below the ceiling.
+    inner = np.array([[p.x - 1.0, p.y + shaft / 2.0]])
+    for z in (p.base_height_m / 2.0, K.CRUISE_ALT_M, K.CEILING_M - 0.01):
+        assert math.isfinite(cast_rays(scene, inner, direction, z, reach)[0])
+
+
+def test_the_pillar_base_never_tightens_a_published_gap(arenas):
+    """Placement, the gap checks and the occupancy grid see the shaft alone.
+
+    Folding the 0.25 m foot into `polygon()` would tighten every gap by 0.10 m per side against
+    a 1.0 m rule, and shrink the maze lattice, for a body no drone at cruise altitude can reach.
+    """
+    for a in arenas:
+        for p in a.pillars:
+            bounds = p.polygon().bounds
+            assert (bounds[2] - bounds[0]) < 2 * p.base_radius_m
+            assert p.polygon().distance(Point(p.x + p.radius_m + 1e-6, p.y)) < 1e-3
