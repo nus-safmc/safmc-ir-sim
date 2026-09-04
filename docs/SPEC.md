@@ -143,6 +143,15 @@ is built over a flat mark, and targets are not placed on either. Reachability va
 inside one. A point landmark whose kind no configured sensor reports MUST be refused at run
 construction.
 
+**R-WORLD-9** *(added with ADR-0006)* The package MUST provide a check of the rulebook's
+navigation-aid placement rules: any number of aids in the Start Area, at most **ten** in the
+Known Search Area, **none** in the Unknown Search Area, each within **1 m x 1 m**
+[src: SAFMC 2026 Cat Swarm Challenge Booklet v2.0 §3.3.1 r.14-17]. The check MUST take the
+landmark kinds that count as aids from the caller, MUST count every listed kind together, and
+MUST name the offending landmarks and the rule. The runner MUST NOT apply it: a layout the
+rules forbid is a legitimate experiment when asked for, and the check exists so that nobody
+quotes one without knowing.
+
 ---
 
 ## 6. Drone model
@@ -306,6 +315,27 @@ disk. (A failure of the disk itself mid-write can still leave a partial director
 MUST list every sensor with its config type and whether it was recorded. `record()` MUST be
 pure: recording MUST NOT affect results (R-OBS-4).
 
+**R-SENS-17** *(added with ADR-0006)* The package MUST provide a UWB ranging tag on the
+R-SENS-12 contract (`sensors/uwb.py`) that is NOT part of `flown_sensors()`. Its reading MUST
+be, for every landmark of its configured kind in arena order and fixed for the run: the
+anchor ids, the surveyed anchor positions (each at the configured mount height), and one
+reported range per anchor, `inf` where no measurement was obtained -- and nothing else, in
+particular no bearing and no line-of-sight or quality flag. The true range MUST be the
+three-dimensional distance from the drone's true position to the anchor. An anchor beyond
+`max_range_m` MUST report `inf`. Obstruction MUST be decided against walls and pillars only,
+by the R-SENS-7 segment test at the tag's altitude; solid landmarks and other drones MUST NOT
+obstruct. An unobstructed range MUST be the true range plus zero-mean Gaussian noise of
+`los_noise_std_m`; an obstructed range MUST be `inf` with probability
+`nlos_drop_probability` and otherwise the true range plus `nlos_bias_m` plus zero-mean
+Gaussian noise of `nlos_noise_std_m`; with probability `outlier_probability` a reported range
+MUST gain a further positive error uniform on `[0, outlier_max_m]`. A reported range MUST NOT
+be negative. Every draw MUST come from the sensor's own generator (R-DET-2), and the number
+of draws per sample MUST NOT depend on the geometry, so the noise stream is a function of the
+seed alone. Every default MUST be a named constant registered in §12 (A-9..A-13). The
+sensor MUST record `ranges_m` shaped `(ticks, agents, anchors)` and the anchor positions as a
+static array (R-SENS-16); column `j` MUST be the `j`-th landmark of the sensor's kind in the
+header's landmark list, so anchor identity is recoverable from the log alone (R-OBS-3).
+
 ---
 
 ## 8. Policy interface
@@ -324,6 +354,12 @@ unfound target or landmark positions) MUST NOT be reachable from `Observation`.
 > Amended with ADR-0005. The original wording named "the ToF product, marker detections",
 > which was the sensor list of the day rather than a rule. Readings now arrive under
 > `sensors`; the flown two keep their shorthands.
+>
+> Amended with ADR-0006. "Landmark positions" means positions the drone has neither measured
+> nor been given. A navigation aid the team placed and surveyed is the team's own
+> configuration, and the sensor that reads it MAY report the surveyed position beside the
+> measurement, as a UWB tag configured with its anchor list does (R-SENS-17). What stays
+> unreachable is everything the team did not put there: targets, structure, the room.
 
 **R-POL-4** Violating R-POL-3 MUST be detectable: an auditor MUST be able to enumerate every
 public attribute reachable from an `Observation` and find no reference to the environment, the
@@ -449,6 +485,11 @@ place, not a literal scattered through the code.
 | A-6 | Known Search Area depth | 14.0 m | Published in 2025, withdrawn from the 2026 table; derived as 20 - 6. |
 | A-7 | Unknown Search Area doorway count/width | 2 doorways, 1.0 m | Rulebook shows gaps in a not-to-scale diagram. |
 | A-8 | ToF ring sampled synchronously at tick rate | 20 Hz, no skew | Hardware is 15 Hz round-robin with up to 64 ms skew across the ring. |
+| A-9 | UWB line-of-sight ranging noise | 0.05 m std | DW1000-class timestamp noise is 3-4.5 cm and testbeds report 2-8 cm; the team's module is unchosen and unmeasured. |
+| A-10 | UWB maximum range | 20 m | Datasheets say 60 m line of sight; hobby firmware reports 12-20 m indoors. Decides whether Start Area anchors reach the far end of the field. |
+| A-11 | UWB through-wall bias and spread | +0.15 m, 0.40 m std | Measured through one apartment wall on a DW1000; the venue's walls are of unknown material and a path may cross more than one. |
+| A-12 | UWB through-wall dropout probability | 0.10 | No published rate for hobby modules. |
+| A-13 | UWB outlier probability and size | 0 (off), up to 1.5 m | The heavy positive tail is documented, its frequency is not; off until measured. |
 
 **R-ASSUME-1** `docs/FIDELITY.md` MUST list every entry in this table together with what would be
 needed to resolve it, and MUST list every known divergence between the simulator and the real
