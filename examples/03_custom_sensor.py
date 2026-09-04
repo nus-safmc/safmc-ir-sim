@@ -4,7 +4,9 @@ This is a TEMPLATE, not a model of any hardware. The sensor below reports the ra
 radio anchor in the arena, which is roughly what a UWB tag does -- but nothing here is
 calibrated, the noise is a guess, and the airframe does not carry one. Copy the *shape*:
 a reading, a config, a sensor, a landmark kind for it to perceive, and a policy that reads it
-by name. Replace the physics with yours.
+by name. Replace the physics with yours. (The real model of a UWB tag, with the physics cited
+and every number an assumption with an ID, is ``sensors/uwb.py`` and
+``examples/04_uwb_ranging.py``. This file stays the template.)
 
 Run:  python examples/03_custom_sensor.py
 """

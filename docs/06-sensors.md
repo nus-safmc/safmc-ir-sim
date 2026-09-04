@@ -7,8 +7,10 @@ and the world to a frozen reading, sampled at a rate that divides the tick rate,
 the runner through one contract in `sensors/base.py`. Your policy reads every reading by
 name from `obs.sensors`; `obs.tof` and `obs.markers` are shorthands for the two below.
 
-This page is what those two report. The contract itself, how to add a sensor, and what a
-**landmark** is — the thing you place in the arena for a sensor to find — are in
+This page is what those two report, and what the one sensor the platform models but the
+airframe does not carry — a [UWB ranging tag](#the-uwb-ranging-tag--not-flown) — would. The
+contract itself, how to add a sensor, and what a **landmark** is — the thing you place in the
+arena for a sensor to find — are in
 [Adding a sensor or a landmark](10-adding-sensors-and-landmarks.md).
 
 ## The ToF ring
@@ -190,3 +192,77 @@ know what it is looking at.
 A-5 (camera FOV, 1.0 rad) is derived from the QVGA intrinsics rather than measured, and the
 real camera is pitched 45° nose-down while ours is modelled horizontal (F-6) — so it sees the
 floor ahead rather than the horizon, and ground markers enter view differently.
+
+## The UWB ranging tag — not flown
+
+**The airframe does not carry one.** The rules permit ultra-wideband by name (booklet §6.3)
+and say where an anchor may stand (§3.3.1 r.14–17), and the team may buy a module; this is
+what a policy would be written against if it did, and what a future `PoseSource` would
+consume. It is a model of the literature on DW1000/DW3000-class hobby modules, not of any
+device on the bench, and every number in it is an assumption with an ID.
+[ADR-0006](adr/0006-uwb-ranging-sensor.md) has the decisions; `sensors/uwb.py` is the source
+of truth for the model. Opt in with `RunConfig(sensors=flown_sensors() + (UWBConfig(),))` and
+put anchors in the arena as landmarks of kind `"uwb_anchor"`.
+
+```python
+uwb = obs.sensors["uwb"]
+uwb.anchor_ids       # ("start_w0", ...)  every anchor, in arena order, fixed for the run
+uwb.anchor_xyz_m     # (N, 3) surveyed positions, at the configured mount height. Constant.
+uwb.ranges_m         # (N,)   reported range per anchor, inf where nothing was heard
+uwb.heard            # (N,)   bool, isfinite(ranges_m)
+```
+
+That is the whole reading, and it is what a real tag reports: a tag in a real-time-location
+network is configured with its anchors' surveyed coordinates and returns a distance per
+anchor or nothing. **No bearing, no quality factor, and no flag saying which ranges are
+biased.** A range behind a wall looks exactly like a clean one. That is the problem a
+localiser has to solve, and the reading is built not to solve it for you. The surveyed
+positions are the team's own configuration — the same `ArenaConfig` that placed the anchors
+— not a leaked world position ([R-POL-3](SPEC.md) as amended).
+
+### The model
+
+| Step | What happens | Number |
+|---|---|---|
+| Range | Three-dimensional distance from the drone's true position to the anchor at `anchor_height_m` — a 2.0 m anchor 3 m away reads 3.35 m | `anchor_height_m` 2.0 m, a tripod |
+| Reach | Beyond `max_range_m`: `inf` | **A-10**, 20 m. Datasheets say 60 m; hobby firmware delivers 12–20 m indoors |
+| Obstruction | The line-of-sight test the mission uses, against **walls and pillars only**, at the drone's altitude. A marker is a cardboard box and a teammate a 30 cm airframe: radio goes through both | — |
+| Clear | true range + N(0, `los_noise_std_m`) | **A-9**, 0.05 m. DW1000 timestamp noise is 3–4.5 cm; testbeds report 2–8 cm |
+| Obstructed | dropped (`inf`) with probability `nlos_drop_probability`, otherwise true range + `nlos_bias_m` + N(0, `nlos_noise_std_m`) | **A-12**, 0.10; **A-11**, +0.15 m and 0.40 m, one apartment wall on a DW1000 |
+| Outlier | with probability `outlier_probability`, a further positive error uniform on [0, `outlier_max_m`] | **A-13**, 0 (off) and 1.5 m — the tail is documented, its rate is not |
+| Floor | a reported range is never negative | — |
+
+Every anchor is measured in the same tick, at 10 Hz (`rate_hz`, the PANS ceiling); the
+real tag sweeps them one at a time, and the skew is centimetres (F-23). Every draw comes
+from the sensor's own generator, four per anchor per sweep whatever the geometry, so the
+noise stream depends on the seed alone.
+
+### What is not modelled, and matters
+
+- **Wall count and material** (F-24). One wall's numbers apply behind three walls, which is
+  optimistic; through concrete the real link would die. Nobody has measured the venue's
+  walls.
+- **Reach** (A-10). Whether the module does 20 m or 60 m decides the anchor layout. From the
+  Start Area, 20 m does not reach the far end of the field — which is why the Known Search
+  Area's ten aids matter, and why the example puts four there.
+- **Calibration** (F-26). An uncalibrated antenna delay adds 10–30 cm per anchor pair; the
+  model assumes the team calibrates.
+- **Anchors above 2.0 m** (F-25): the obstruction test is made at the drone's altitude.
+- **The consumer.** A range-only sensor is half a feature until a `PoseSource` fuses it
+  ([ADR-0003](adr/0003-ground-truth-pose-and-perfect-comms.md)). That is the next piece of
+  platform work.
+
+### Placing anchors, legally
+
+An anchor is a `Landmark` of the tag's kind. A point (no footprint) is invisible to the ring
+and to collision, which is right for a radio, but a point at fixed coordinates in the Known
+Search Area can end up inside a generated wall; give it a tripod base, `radius_m=0.25`, and
+the generator draws around it while the ring and collision still ignore it. The rulebook's
+placement rules — any number in the Start Area, at most ten in the Known Search Area, none
+in the Unknown Search Area, each within 1 m x 1 m — are `validate_nav_aids(arena,
+("uwb_anchor",))` in `world/arena.py`. **The runner does not call it** (R-WORLD-9): a run
+with an anchor in the room is a legitimate experiment when you asked for it, and the check
+exists so that nobody quotes one without knowing. Collinear anchors leave a mirror
+ambiguity, so use both rows of the Start Area. `examples/04_uwb_ranging.py` does all of
+this and then grades the sensor from the log alone: true ranges from `states.npz`, anchor
+positions from `uwb.npz`, and the recorded arena to say which paths crossed a wall.

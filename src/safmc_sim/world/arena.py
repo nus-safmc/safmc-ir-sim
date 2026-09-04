@@ -53,6 +53,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Iterable
 
 import numpy as np
 from shapely.geometry import Polygon, box
@@ -68,6 +69,8 @@ from ..constants import (
     MARKER_HEIGHT_M,
     MIN_GAP_PILLAR_M,
     MIN_GAP_WALL_TO_WALL_M,
+    NAV_AID_FOOTPRINT_M,
+    NAV_AID_LIMIT_KNOWN_AREA,
     N_BONUS_VICTIMS,
     N_FIRES,
     N_VICTIMS,
@@ -94,6 +97,8 @@ __all__ = [
     "ArenaSpec",
     "ArenaConfig",
     "generate_arena",
+    "validate_arena",
+    "validate_nav_aids",
     "TARGET_KINDS",
 ]
 
@@ -757,6 +762,62 @@ def validate_arena(spec: ArenaSpec, drone_radius_m: float = DRONE_RADIUS_M) -> N
     _validate_footprints_clear(spec)
     _validate_reachability(spec, drone_radius_m)
     _validate_gaps(spec)
+
+
+def validate_nav_aids(spec: ArenaSpec, kinds: Iterable[str]) -> None:
+    """Refuse a navigation-aid layout the rulebook would not allow (R-WORLD-9).
+
+    ``kinds`` says which landmark kinds are navigation aids -- UWB anchors, surveyed tags --
+    because the arena cannot know: a kind is the sensor author's word, not the world's
+    (ADR-0005). Every kind listed is counted together, which is what the rule does: ten aids
+    in the Known Search Area means ten, whether they are tags or anchors or both.
+
+    Opt-in, and called by whoever builds the scenario, never by the runner. The simulator
+    reports what a fleet did and does not referee it (the take-off waves are scored the same
+    way), and a run with an anchor inside the Unknown Search Area is a legitimate experiment
+    -- "what would perfect localisation there be worth?" -- as long as its author asked for
+    it and its results say so. ``examples/04_uwb_ranging.py`` calls this on its anchors.
+
+    The rules, all from sec 3.3.1 of the 2026 Category Swarm booklet:
+
+    - r.14 f: each aid fits within 1 m x 1 m, with no height limit.
+    - r.15: at most ten in the Known Search Area, which teams may enter only during setup.
+    - r.16: any number in the Start Area.
+    - r.17: none in the Unknown Search Area, which teams may never enter.
+
+    Whether an aid is inside the Unknown Search Area is decided by the room's wall
+    centre-lines (:attr:`ArenaSpec.unknown_area`), inclusive: an aid on the room's wall is
+    in the room. r.14 b -- inside the perimeter -- is :func:`validate_arena`'s job.
+    """
+    wanted = set(kinds)
+    aids = [lm for lm in spec.all_landmarks if lm.kind in wanted]
+
+    too_wide = [lm.id for lm in aids if 2.0 * lm.radius_m > NAV_AID_FOOTPRINT_M]
+    if too_wide:
+        raise ArenaError(
+            f"navigation aid(s) {too_wide} exceed the {NAV_AID_FOOTPRINT_M:g} m x "
+            f"{NAV_AID_FOOTPRINT_M:g} m footprint the rules allow (sec 3.3.1 r.14 f)"
+        )
+
+    in_room = [lm.id for lm in aids if spec.in_unknown_area(lm.x, lm.y)]
+    if in_room:
+        raise ArenaError(
+            f"navigation aid(s) {in_room} are inside the Unknown Search Area, where the "
+            f"rules allow none (sec 3.3.1 r.17) -- teams may never enter the room to place "
+            f"one. Move them to the Start Area (unlimited, r.16) or the Known Search Area "
+            f"(at most {NAV_AID_LIMIT_KNOWN_AREA}, r.15)."
+        )
+
+    in_known = [
+        lm.id for lm in aids
+        if not spec.in_start_area(lm.x, lm.y) and not spec.in_unknown_area(lm.x, lm.y)
+    ]
+    if len(in_known) > NAV_AID_LIMIT_KNOWN_AREA:
+        raise ArenaError(
+            f"{len(in_known)} navigation aids in the Known Search Area, where the rules "
+            f"allow at most {NAV_AID_LIMIT_KNOWN_AREA} (sec 3.3.1 r.15): {in_known}. The "
+            f"Start Area takes any number (r.16)."
+        )
 
 
 def _validate_landmarks(spec: ArenaSpec) -> None:

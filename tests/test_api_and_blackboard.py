@@ -74,8 +74,9 @@ def test_observation_exposes_no_route_to_ground_truth():
     from collections.abc import Mapping
     from types import MappingProxyType
 
-    from safmc_sim.sensors.base import Sensor, TrueState
+    from safmc_sim.sensors.base import Sensor, TrueState, read_only
     from safmc_sim.sensors.marker_cam import MarkerDetection
+    from safmc_sim.sensors.uwb import UWBRanges
     from safmc_sim.sensors.scene import WorldScene
     from safmc_sim.sensors.tof_ring import ToFConfig, ToFRing
     from safmc_sim.world.landmark import Landmark
@@ -86,8 +87,12 @@ def test_observation_exposes_no_route_to_ground_truth():
         sensors=MappingProxyType({
             "tof": scan,
             "markers": (MarkerDetection("victim_0", "victim", 1.5, 0.1),),
+            # A surveyed anchor position is the team's configuration, not a leaked world
+            # position (R-POL-3 as amended); the walk still bans the Landmark itself.
+            "uwb": UWBRanges(("anchor_0",), read_only(np.array([[0.5, 0.5, 2.0]])),
+                             read_only(np.array([3.2]))),
         }),
-        stale_ticks=MappingProxyType({"tof": 0, "markers": 3}),
+        stale_ticks=MappingProxyType({"tof": 0, "markers": 3, "uwb": 1}),
         peers=MappingProxyType({"drone_01": MappingProxyType({"goal": [1.0, 2.0]})}),
         arena=ArenaInfo(20.0, 20.0, 1.4, 6.0, 600.0),
     )

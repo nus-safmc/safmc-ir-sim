@@ -82,6 +82,19 @@ class WorldScene:
     # -- the ray-castable scenes ----------------------------------------------------------
 
     @property
+    def structural_scene(self) -> RayScene:
+        """Walls and pillars only: what a radio path is obstructed by.
+
+        This is the scene for a sensor whose signal passes through a mission marker and a
+        teammate's airframe but not through a wall -- the UWB tag. It is **not** a sensing
+        scene: a ranging ray must use :meth:`sensing_scene`, which adds the solid landmarks
+        and the live drone bodies, or a 1.0 m marker would stop occluding the ring. And it is
+        not the scoring predicate either: the mission builds its own line-of-sight scene from
+        the arena (R-MISS-2) so that the two can never be confused by passing the wrong one.
+        """
+        return self._structural
+
+    @property
     def static_sensing_scene(self) -> RayScene:
         """Structure plus solid landmarks, without live drone bodies."""
         return self._static_sensing

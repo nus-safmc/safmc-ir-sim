@@ -39,8 +39,10 @@ ring and the camera of [06-sensors.md](06-sensors.md), with the flown geometry a
 ## Adding a sensor
 
 Three parts, one file, then one tuple entry. `examples/03_custom_sensor.py` is the complete
-runnable version; `sensors/base.py` has the contract's docstring. Nothing in the runner, the
-policy API or the recorder needs to know your sensor exists.
+runnable version; `sensors/base.py` has the contract's docstring; `sensors/uwb.py` is the
+same shape with real physics and a fidelity entry behind every number, if you want to see
+what a finished one looks like. Nothing in the runner, the policy API or the recorder needs
+to know your sensor exists.
 
 **1. The reading** — a frozen dataclass. It is the only thing a policy will ever see of your
 sensor, so make it what the real device reports and nothing more. Wrap arrays in
@@ -200,6 +202,20 @@ placed = dataclasses.replace(arena, landmarks=tags_on_the_doorways(arena))
 run(config, arena=placed)          # validated; header records arena_source: "supplied"
 ```
 
+**Where the rules let you put one.** A navigation aid — a UWB anchor, a surveyed tag — may
+stand anywhere in the Start Area, at most ten may stand in the Known Search Area, none may
+stand in the Unknown Search Area, and each must fit within 1 m x 1 m on its own tripod
+(booklet §3.3.1 r.14–17). `validate_nav_aids(arena, kinds)` in `world/arena.py` checks a
+layout against that, counting every kind you name together, and names the offending
+landmarks and the rule. **The runner never calls it** (R-WORLD-9): the arena cannot know
+which kinds are aids, and a layout the rules forbid is a legitimate experiment when you
+asked for it — what would perfect localisation in the room be worth? — so the check exists
+to make sure nobody quotes such a run without knowing. Call it where you build the
+scenario, as `examples/04_uwb_ranging.py` does. A point placed at fixed coordinates in the
+Known Search Area can also end up inside a generated wall; a small footprint
+(`radius_m=0.25`, a tripod base) makes it a flat mark the generator keeps clear, still
+invisible to the ring and to collision.
+
 A placed landmark with a footprint is fixed structure to the generator: walls and pillars
 keep their published gaps from a body, nothing is built over a flat mark, targets are not
 dropped on either, and the room is drawn clear of them. Validation rejects a landmark outside
@@ -228,20 +244,24 @@ hover.
 
 ## Sensors we expect to add
 
-None of these exist. Each is a config and a `sample()` away, and each needs a number nobody
-has measured. Listed so the shape of the work is visible and so the fidelity questions are
-asked before the code is written.
+One sensor from the first version of this table now exists: the **UWB ranging tag**,
+`sensors/uwb.py`, described in [06-sensors.md](06-sensors.md#the-uwb-ranging-tag--not-flown)
+and decided in [ADR-0006](adr/0006-uwb-ranging-sensor.md). It is the worked answer to the
+last column — every number it needs is an assumption with an ID, and the airframe still does
+not carry one. None of the rest exist. Each is a config and a `sample()` away, and each needs
+a number nobody has measured. Listed so the shape of the work is visible and so the fidelity
+questions are asked before the code is written.
 
 | Sensor | Reading | Perceives | Needs before it is a model rather than a template |
 |---|---|---|---|
 | **Nav-tag camera** | already the marker detector: `Landmark(kind="nav_tag")` + `MarkerCamConfig(kinds=...)` | `nav_tag` landmarks | The same A-4/A-5 measurements; a pose-fit error model if the detection is to feed a `PoseSource` |
 | **Vision cues** | a `(cue_id, kind, bearing, apparent size)` tuple from a nose-down camera | `vision_cue` / `start_mark` landmarks | The 45° pitch (F-6) actually modelled, so a floor mark enters view at a range set by altitude |
 | **Optical flow** | body-frame velocity plus a quality flag; reads `truth.vx, truth.vy, truth.z` | nothing placed — the floor | Flow-quality vs altitude and texture; this is what PX4 already fuses for the real height, so it belongs with a `PoseSource`, not just a sensor |
-| **UWB ranging** | range-only to each anchor, `inf` out of range | `uwb_anchor` landmarks | Ranging noise, NLOS bias behind walls, anchor placement the venue would allow. `examples/03_custom_sensor.py` is the template |
 | **Altimeter / downward ranger** | `z` with noise | the floor | Whether it sees a marker top as the floor; the real airframe gets height from PX4, not from a sensor the ESP reads |
 
-A sensor whose reading feeds *localisation* rather than *search* — flow, UWB, nav tags used
-for re-localisation — is only half a feature until there is a `PoseSource` that consumes it.
+A sensor whose reading feeds *localisation* rather than *search* — flow, nav tags used for
+re-localisation, and now the UWB tag — is only half a feature until there is a `PoseSource`
+that consumes it.
 That seam is [ADR-0003](adr/0003-ground-truth-pose-and-perfect-comms.md), and it is the
 highest-value single class in the project.
 

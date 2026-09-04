@@ -31,13 +31,18 @@ run["header"]["sensors"]           # every sensor: name, config type, rate, reco
 run["sensors"]["tof"]["ranges_m"]           # (T, N, 64) flattened (ranger, zone), CCW from the nose
 run["sensors"]["tof"]["zone_bearings_rad"]  # (64,) the bearing of each column. Use it -- see below.
 run["sensors"]["tof"]["sample_tick"]        # (T, N) the tick each row was sampled at; -1 is the pre-flight sample
+run["sensors"]["uwb"]["ranges_m"]           # (T, N, A) if the run carried the UWB tag; inf = nothing heard
+run["sensors"]["uwb"]["anchor_xyz_m"]       # (A, 3) the anchors, so the file can be graded without the simulator
 score_from_log("runs/sdlw_s3")     # recomputed from the log alone
 ```
 
 A sensor you add appears the same way, as `run["sensors"][name]`, if its `record()` returns
 fixed-shape arrays — see [Adding a sensor](10-adding-sensors-and-landmarks.md#adding-a-sensor). `sample_tick` is
 there so a held reading (a 2 Hz sensor between samples, a crashed drone) is never mistaken
-for a fresh one.
+for a fresh one. The UWB tag's `uwb.npz` stores no anchor ids — the log holds numeric arrays
+only — and needs none: column `j` of `ranges_m` is the `j`-th landmark of kind `uwb_anchor`
+in `header["arena"]["landmarks"]`, in that order. `examples/04_uwb_ranging.py` grades the
+sensor from these files alone.
 
 > **`ranges_m` columns are not firmware bin indices.** They are `(ranger, zone)` order,
 > anticlockwise from the nose; the firmware's `tof_scan_collapsed_t` holds the same 64 values

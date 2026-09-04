@@ -466,3 +466,83 @@ A sensor that feeds localisation — flow, UWB, nav tags — is half a feature u
 in Python, as `examples/03_custom_sensor.py` shows. The contract bounds a sensor's *reach*
 (R-SENS-15) but cannot bound its *use*: a sensor that returned every landmark's true position
 would pass every check. That is R-SENS-11's review obligation, not a property of the code.
+
+---
+
+## C9 — a UWB ranging tag on the sensor contract
+
+Commits `4b273e7` (spec) and the build commit that follows it. ADR-0006, R-SENS-17,
+R-WORLD-9, A-9..A-13, F-23..F-27.
+
+**Built.**
+
+- `sensors/uwb.py` — `UWBConfig` / `UWBRanges` / `UWBTag`. Range-only to every landmark of
+  the configured kind, in arena order: anchor ids, surveyed positions at one mount height,
+  one range per anchor with `inf` for nothing heard. Three-dimensional range; obstruction by
+  walls and pillars only, at the drone's altitude, through the same segment test the
+  mission uses; line-of-sight Gaussian noise, through-wall bias plus wider noise plus a
+  dropout probability, and a positive-outlier component that is off by default. Four draws
+  per anchor per sweep whatever the geometry. Recorded as `uwb.npz` with the anchor
+  positions as a static array. Not in `flown_sensors()`: the airframe carries no UWB.
+- `sensors/scene.py` — `WorldScene.structural_scene`, walls and pillars only, for a sensor
+  whose signal passes through a marker and a teammate. Not the scoring scene, which stays
+  with the mission.
+- `world/arena.py` — `validate_nav_aids(arena, kinds)`: the booklet's placement rules
+  (§3.3.1 r.14–17) as an opt-in check the runner never applies.
+- `constants.py` — `NAV_AID_*` from the booklet; `UWB_*` as A-9..A-13 with their sources;
+  `UWB_RATE_HZ` and `UWB_ANCHOR_HEIGHT_M` as deployment defaults.
+- `examples/04_uwb_ranging.py` — six anchors across both rows of the Start Area and four on
+  tripods in the Known Search Area, checked against the rules; a policy that reads the tag
+  by name; and a grade of the sensor from the log alone.
+- Docs: ADR-0006; SPEC R-SENS-17, R-WORLD-9, an R-POL-3 note, §12; FIDELITY A-9..A-13 and
+  F-23..F-27; a UWB section in `docs/06`; the nav-aid rules and the table update in
+  `docs/10`; `docs/07`, `docs/04`, ARCHITECTURE, README.
+
+**Verified — TESTED.** 312 tests. `tests/test_uwb.py` (33 items) checks: the defaults are the
+registered constants and the tag is not flown; eleven impossible configs refused at
+construction; the range is three-dimensional to the anchor at mount height; anchors come
+back in arena order and only the tag's kind; an empty sweep; beyond reach is `inf`; a wall
+biases while a marker and a teammate do not, and the ring disagrees on purpose;
+obstruction follows the drone's altitude; on a generated arena the tag's obstruction equals
+the mission's line-of-sight scene at 40 random poses; the noise model as a pure function —
+zero-mean Gaussian at A-9 in line of sight, biased and wider and dropped at A-11/A-12
+behind a wall, `inf` beyond reach, never negative, outliers off by default and positive
+when on; the noise stream is independent of the geometry; identical runs identical;
+appending the tag leaves the ring's stream untouched (R-DET-3); the reading reaches the
+policy by name, fresh every other tick, immutable, with no `Landmark` in it; an arena with
+anchors cannot be flown without the tag; the log holds `ranges_m` shaped `(ticks, agents,
+anchors)` and the anchor positions in the header's landmark order, and grading it from the
+log alone puts every line-of-sight error inside six sigma with a zero mean; recording does
+not change the run; `record_static()` before the first sample is refused; the example's
+layout passes the rules and runs. `tests/test_landmarks.py` (+5): any number of aids in the
+Start Area and ten in the Known Search Area pass; an eleventh is refused and kinds count
+together; an aid inside the room, or on its wall, is refused and one just outside is not;
+an aid wider than a metre is refused; the runner does not referee. The R-POL-4 walk now
+carries a UWB reading and still bans the `Landmark`; the units-suffix test covers
+`UWBConfig`.
+
+**Verified — MEASURED.** `examples/04_uwb_ranging.py`, seed 0, 10 drones, 60 s, ten anchors:
+6 000 fresh sweeps; 70.0 % of tag–anchor paths in line of sight, 93.2 % within 20 m; heard
+on 100 % of in-reach line-of-sight paths and 90.1 % of in-reach paths behind a wall (A-12
+is 0.10); line-of-sight error 0.000 ± 0.050 m (A-9 is 0.05); behind a wall +0.157 ± 0.398 m
+(A-11 is +0.15 and 0.40). `uwb.npz` is 204 kB for that run. Full suite 96 s.
+
+**Found while building.** `WorldScene` exposed no walls-and-pillars scene, so the first cut
+would have let a 1.0 m marker obstruct radio at cruise altitude and not above it. A UWB
+tag's `record_static()` cannot know its anchors until the first sample; the runner's order
+(sample at build, then begin recording) guarantees it, and the tag refuses to be recorded
+outside that order rather than writing an empty array. The log refuses string arrays, so
+anchor ids are recovered from the header's landmark order instead of stored. A point
+anchor at fixed coordinates in the Known Search Area can end up inside a generated wall;
+the example gives its Known-Area anchors a 0.25 m base so the generator draws around them.
+
+**Behaviour that changed.** None for existing runs: the tag is opt-in, `flown_sensors()` is
+unchanged, and a default run's log is unaffected. `WorldScene` gains a read-only property.
+
+**Open.** Every number is an assumption: A-10 (reach) first, then A-11/A-12 against the
+venue's actual walls. Obstruction is boolean — one wall's numbers behind any number of
+walls (F-24) — and calibration is assumed (F-26). No `PoseSource` consumes the tag yet;
+that is the next piece of work (ADR-0003), and until it exists a policy that wants a
+position from these ranges trilaterates for itself. The CLI has no `--sensors`, so the tag
+is configured in Python, as the example shows. The replay does not draw `uwb.npz`.
+

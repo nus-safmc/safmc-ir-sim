@@ -389,3 +389,81 @@ def test_a_supplied_arena_s_config_replaces_the_dead_one_in_the_log():
     assert result.config.arena_config == arena.config
     assert header["config"]["arena_config"]["n_pillars_known"] == 3
     assert header["seed"] == 1 and header["arena"]["seed"] == 5
+
+
+# -- R-WORLD-9: where a navigation aid may go ------------------------------------------------------
+#
+# sec 3.3.1 r.14-17 of the booklet: any number in the Start Area, at most ten in the Known
+# Search Area, none in the Unknown Search Area, each within 1 m x 1 m. Opt-in: the arena
+# cannot know which kinds are aids, so the caller says, and the runner never calls it.
+
+from safmc_sim import constants as K  # noqa: E402
+from safmc_sim.world.arena import validate_nav_aids  # noqa: E402
+
+
+def _known_area_column(arena, n, kind="uwb_anchor", x=19.0, prefix="a"):
+    """``n`` aids down the east edge of the Known Search Area, clear of the room on any seed:
+    the room's east wall never passes x = 17.95 (arena.py, the room's x range)."""
+    x0, y0, x1, y1 = arena.unknown_area
+    assert x1 < x
+    return tuple(Landmark(f"{prefix}{i}", kind, x, 7.0 + i * 1.0) for i in range(n))
+
+
+def test_any_number_of_aids_in_the_start_area_and_ten_in_the_known_area():
+    arena = generate_arena(0)
+    start = tuple(Landmark(f"s{i}", "uwb_anchor", 0.5 + i * 1.5, 0.5) for i in range(13))
+    known = _known_area_column(arena, K.NAV_AID_LIMIT_KNOWN_AREA)
+    placed = dataclasses.replace(arena, landmarks=start + known)
+    validate_arena(placed)
+    validate_nav_aids(placed, ("uwb_anchor",))          # r.15 and r.16: allowed
+
+
+def test_an_eleventh_aid_in_the_known_area_is_refused_and_kinds_count_together():
+    arena = generate_arena(0)
+    eleven = _known_area_column(arena, K.NAV_AID_LIMIT_KNOWN_AREA + 1)
+    with pytest.raises(ArenaError, match="at most 10"):
+        validate_nav_aids(dataclasses.replace(arena, landmarks=eleven), ("uwb_anchor",))
+    # Ten pass -- the check bites on the count, not on the column.
+    validate_nav_aids(dataclasses.replace(arena, landmarks=eleven[:-1]), ("uwb_anchor",))
+    # Six anchors and five tags are eleven aids (r.15 counts aids, not kinds)...
+    mixed = _known_area_column(arena, 6) + _known_area_column(arena, 5, "nav_tag", x=18.5, prefix="t")
+    with pytest.raises(ArenaError, match="11 navigation aids"):
+        validate_nav_aids(dataclasses.replace(arena, landmarks=mixed), ("uwb_anchor", "nav_tag"))
+    # ...but a kind the caller did not name is not an aid.
+    validate_nav_aids(dataclasses.replace(arena, landmarks=mixed), ("uwb_anchor",))
+
+
+def test_an_aid_inside_the_unknown_search_area_is_refused():
+    arena = generate_arena(3)
+    x0, y0, x1, y1 = arena.unknown_area
+    inside = Landmark("inside", "uwb_anchor", (x0 + x1) / 2, (y0 + y1) / 2)
+    on_the_wall = Landmark("on_wall", "uwb_anchor", x0, (y0 + y1) / 2)
+    just_outside = Landmark("outside", "uwb_anchor", x0 - 0.3, (y0 + y1) / 2)
+    for bad in (inside, on_the_wall):
+        with pytest.raises(ArenaError, match="Unknown Search Area"):
+            validate_nav_aids(dataclasses.replace(arena, landmarks=(bad,)), ("uwb_anchor",))
+    validate_nav_aids(dataclasses.replace(arena, landmarks=(just_outside,)), ("uwb_anchor",))
+
+
+def test_an_aid_wider_than_a_metre_is_refused():
+    arena = generate_arena(0)
+    tripod = Landmark("tripod", "uwb_anchor", 3.0, 1.0, radius_m=0.5)      # exactly 1 m: fine
+    stand = Landmark("stand", "uwb_anchor", 8.0, 1.0, radius_m=0.51)       # 1.02 m: not
+    validate_nav_aids(dataclasses.replace(arena, landmarks=(tripod,)), ("uwb_anchor",))
+    with pytest.raises(ArenaError, match="r.14"):
+        validate_nav_aids(dataclasses.replace(arena, landmarks=(stand,)), ("uwb_anchor",))
+
+
+def test_the_runner_does_not_referee_nav_aid_placement():
+    """A run with an anchor in the room is a legitimate experiment; only the check refuses it."""
+    from safmc_sim.sensors.tof_ring import ToFConfig
+
+    arena = generate_arena(3)
+    x0, y0, x1, y1 = arena.unknown_area
+    inside = Landmark("inside", "nav_tag", (x0 + x1) / 2, (y0 + y1) / 2)
+    placed = dataclasses.replace(arena, landmarks=(inside,))
+    cfg = RunConfig(seed=0, n_drones=10, duration_s=1.0, record=False, policy="sdlw",
+                    sensors=(ToFConfig(), MarkerCamConfig(kinds=TARGET_KINDS + ("nav_tag",))))
+    run(cfg, arena=placed)
+    with pytest.raises(ArenaError, match="r.17"):
+        validate_nav_aids(placed, ("nav_tag",))

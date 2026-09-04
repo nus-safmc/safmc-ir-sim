@@ -49,10 +49,19 @@ Mirrors [SPEC §12](SPEC.md#12-assumptions-register). Each is a named constant i
 | A-6 | Known Search Area depth | 14.0 m | Published in 2025, withdrawn in 2026. Derived as 20 − 6 |
 | A-7 | Unknown Search Area doorways | 2, each 1.0 m | Rulebook shows gaps in a not-to-scale diagram |
 | A-8 | ToF ring synchronous at tick rate | 20 Hz, zero skew | Same as F-1 |
+| A-9 | UWB line-of-sight ranging noise | 0.05 m std | Range to one anchor over a tape measure in line of sight, 1-20 m; the residual's std is this number and its slope is the calibration (F-26). DW1000-class modules publish 3-8 cm |
+| A-10 | UWB maximum range | 20 m | **Cheap and decisive.** Walk a tag away from an anchor in the hall until ranging stops. Datasheets say 60 m, hobby firmware reports 12-20 m indoors, and the answer decides whether Start Area anchors cover the field |
+| A-11 | UWB through-wall bias and spread | +0.15 m, 0.40 m std | Range through one of the venue's walls, and a pillar. The numbers are one apartment wall on a DW1000; the venue's material may bias by centimetres or kill the link |
+| A-12 | UWB through-wall dropout probability | 0.10 | The same experiment: the fraction of sweeps that return nothing. No published rate for hobby modules |
+| A-13 | UWB outlier probability and size | 0 (off), up to 1.5 m | A long line-of-sight log with people walking through; count errors beyond three sigma. The tail is documented, its rate is not, so it is off until measured |
 
 **A-4 is the one to measure first.** Detection range sets how much area a drone sweeps per metre
 flown, which is the dominant term in every search-policy comparison this simulator will produce.
 Getting it wrong by 2x changes which policy wins.
+
+**A-10 is the one to measure first for anything built on the UWB tag.** Every result on
+`sensors/uwb.py` is conditional on five unmeasured numbers and on a module the team has not
+bought; reach is the one that changes the answer to "where do the anchors go".
 
 ## 4. Inherited from ir-sim
 
@@ -93,4 +102,9 @@ Found during recon; recorded so nobody reintroduces them.
 | F-19 | `TOF_RATE_HZ` (15 Hz) is recorded but not used | The ring samples synchronously at the tick rate | Sensor physics we wrote down and did not implement; F-1 is its consequence. The sensor's FoV *is* now used — it derives the zone width — but only as an angle, not as a beam width (F-18) |
 | F-20 | The drone's airframe fits a 30 cm cube (`DRONE_BBOX_M`, the competition limit) | Collision uses `DRONE_RADIUS_M` = 0.18 m, i.e. a 36 cm diameter disc | That figure is the real VFH planner's *safety* radius, not the airframe. The simulated drone is about 20% wider than the real one -- conservative, so crashes are over- rather than under-reported |
 | F-21 | A drone between the camera and a tag hides the tag | The marker camera's occlusion test uses structure and solid landmarks only; other drones do not occlude it | A marker behind a teammate is reported as seen. Pre-existing behaviour, now stated. The ring *is* occluded by drones, so the two sensors disagree about teammates |
-| F-22 | — | `examples/03_custom_sensor.py` ships a range-only beacon sensor | A **template for the sensor contract, not a model of any hardware**: uncalibrated, invented noise, no wall bias, and the airframe carries no UWB. Any sensor added on the contract owes this ledger an entry before its readings are quoted |
+| F-22 | — | `examples/03_custom_sensor.py` ships a range-only beacon sensor | A **template for the sensor contract, not a model of any hardware**: uncalibrated, invented noise, no wall bias, and the airframe carries no UWB. Any sensor added on the contract owes this ledger an entry before its readings are quoted. *Since ADR-0006 the model is `sensors/uwb.py` (F-23..F-27 below); the template stays a template* |
+| F-23 | A UWB tag ranges to its anchors one at a time in TDMA slots of 3-4 ms, a 100 ms superframe on Decawave's PANS | Every anchor measured in the same tick, at 10 Hz | The skew across one sweep is under 30 ms, under 3 cm at cruise speed and below the LOS noise; the up-to-one-superframe latency is not modelled. The same simplification A-8 makes for the ring |
+| F-24 | Through-wall error depends on the wall's material and on how many are crossed; concrete or rebar kills the link outright | One boolean -- obstructed or not -- with one wall's numbers (A-11) behind any number of walls. Markers, placed bodies and teammates are transparent | Optimistic behind two or more walls, and the venue's walls are unmeasured. Counting crossings is one raycast helper away once someone has measured what a second wall costs |
+| F-25 | Radio line of sight is a 3D segment from the tag to an antenna up a tripod | Tested at the drone's altitude through the 2.5D height gate | Exact while anchors stand no taller than the 2.0 m inner walls; above that the model over-reports obstruction, which is the safe direction to be wrong |
+| F-26 | Antenna delay and received-level bias: 10-30 cm per anchor pair uncalibrated, drifting about 3 cm per metre of range | No per-anchor bias; the only bias is the through-wall one | Assumes the team calibrates, which the literature says gets it under 1 cm. An uncalibrated kit is several times worse than this model in line of sight |
+| F-27 | A tag reports a quality factor or received signal level per anchor; anchors themselves can fail or be jammed | A range or `inf` per anchor, nothing else; anchors never fail | A policy cannot weight ranges by quality here. On the real kit it could, a little; the number that matters is still whether the range is biased, which no quality factor reliably says |

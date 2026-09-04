@@ -55,6 +55,21 @@ N_FIRES = 4                     # sec 3.3.5 r.2
 MARKER_FOOTPRINT_M = 0.30       # sec 3.3.3 r.3, 30 x 30 x 100 cm
 MARKER_HEIGHT_M = 1.00          # sec 3.3.3 r.3 -- taller than cruise altitude, so it occludes
 
+# --- navigation aids: where the team may put a UWB anchor or a fiducial ------------------
+#
+# sec 3.3.1 r.14: "Any navigation aids (e.g. ultra-wideband systems, fiducials) must be:
+# placed during setup time; placed within the perimeter walls; easily removable; properly
+# secured, e.g. will not topple over; cannot be secured to overhead structures; within
+# 1 m x 1 m (no height limit)." So an anchor stands on its own tripod, and how high is up to
+# the team. sec 6.3 permits ultra-wideband explicitly (5.7-5.9 GHz is banned; UWB is not).
+NAV_AID_LIMIT_KNOWN_AREA = 10   # sec 3.3.1 r.15, "A maximum of TEN (10) navigation aids is
+                                # allowed in the Known Search Area"
+NAV_AID_LIMIT_START_AREA = None  # sec 3.3.1 r.16, "no limit on the number of navigation aids
+                                # within the Start Area"
+NAV_AID_LIMIT_UNKNOWN_AREA = 0  # sec 3.3.1 r.17, "Navigation aids are NOT allowed in the
+                                # Unknown Search Area"
+NAV_AID_FOOTPRINT_M = 1.0       # sec 3.3.1 r.14 f, "Within 1m x 1m (no height limit)"
+
 # --------------------------------------------------------------------------------------
 # HW -- read from nus-safmc/esp-everything at 99cde05 ("Competition over", 2026-04-02)
 # --------------------------------------------------------------------------------------
@@ -120,9 +135,37 @@ UNKNOWN_AREA_DOORWAYS = 2       # A-7  rulebook diagram is explicitly not to sca
 UNKNOWN_AREA_DOORWAY_M = 1.0    # A-7
 YAW_RATE_MAX_RADS = 1.5              # A-3-adjacent; no published limit, PX4 default territory
 
+# --- UWB ranging: a sensor the airframe does NOT carry (ADR-0006) ------------------------
+#
+# The module is unchosen, so nothing here is HW. These are literature values for
+# DW1000/DW3000-class hobby modules (Qorvo DWM1001, Bitcraze Loco, Pozyx, Makerfabs MaUWB),
+# each standing in for a measurement the team has not made; docs/FIDELITY.md section 3 says
+# what would resolve each. A-10 is the one to measure first for THIS arena: whether the
+# module reaches 20 m or 60 m decides where the anchors have to go.
+UWB_LOS_NOISE_STD_M = 0.05      # A-9   DW1000 timestamp noise 3-4.5 cm; testbeds 2-8 cm
+UWB_MAX_RANGE_M = 20.0          # A-10  datasheet 60 m LOS; hobby firmware 12-20 m indoors
+UWB_NLOS_BIAS_M = 0.15          # A-11  one apartment wall on a DW1000: +0.49 ns mean
+UWB_NLOS_NOISE_STD_M = 0.40     # A-11  ...with a 1.39 ns spread (Kolakowski, arXiv 2403.19706)
+UWB_NLOS_DROP_PROBABILITY = 0.10  # A-12  no published rate for hobby modules
+UWB_OUTLIER_PROBABILITY = 0.0   # A-13  the heavy positive tail is documented, its rate is not
+UWB_OUTLIER_MAX_M = 1.5         # A-13  "up to 1.5 m" through-wall; p99 1.53 m behind a body
+
 # Simulation defaults (not claims about the world)
 DEFAULT_TICK_HZ = 20.0          # matches NAV_RATE_HZ
 DEFAULT_SEED = 0
+
+UWB_RATE_HZ = 10.0
+"""One full sweep of the anchors per 100 ms. That is the ceiling of Decawave's PANS firmware
+(a 100 ms TDMA superframe, four anchors per tag per frame) and what a MaUWB board delivers
+with ten tag slots of 10 ms. A deployment choice, not a measurement; it must divide the tick
+rate, so 20 Hz is the other sensible value on the 20 Hz loop."""
+
+UWB_ANCHOR_HEIGHT_M = 2.0
+"""Where the anchors' antennas sit. The rules put no limit on a navigation aid's height
+(sec 3.3.1 r.14 f) and forbid hanging one from the ceiling (r.14 e), so this is a tripod. Two
+metres is the inner walls' height, which is also the tallest an anchor can be before the
+line-of-sight test -- made at the drone's altitude -- starts to over-report obstruction
+(F-25). A deployment choice; set it to what the team actually erects."""
 
 START_SPACING_M = 1.25
 """Centre-to-centre spacing of the take-off grid in the Start Area.

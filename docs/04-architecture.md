@@ -48,6 +48,7 @@ Everything crossing a horizontal line is a typed, frozen dataclass. Nothing belo
 | `sensors/raycast.py` | Vectorised closed-form ray casting with height gating | R-SENS-6, R-SENS-7 |
 | `sensors/tof_ring.py` | The 8-ranger ring, on the contract | R-SENS-1..5 |
 | `sensors/marker_cam.py` | Landmark detection by kind with FOV + LOS + range, on the contract | R-SENS-10 |
+| `sensors/uwb.py` | A UWB ranging tag on the contract, not flown: range-only to `uwb_anchor` landmarks, obstructed by structure, a cited noise model | R-SENS-17 |
 | `world/landmark.py` | `Landmark`: what a sensor may perceive that is not structure | R-WORLD-7, R-WORLD-8 |
 | `world/arena.py` | Seeded arena generation and validation; emits ir-sim YAML | R-WORLD-1..6 |
 | `api.py` | `Observation`, `Command`, `Policy`, the policy registry | R-POL-1..7 |
