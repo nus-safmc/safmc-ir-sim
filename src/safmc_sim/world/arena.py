@@ -330,6 +330,10 @@ class ArenaConfig:
                 "inner_wall is gap-checked all-pairs and could never sit 2 m from every maze "
                 "wall. Set maze_corridor_m=None to go back to free-standing baffles."
             )
+        for name in ("n_victims", "n_bonus_victims", "n_fires", "n_inner_walls",
+                     "n_pillars_known", "n_unknown_walls", "n_pillars_unknown", "n_maze_loops"):
+            if getattr(self, name) < 0:
+                raise ConfigError(f"{name} must be >= 0, got {getattr(self, name)}")
         if self.maze_anchor_gap_m < 0.0:
             raise ConfigError(
                 f"maze_anchor_gap_m must be >= 0, got {self.maze_anchor_gap_m}"

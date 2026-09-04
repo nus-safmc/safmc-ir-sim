@@ -105,7 +105,6 @@ def arena_from_dict(data: dict[str, Any]):
     raw = dict(data.get("config", {}))
     if "inner_wall_length_range_m" in raw:
         raw["inner_wall_length_range_m"] = tuple(raw["inner_wall_length_range_m"])
-    raw["landmarks"] = tuple(Landmark(**lm) for lm in raw.get("landmarks", []))
     known = {f.name for f in dataclasses.fields(ArenaConfig)}
     unknown_keys = set(raw) - known
     if unknown_keys:
@@ -118,12 +117,16 @@ def arena_from_dict(data: dict[str, Any]):
     # failure carrying the config exists to prevent: a map generated at min_gap_wall_m=1.4
     # silently revalidates against 2.0 and is rejected for a violation it never committed, or
     # passes and is then recorded in the run log as having been flown at 2.0.
+    # Checked BEFORE landmarks is decoded. An earlier cut assigned raw["landmarks"] first,
+    # which put the key in `raw` unconditionally and so exempted the one field whose loss is
+    # both silent and lossy -- a map file missing it loaded with no landmarks at all.
     missing = known - set(raw)
     if missing:
         raise LogFormatError(
             f"arena file is missing ArenaConfig fields: {sorted(missing)}. Loading them from "
             f"this build's defaults would misreport the arena the map was generated under."
         )
+    raw["landmarks"] = tuple(Landmark(**lm) for lm in raw["landmarks"])
     config = ArenaConfig(**raw)
 
     return ArenaSpec(

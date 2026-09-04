@@ -299,7 +299,13 @@ def generate_maze(
                     # -- so the knob changed nothing about the property it claimed to control,
                     # and an arena labelled "generated under the all-pairs reading" was still an
                     # anchored maze.
-                    lo, hi = lo + anchor_gap_m, hi - anchor_gap_m
+                    # anchor_gap_m + t/2, not anchor_gap_m. A run's end is retracted from the
+                    # perpendicular run's *centre line*, and that neighbour's polygon extends
+                    # thickness/2 past it, so retracting by the gap alone leaves gap - t/2 of
+                    # actual air -- 1.950 m at the documented 2.0 m setting. This is the same
+                    # face-versus-centre-line error the room-to-perimeter gap already made once.
+                    inset = anchor_gap_m + t / 2.0
+                    lo, hi = lo + inset, hi - inset
                 if hi - lo < t:
                     # A run shorter than its own thickness is not a wall. It would also be a
                     # degenerate ray-cast segment, which the raycaster classes as parallel and

@@ -314,3 +314,67 @@ def test_an_anchor_gap_that_consumes_every_wall_is_refused_not_shipped():
             continue
         assert [w for w in a.walls if w.kind == "maze_wall"]
     assert refused, "the 2.0 m setting is expected to be infeasible for some seeds"
+
+
+def test_the_island_reading_really_leaves_the_published_gap():
+    """Retraction measures to the neighbour's face, not its centre line.
+
+    A run's end is pulled back from the perpendicular run's *centre line*, and that neighbour's
+    polygon extends thickness/2 past it — so retracting by the gap alone left gap − t/2 of real
+    air: 1.950 m at the documented 2.0 m setting. The same face-versus-centre-line error the
+    room-to-perimeter gap already made once.
+    """
+    # 60 seeds, not 24: the shortfall needs a run whose retracted end lands against a
+    # perpendicular neighbour, and seeds 0-23 happen not to draw one. A range that cannot
+    # observe the defect is a test that cannot fail.
+    worst, feasible = float("inf"), 0
+    for seed in range(60):
+        try:
+            a = generate_arena(seed, ArenaConfig(maze_anchor_gap_m=K.MIN_GAP_WALL_TO_WALL_M))
+        except ArenaError:
+            continue
+        feasible += 1
+        maze = [w.polygon() for w in a.walls if w.kind == "maze_wall"]
+        others = maze + [w.polygon() for w in a.walls if w.kind == "unknown_wall"]
+        for p in maze:
+            for q in others:
+                if q is not p:
+                    worst = min(worst, p.distance(q))
+    assert feasible, "no seed produced an island arena to measure"
+    assert worst >= K.MIN_GAP_WALL_TO_WALL_M - 1e-9, (
+        f"island walls are only {worst:.4f} m apart, below the published "
+        f"{K.MIN_GAP_WALL_TO_WALL_M} m"
+    )
+
+
+def test_a_missing_landmarks_key_is_refused_like_any_other():
+    """`landmarks` was the one field exempt from the missing-key check, and the only one whose
+    loss is silent *and* lossy: the map loaded with no landmarks at all."""
+    data = arena_to_dict(generate_arena(0))
+    del data["config"]["landmarks"]
+    with pytest.raises(LogFormatError, match="missing ArenaConfig fields"):
+        arena_from_dict(data)
+
+
+@pytest.mark.parametrize("field", ["n_victims", "n_maze_loops", "n_pillars_known",
+                                   "n_inner_walls", "n_pillars_unknown"])
+def test_a_negative_count_is_refused_at_construction(field):
+    """n_victims=-1 escaped as a bare StopIteration from the per-marker stream pool -- an
+    internal error leaking out of a config mistake, against the fail-fast house rule.
+
+    n_fires and n_bonus_victims are not here because they carry a stricter rule already:
+    3.3.9 r.2 guarantees the room holds at least one of each, so they must be >= 1.
+    """
+    from safmc_sim.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="must be >= 0"):
+        ArenaConfig(**{field: -1})
+
+
+@pytest.mark.parametrize("field", ["n_fires", "n_bonus_victims"])
+def test_the_room_must_keep_its_guaranteed_marker(field):
+    """3.3.9 r.2: the Unknown Search Area contains bonus victim(s) and fire(s)."""
+    from safmc_sim.errors import ConfigError
+
+    with pytest.raises(ConfigError, match=">= 1"):
+        ArenaConfig(**{field: -1})
