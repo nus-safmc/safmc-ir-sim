@@ -40,8 +40,8 @@ A sensor you add appears the same way, as `run["sensors"][name]`, if its `record
 fixed-shape arrays — see [Adding a sensor](10-adding-sensors-and-landmarks.md#adding-a-sensor). `sample_tick` is
 there so a held reading (a 2 Hz sensor between samples, a crashed drone) is never mistaken
 for a fresh one. The UWB tag's `uwb.npz` stores no anchor ids — the log holds numeric arrays
-only — and needs none: column `j` of `ranges_m` is the `j`-th landmark of kind `uwb_anchor`
-in `header["arena"]["landmarks"]`, in that order. `examples/04_uwb_ranging.py` grades the
+only — and needs none: column `j` of `ranges_m` is the `j`-th landmark of the tag's
+configured kind (default `uwb_anchor`) in `header["arena"]["landmarks"]`, in that order. `examples/04_uwb_ranging.py` grades the
 sensor from these files alone.
 
 > **`ranges_m` columns are not firmware bin indices.** They are `(ranger, zone)` order,

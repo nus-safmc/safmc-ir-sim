@@ -35,6 +35,7 @@ flowchart TB
         BASE["sensors/base.py<br/><i>the sensor contract</i>"]
         RING["sensors/tof_ring.py"]
         CAM["sensors/marker_cam.py"]
+        UWB["sensors/uwb.py<br/><i>opt-in</i>"]
         RAY["sensors/raycast.py"]
     end
 
@@ -45,11 +46,11 @@ flowchart TB
     RUN -->|"calls step(obs)"| POL
     RUN --> MIS & REC & BB & PS
     RUN -->|"sample(truth, world)"| BASE
-    BASE --- RING & CAM
+    BASE --- RING & CAM & UWB
     SEN -->|"implements"| BASE
     SEN -.->|"places"| ARENA
     RUN -->|"env.step(velocity)"| IRSIM
-    RING & CAM --> RAY
+    RING & CAM & UWB --> RAY
     ARENA --> RAY
     ARENA -->|"builds the scene"| IRSIM
 

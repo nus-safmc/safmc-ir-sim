@@ -228,26 +228,32 @@ positions are the team's own configuration — the same `ArenaConfig` that place
 | Reach | Beyond `max_range_m`: `inf` | **A-10**, 20 m. Datasheets say 60 m; hobby firmware delivers 12–20 m indoors |
 | Obstruction | The line-of-sight test the mission uses, against **walls and pillars only**, at the drone's altitude. A marker is a cardboard box and a teammate a 30 cm airframe: radio goes through both | — |
 | Clear | true range + N(0, `los_noise_std_m`) | **A-9**, 0.05 m. DW1000 timestamp noise is 3–4.5 cm; testbeds report 2–8 cm |
-| Obstructed | dropped (`inf`) with probability `nlos_drop_probability`, otherwise true range + `nlos_bias_m` + N(0, `nlos_noise_std_m`) | **A-12**, 0.10; **A-11**, +0.15 m and 0.40 m, one apartment wall on a DW1000 |
+| Obstructed | dropped (`inf`) with probability `nlos_drop_probability`, otherwise true range + `nlos_bias_m` + N(0, `nlos_noise_std_m`) | **A-12**, 0.10; **A-11**, +0.15 m and 0.40 m: 0.49 ns and 1.39 ns (0.42 m, rounded) through one wall or obstacle on a DW1000 in a concrete-panel flat |
 | Outlier | with probability `outlier_probability`, a further positive error uniform on [0, `outlier_max_m`] | **A-13**, 0 (off) and 1.5 m — the tail is documented, its rate is not |
 | Floor | a reported range is never negative | — |
 
-Every anchor is measured in the same tick, at 10 Hz (`rate_hz`, the PANS ceiling); the
-real tag sweeps them one at a time, and the skew is centimetres (F-23). Every draw comes
+Every anchor is measured in the same tick, at 10 Hz (`rate_hz`); the real tag sweeps them
+one at a time in 3–4 ms slots, so the first-to-last skew is under 40 ms for ten anchors and
+under 2 cm at cruise speed. PANS itself returns four ranges per 100 ms frame; a ten-anchor
+sweep at 10 Hz assumes MaUWB-class firmware (F-23). Every draw comes
 from the sensor's own generator, four per anchor per sweep whatever the geometry, so the
 noise stream depends on the seed alone.
 
 ### What is not modelled, and matters
 
-- **Wall count and material** (F-24). One wall's numbers apply behind three walls, which is
-  optimistic; through concrete the real link would die. Nobody has measured the venue's
-  walls.
-- **Reach** (A-10). Whether the module does 20 m or 60 m decides the anchor layout. From the
-  Start Area, 20 m does not reach the far end of the field — which is why the Known Search
-  Area's ten aids matter, and why the example puts four there.
+- **Wall count and material** (F-24). One wall's numbers apply behind three, where the source
+  measured four times the bias — through concrete panels that still ranged; metal is where a
+  link dies. Nobody has measured the venue's walls.
+- **Reach** (A-10). At 20 m the whole field is within reach of three Start Area anchors, only
+  just; at the 12 m hobby-firmware floor the far third hears none of them. Even in reach, six
+  anchors in a 5 m-deep strip give poor along-field geometry beyond about 14 m and the room's
+  walls obstruct — which is why the Known Search Area's ten aids matter, and why the example
+  puts four there.
 - **Calibration** (F-26). An uncalibrated antenna delay adds 10–30 cm per anchor pair; the
   model assumes the team calibrates.
-- **Anchors above 2.0 m** (F-25): the obstruction test is made at the drone's altitude.
+- **Anchors above 2.0 m** (F-25): the obstruction test is made at the drone's altitude, exact
+  up to 2.0 m — every wall and pillar an interior path can cross is 2.0 m — and over-reporting
+  obstruction above.
 - **The consumer.** A range-only sensor is half a feature until a `PoseSource` fuses it
   ([ADR-0003](adr/0003-ground-truth-pose-and-perfect-comms.md)). That is the next piece of
   platform work.

@@ -471,8 +471,9 @@ would pass every check. That is R-SENS-11's review obligation, not a property of
 
 ## C9 — a UWB ranging tag on the sensor contract
 
-Commits `4b273e7` (spec) and the build commit that follows it. ADR-0006, R-SENS-17,
-R-WORLD-9, A-9..A-13, F-23..F-27.
+Commits `4b273e7` (spec), `dc8689a` (build) and the audit commit after it. ADR-0006,
+R-SENS-17, R-WORLD-9, A-9..A-13, F-23..F-27. Closes C8's first open item: a sensor beyond
+the flown two is now a model of something, with every number it needs registered.
 
 **Built.**
 
@@ -498,9 +499,9 @@ R-WORLD-9, A-9..A-13, F-23..F-27.
   F-23..F-27; a UWB section in `docs/06`; the nav-aid rules and the table update in
   `docs/10`; `docs/07`, `docs/04`, ARCHITECTURE, README.
 
-**Verified — TESTED.** 312 tests. `tests/test_uwb.py` (33 items) checks: the defaults are the
-registered constants and the tag is not flown; eleven impossible configs refused at
-construction; the range is three-dimensional to the anchor at mount height; anchors come
+**Verified — TESTED.** 321 tests. `tests/test_uwb.py` (39 items) checks: the defaults are the
+registered constants and the tag is not flown; twelve impossible configs refused by
+`UWBConfig` and a rate that does not divide the tick by `RunConfig`; the range is three-dimensional to the anchor at mount height; anchors come
 back in arena order and only the tag's kind; an empty sweep; beyond reach is `inf`; a wall
 biases while a marker and a teammate do not, and the ring disagrees on purpose;
 obstruction follows the drone's altitude; on a generated arena the tag's obstruction equals
@@ -512,20 +513,27 @@ appending the tag leaves the ring's stream untouched (R-DET-3); the reading reac
 policy by name, fresh every other tick, immutable, with no `Landmark` in it; an arena with
 anchors cannot be flown without the tag; the log holds `ranges_m` shaped `(ticks, agents,
 anchors)` and the anchor positions in the header's landmark order, and grading it from the
-log alone puts every line-of-sight error inside six sigma with a zero mean; recording does
-not change the run; `record_static()` before the first sample is refused; the example's
-layout passes the rules and runs. `tests/test_landmarks.py` (+5): any number of aids in the
-Start Area and ten in the Known Search Area pass; an eleventh is refused and kinds count
-together; an aid inside the room, or on its wall, is refused and one just outside is not;
-an aid wider than a metre is refused; the runner does not referee. The R-POL-4 walk now
-carries a UWB reading and still bans the `Landmark`; the units-suffix test covers
-`UWBConfig`.
+log alone puts every line-of-sight error inside six sigma with a mean within 2 cm of zero
+(measured 0.000 m); recording does not change the run; `record_static()` before the first
+sample is refused; the example's layout passes the rules and runs. After the audit: a
+mission kind is refused; a subclass that skipped `super().__post_init__()` is caught at
+build; numpy scalars are accepted and a bool is not; an anchor on the field's edge is never
+obstructed by the perimeter; the noise stream is independent of reach as well as of walls.
+`tests/test_landmarks.py` (+6): any number of aids in the Start Area and ten in the Known
+Search Area pass; an eleventh is refused and kinds count together; an aid inside the room,
+or on its wall, is refused and one just outside is not; an aid wider than a metre is
+refused; the runner does not referee; a string or an empty `kinds` is refused rather than
+silently passed. `tests/test_sensor_primitive.py` (+2): a reading's array cannot be made
+writable again, on its own or through the ring's scan. The R-POL-4 walk now carries a UWB
+reading and still bans the `Landmark`; the units-suffix test covers `UWBConfig`.
 
 **Verified — MEASURED.** `examples/04_uwb_ranging.py`, seed 0, 10 drones, 60 s, ten anchors:
 6 000 fresh sweeps; 70.0 % of tag–anchor paths in line of sight, 93.2 % within 20 m; heard
 on 100 % of in-reach line-of-sight paths and 90.1 % of in-reach paths behind a wall (A-12
 is 0.10); line-of-sight error 0.000 ± 0.050 m (A-9 is 0.05); behind a wall +0.157 ± 0.398 m
-(A-11 is +0.15 and 0.40). `uwb.npz` is 204 kB for that run. Full suite 96 s.
+(A-11 is +0.15 and 0.40). `uwb.npz` is 207 kB (206,636 bytes) for that run; the numbers are
+identical before and after the audit fixes. The full suite takes about a minute on a laptop
+(54–96 s across three machines).
 
 **Found while building.** `WorldScene` exposed no walls-and-pillars scene, so the first cut
 would have let a 1.0 m marker obstruct radio at cruise altitude and not above it. A UWB
@@ -538,6 +546,43 @@ the example gives its Known-Area anchors a 0.25 m base so the generator draws ar
 
 **Behaviour that changed.** None for existing runs: the tag is opt-in, `flown_sensors()` is
 unchanged, and a default run's log is unaffected. `WorldScene` gains a read-only property.
+
+**Audited.** Two independent adversarial audits — one against the code and the spec, one
+against every claim in the docs — and a skeptic pass on the second, which upheld 19 of its
+36 findings, upheld 12 in part and refuted 5. What changed code, all now under test:
+
+- **A tag could range to the mission markers.** `UWBConfig(kind="victim")` was accepted and
+  reported every victim's true position as a surveyed anchor on the first sweep, and the
+  R-POL-4 walk could not see it, because a position array is exactly what the reading may
+  carry. Both auditors found it. Mission kinds are refused, at construction and at build.
+- **A read-only array could be made writable again.** numpy allows `flags.writeable = True`
+  on an array that owns its memory, which `read_only()`'s copy did; an auditor moved a UWB
+  anchor for the rest of a run and wrote `-123` into a held ToF scan and so into the log.
+  Every sensor was exposed. `read_only()` now lays the copy over a `bytes` object, which
+  refuses the flip, and the build-time check walks the base chain down to it.
+- **`validate_nav_aids(arena, "uwb_anchor")` approved anything.** A string is a sequence of
+  letters, so nothing counted as an aid. A string, or an empty `kinds`, is refused.
+- **An anchor on the field's edge was obstructed by the perimeter** one time in a hundred,
+  by rounding in the strict line-of-sight comparison. `segment_clear` tolerates a nanometre.
+- **A sloppy subclass ran silently wrong.** A config that skipped `super().__post_init__()`
+  with `nlos_drop_probability=5.0` flew a whole mission with every obstructed range dropped.
+  The config is re-validated at build, as the arena re-validates its landmarks.
+- **A surviving mutant.** Drawing the Gaussian only for anchors in reach passed all 33
+  tests; the geometry-independence test now varies reach as well as walls, and kills it.
+- numpy scalars are accepted; a bool is refused with a reason that is true.
+
+Doc claims the audits falsified and that were corrected: "20 m does not reach the far end
+of the field" (three Start Area anchors reach every point at 20 m; at 12 m the far third
+hears none); "give them a footprint for a blind control" (a footprint alone is still
+refused); "through concrete the link would die" (the measurement A-11 rests on was made
+through pre-stressed concrete panels, which ranged with a +0.15 m bias); "nobody has
+measured a second wall" (the same table gives +0.58 m and 0.61 m); "a full sweep at 10 Hz is
+the PANS ceiling" (PANS returns four ranges per frame); the skew arithmetic; the F-number
+range; the 1.39 ns → 0.40 m rounding; an R-SENS-7 citation that should have been R-MISS-2;
+"eleven configs refused at construction"; "a zero mean"; 204 kB; 96 s; and several lists of
+"the two sensors". Refuted and kept: §6.3 does name ultra-wideband as acceptable; r.15 does
+say teams enter the Known Search Area only during setup; F-25's "no taller than the 2.0 m
+inner walls" is the exact condition for this arena.
 
 **Open.** Every number is an assumption: A-10 (reach) first, then A-11/A-12 against the
 venue's actual walls. Obstruction is boolean — one wall's numbers behind any number of

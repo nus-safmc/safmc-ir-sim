@@ -789,7 +789,16 @@ def validate_nav_aids(spec: ArenaSpec, kinds: Iterable[str]) -> None:
     centre-lines (:attr:`ArenaSpec.unknown_area`), inclusive: an aid on the room's wall is
     in the room. r.14 b -- inside the perimeter -- is :func:`validate_arena`'s job.
     """
+    if isinstance(kinds, str):
+        # set("uwb_anchor") is a set of letters, and then nothing is an aid and every layout
+        # passes -- the most natural wrong call approved anything. An auditor made it.
+        raise ArenaError(
+            f"kinds must be a sequence of landmark kinds, got the string {kinds!r}; "
+            f"write ({kinds!r},)"
+        )
     wanted = set(kinds)
+    if not wanted:
+        raise ArenaError("kinds is empty, so nothing would count as a navigation aid")
     aids = [lm for lm in spec.all_landmarks if lm.kind in wanted]
 
     too_wide = [lm.id for lm in aids if 2.0 * lm.radius_m > NAV_AID_FOOTPRINT_M]

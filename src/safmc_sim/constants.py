@@ -63,7 +63,8 @@ MARKER_HEIGHT_M = 1.00          # sec 3.3.3 r.3 -- taller than cruise altitude, 
 # 1 m x 1 m (no height limit)." So an anchor stands on its own tripod, and how high is up to
 # the team. sec 6.3 permits ultra-wideband explicitly (5.7-5.9 GHz is banned; UWB is not).
 NAV_AID_LIMIT_KNOWN_AREA = 10   # sec 3.3.1 r.15, "A maximum of TEN (10) navigation aids is
-                                # allowed in the Known Search Area"
+                                # allowed in the Known Search Area. Teams are allowed to enter
+                                # the Known Search Area only during setup time"
 NAV_AID_LIMIT_START_AREA = None  # sec 3.3.1 r.16, "no limit on the number of navigation aids
                                 # within the Start Area"
 NAV_AID_LIMIT_UNKNOWN_AREA = 0  # sec 3.3.1 r.17, "Navigation aids are NOT allowed in the
@@ -144,21 +145,41 @@ YAW_RATE_MAX_RADS = 1.5              # A-3-adjacent; no published limit, PX4 def
 # module reaches 20 m or 60 m decides where the anchors have to go.
 UWB_LOS_NOISE_STD_M = 0.05      # A-9   DW1000 timestamp noise 3-4.5 cm; testbeds 2-8 cm
 UWB_MAX_RANGE_M = 20.0          # A-10  datasheet 60 m LOS; hobby firmware 12-20 m indoors
-UWB_NLOS_BIAS_M = 0.15          # A-11  one apartment wall on a DW1000: +0.49 ns mean
-UWB_NLOS_NOISE_STD_M = 0.40     # A-11  ...with a 1.39 ns spread (Kolakowski, arXiv 2403.19706)
+UWB_NLOS_BIAS_M = 0.15          # A-11  one wall or obstacle, DW1000, concrete-panel flat: +0.49 ns
+UWB_NLOS_NOISE_STD_M = 0.40     # A-11  ...spread 1.39 ns = 0.42 m, rounded (TELFOR 2017, Table 1)
 UWB_NLOS_DROP_PROBABILITY = 0.10  # A-12  no published rate for hobby modules
 UWB_OUTLIER_PROBABILITY = 0.0   # A-13  the heavy positive tail is documented, its rate is not
 UWB_OUTLIER_MAX_M = 1.5         # A-13  "up to 1.5 m" through-wall; p99 1.53 m behind a body
+
+# Sources for the UWB block, one per number (docs/README.md asks for a URL per claim):
+#   A-9   DW1000 timestamp noise 100-150 ps (3-4.5 cm) and DS-TWR 8.2 cm mean absolute error
+#         with per-pair bias up to 31 cm uncalibrated: Rathje & Landsiedel, arXiv 2410.12826.
+#         LOS median 4 cm, p99 32 cm: PMC10575093. Timing std 0.2 ns: Kolakowski, below.
+#   A-10  "60 m line-of-sight range typical": DWM1001 datasheet (Decawave/Qorvo). 12-20 m
+#         indoors on hobby firmware: cnx-software.com MaUWB DW3000 review, 2024-04-16;
+#         github.com/thotro/arduino-dw1000 issue 19.
+#   A-11  M. Kolakowski, J. Modelski, "First path component power based NLOS mitigation in
+#         UWB positioning system", TELFOR 2017, Table 1 (arXiv 2403.19706,
+#         doi 10.1109/TELFOR.2017.8249313). Read in full; the numbers are verbatim.
+#   A-12  none found. The dropout rate of a hobby module behind a wall is unpublished.
+#   A-13  the positive tail: PMC10575093 (p99 1.53 m with a body in the path); "several
+#         metres" behind concrete with rebar: pozyx.io, "Ultra-wideband and obstacles".
+#   F-23  PANS 100 ms superframe, four anchors per tag per frame: PMC7961798; Bitcraze Loco
+#         TWR 4 ms slots: bitcraze.io Loco positioning documentation; MaUWB AT-command
+#         manual sec. 3.11 and 3.15 (github.com/Makerfabs).
+#   F-26  antenna-delay calibration and received-level bias: Smaoui et al., COMSNETS 2020
+#         (nsl.cs.uh.edu/papers/uwberrormodel-comsnets2020.pdf); Decawave APS011.
 
 # Simulation defaults (not claims about the world)
 DEFAULT_TICK_HZ = 20.0          # matches NAV_RATE_HZ
 DEFAULT_SEED = 0
 
 UWB_RATE_HZ = 10.0
-"""One full sweep of the anchors per 100 ms. That is the ceiling of Decawave's PANS firmware
-(a 100 ms TDMA superframe, four anchors per tag per frame) and what a MaUWB board delivers
-with ten tag slots of 10 ms. A deployment choice, not a measurement; it must divide the tick
-rate, so 20 Hz is the other sensible value on the 20 Hz loop."""
+"""One synchronous sweep of every anchor per 100 ms. The period matches Decawave's PANS
+superframe, but PANS itself returns four ranges per tag per frame; a sweep of all N anchors
+at 10 Hz is what MaUWB-class firmware delivers (eight anchors per 10 ms tag slot, ten slots).
+A deployment choice, not a measurement (F-23); it must divide the tick rate, so 20 Hz is the
+other sensible value on the 20 Hz loop."""
 
 UWB_ANCHOR_HEIGHT_M = 2.0
 """Where the anchors' antennas sit. The rules put no limit on a navigation aid's height

@@ -37,6 +37,9 @@ __all__ = ["RayScene", "cast_rays", "segment_clear"]
 # Chosen well above float64 noise but far below any angle a sensor can resolve.
 _PARALLEL_EPS = 1e-12
 
+# A surface this close to a segment's endpoint does not obstruct it (see segment_clear).
+_ENDPOINT_TOLERANCE_M = 1e-9
+
 
 @dataclass(frozen=True)
 class RayScene:
@@ -280,5 +283,8 @@ def segment_clear(scene: RayScene, a: np.ndarray, b: np.ndarray, z: float) -> np
     hits = _cast_untruncated(scene, origins, directions, z)
 
     # A target standing against a wall must still be visible, so a blocker has to be strictly
-    # nearer than the endpoint, not merely at or beyond it.
-    return degenerate | (hits >= distance)
+    # nearer than the endpoint, not merely at or beyond it. "Nearer" by more than rounding:
+    # an endpoint exactly on a wall's face -- a UWB anchor at x = 0.0, on the perimeter --
+    # came back obstructed one time in a hundred with hit - distance = -1e-15. A nanometre is
+    # below anything the geometry or the scoring radius can resolve.
+    return degenerate | (hits >= distance - _ENDPOINT_TOLERANCE_M)

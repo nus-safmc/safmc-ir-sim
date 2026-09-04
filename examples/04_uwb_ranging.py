@@ -6,7 +6,8 @@ Three things this shows, in order:
    Start Area, at most ten in the Known Search Area and none in the Unknown Search Area
    (booklet 3.3.1 r.14-17). The layout below is six anchors across both rows of the Start
    Area -- collinear anchors leave a mirror ambiguity, so use both rows -- and four on
-   tripods in the corners of the Known Search Area, checked with ``validate_nav_aids``.
+   tripods in the Known Search Area, two in its far corners and two half-way up its sides,
+   a rectangle rather than a line, checked with ``validate_nav_aids``.
    The runner would not have refused an illegal layout; the check is yours to call.
 2. **Reading the tag.** ``obs.sensors["uwb"]`` is ``UWBRanges``: anchor ids, their surveyed
    positions, and one range each, ``inf`` where nothing was heard. No bearing, no flag that
@@ -131,8 +132,9 @@ def grade(log_dir: str) -> dict[str, float]:
     reported = uwb["ranges_m"][t_idx, n_idx]                       # (M, A)
     heard = np.isfinite(reported)
 
-    # Which paths crossed a wall: the arena recorded in the header, tested at each drone's
-    # own altitude. Walls and pillars only -- what obstructs radio.
+    # Which paths crossed a wall: the arena recorded in the header, tested at cruise altitude.
+    # Every wall and pillar is 2.0 m and the ceiling 1.4 m, so any altitude a drone can fly
+    # gives the same answer. Walls and pillars only -- what obstructs radio.
     walls = arena_from_log(log["header"]).structural_scene()
     clear = np.empty_like(heard)
     for j in range(n_anchors):

@@ -82,6 +82,7 @@ the real information budget, and `Observation` was built to match it.
 | `lifecycle` | `HEARTBEAT` armed flag + `custom_main_mode`, plus your own state machine |
 | `sensors["tof"]` (`obs.tof`) | `tof_get_collapsed_scan()` — the same 64 values, but indexed by clockwise bearing; reorder into `(ranger, zone)` through `zone_bearings_rad`, see below |
 | `sensors["markers"]` (`obs.markers`) | AprilTag detections, id + pose, converted to range and bearing |
+| `sensors["uwb"]` | No source yet: the airframe carries no UWB module, and adding one is a new UART/SPI subscription on the ESP, not an adapter. The message is `dwm_loc_get`-shaped: a distance per anchor (absent → `inf`) beside the configured anchor positions; the quality factor is dropped (F-27) |
 | `sensors[<yours>]` | One subscription per sensor you added; its reading dataclass is the message you must fill |
 | `peers` | Whatever your `Blackboard` implementation is backed by |
 | `arena` | Static configuration |

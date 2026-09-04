@@ -10,7 +10,7 @@ world to a frozen reading. A **landmark** is anything deliberately in the arena 
 structure. And *truth enters a sensor; only readings leave it* — a policy sees what a device
 could measure, never the world itself. [ADR-0005](adr/0005-sensor-and-landmark-primitives.md)
 records why it is built this way; [06-sensors.md](06-sensors.md) is what the two flown
-sensors report.
+sensors, and the opt-in UWB tag, report.
 
 ## What a sensor is
 

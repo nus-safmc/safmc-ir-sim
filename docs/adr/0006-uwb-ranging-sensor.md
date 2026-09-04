@@ -12,28 +12,34 @@ from.
 
 Three facts shape it. The rulebook permits UWB by name (Category Swarm booklet §6.3) and says
 exactly where a navigation aid may stand: any number in the Start Area, at most ten in the
-Known Search Area, none in the Unknown Search Area, each within 1 m x 1 m on its own tripod
-with no height limit (§3.3.1 r.14–17). The flown airframe carries no UWB module, so nothing
-here is a claim about hardware the team owns. And the module the team would buy is unchosen,
-so the physics comes from the literature on DW1000/DW3000-class hobby modules
-(DWM1001, Bitcraze Loco, Pozyx, MaUWB) rather than from a bench.
+Known Search Area, none in the Unknown Search Area, each within 1 m x 1 m with no height
+limit, secured and not hung from overhead (§3.3.1 r.14–17) — a tripod, in practice. The
+flown airframe carries no UWB module, so nothing here is a claim about hardware the team
+owns. And the module the team would buy is unchosen, so the physics comes from the
+literature on DW1000/DW3000-class hobby modules (DWM1001, Bitcraze Loco, Pozyx, MaUWB)
+rather than from a bench.
 
 What that literature supports, with its thinness stated: line-of-sight ranging noise of a
 few centimetres (DW1000 timestamp noise 3–4.5 cm; testbeds 2–8 cm), independent of distance
-once the antenna delay is calibrated; through one wall a positive bias of about 0.15 m with
-a spread of about 0.4 m, sometimes negative; a heavy positive tail of outliers whose
-frequency nobody has published for these modules; a datasheet reach of 60 m that hobby
-firmware delivers as 12–20 m indoors; and ranging that is always sequential — one anchor at a
-time in a TDMA slot — at about 10 Hz for a full sweep. Failed ranges are omitted by every
-module surveyed, never reported as a number.
+once the antenna delay is calibrated; through one wall or obstacle a positive bias of about
+0.15 m with a spread of about 0.42 m, sometimes negative, and behind several walls about
+0.58 m and 0.61 m — measured on a DW1000 in a flat of pre-stressed concrete panels; a heavy
+positive tail of outliers whose frequency nobody has published for these modules; a
+datasheet reach of 60 m that hobby firmware delivers as 12–20 m indoors; and ranging that
+is always sequential — one anchor at a time in a 3–4 ms TDMA slot; PANS returns four ranges
+per tag per 100 ms frame, MaUWB-class firmware eight per slot. Failed ranges are omitted or
+masked by every module surveyed; none reports one as a valid measurement, which is what
+`inf` renders.
 
 ## Decision
 
 **One module, `sensors/uwb.py`, on the ADR-0005 contract.** `UWBConfig` builds a `UWBTag`
 whose reading is `UWBRanges(anchor_ids, anchor_xyz_m, ranges_m)`: every landmark of the
-configured kind (default `"uwb_anchor"`), in arena order, fixed for the run, with one
-reported range per anchor and `inf` where no measurement was obtained. It is **not** in
-`flown_sensors()`; a run opts in with `RunConfig(sensors=flown_sensors() + (UWBConfig(),))`.
+configured kind (default `"uwb_anchor"`; a mission kind is refused, because a tag that ranged
+to the markers would report every target's true position), in arena order, fixed for the
+run, with one reported range per anchor and `inf` where no measurement was obtained. It is
+**not** in `flown_sensors()`; a run opts in with
+`RunConfig(sensors=flown_sensors() + (UWBConfig(),))`.
 
 **The reading carries the surveyed anchor positions.** A tag in a DRTLS network is configured
 with its anchors' coordinates and reports them beside each distance (`dwm_loc_get` returns
@@ -48,10 +54,11 @@ extra field the log would drop.
 **Range is three-dimensional, obstruction is by structure only, at the tag's altitude.** The
 true range is the Euclidean distance from the drone's true position to the anchor at its
 mount height, because a 2.0 m anchor 3 m away reads 3.35 m and a policy must know why. Line
-of sight is the R-SENS-7 segment test against a new `WorldScene.structural_scene` — walls and
-pillars only. A mission marker is a cardboard box and a teammate is a 30 cm airframe; radio
-goes through both, so neither blocks. The test is made at the drone's altitude, which is
-exact while anchors stand no taller than the 2.0 m inner walls and pessimistic above that.
+of sight is the mission's R-MISS-2 segment test, height-gated per R-SENS-6, against a new
+`WorldScene.structural_scene` — walls and pillars only. A mission marker is a cardboard box
+and a teammate is a 30 cm airframe; radio goes through both, so neither blocks. The test is
+made at the drone's altitude, which is exact while anchors stand no taller than the 2.0 m
+inner walls and pessimistic above that.
 
 **Noise is a three-part mixture, every parameter a named assumption.** In line of sight the
 reported range is the true range plus Gaussian noise (A-9, 0.05 m). Obstructed, it is dropped
@@ -63,8 +70,9 @@ generator and the same number of draws is made per sample whatever the geometry,
 noise stream is a function of the seed alone.
 
 **Sampling is a synchronous sweep at 10 Hz.** Every anchor is measured in the same tick. The
-real tag measures them one after another, but a full sweep of eight anchors fits inside one
-50 ms tick and the skew is centimetres at cruise speed — below the noise. F-23.
+real tag measures them one after another, but a sweep of up to about twelve at 3–4 ms each
+fits inside one 50 ms tick, and the first-to-last skew — under 40 ms for ten — is under 2 cm
+at cruise speed, below the noise. F-23.
 
 **Recorded as `uwb.npz`.** `ranges_m` stacked to `(ticks, agents, anchors)`, anchor
 positions as a static array. Anchor ids are not stored — the log refuses string arrays — and
@@ -85,14 +93,15 @@ such a run without knowing that is what it was.
    a clean one; a reading that told the policy which ranges were obstructed would delete the
    problem the sensor exists to pose.
 2. **Boolean obstruction rather than wall-counting.** The literature gives one number pair
-   for "behind a wall" (Kolakowski, one apartment wall) and a larger pair for "behind
-   several"; it gives no material for the venue's walls at all. Counting crossings would
-   dress an unknown in precision. The raycaster's private helpers can count segment hits
-   when someone has measured what a second wall costs; that is the natural extension.
+   for "behind a wall or obstacle" and one four times larger for "behind several"
+   (Kolakowski & Modelski, Table 1), both through pre-stressed concrete panels; it says
+   nothing about the venue's walls. A pair applied per crossing would dress an unknown in
+   precision. The raycaster's private helpers can count segment hits once someone has
+   ranged through the venue's walls, and the multi-wall pair is the number to start from.
 3. **Pessimistic defaults where the direction matters.** 20 m reach rather than the
-   datasheet's 60 m means Start Area anchors do not cover the far end of the field by
-   default, so anchor placement in the Known Search Area is forced by physics and not only
-   by the rules. Over-estimating localisation coverage is the mistake that survives to the
+   datasheet's 60 m keeps the whole field within reach of three Start Area anchors, but only
+   just; at the 12 m hobby-firmware floor the far third of the field hears nothing from the
+   Start Area. Over-estimating localisation coverage is the mistake that survives to the
    live run; under-estimating it is caught on the bench.
 4. **Outliers off by default, like ToF noise.** A component with no published rate should
    not silently shape a default result. It is one config field away.
@@ -110,13 +119,15 @@ such a run without knowing that is what it was.
 - `Observation` is unchanged. R-POL-3 is amended to say that a surveyed nav aid's position
   is the team's configuration, not a leaked world position.
 - Every number is an assumption with an ID, and A-10 is the one to measure first for this
-  arena: whether the module reaches 20 m or 60 m decides the anchor layout.
+  arena: whether the module reaches 12 m or 20 m decides whether the far third of the field
+  is covered from the Start Area at all.
 - **Cost:** a run whose arena holds `uwb_anchor` points cannot be flown without the sensor
-  (R-WORLD-8 refuses an unperceivable point). Drop the anchors, or give them a footprint, for
-  a blind control.
+  (R-WORLD-8 refuses an unperceivable point). Drop the anchors for a blind control: a
+  footprint alone is still refused, and a footprint plus a height makes them bodies the ring
+  sees and a drone can hit.
 - **Cost:** results on this sensor are conditional on five unmeasured numbers, on walls of
   unknown material, and on a module the team has not bought. `docs/FIDELITY.md` says so
-  (F-23..F-26).
+  (F-23..F-27).
 - **Cost:** an anchor placed at fixed coordinates in the Known Search Area can land inside a
   generated wall unless it has a footprint; the example gives its Known-Area anchors a
   0.25 m tripod base so the generator draws around them.
@@ -132,5 +143,6 @@ such a run without knowing that is what it was.
 | Obstruct with `static_sensing_scene` (markers block) | A 1.0 m cardboard marker would block radio at cruise altitude and not above it — the height gate is right for light, wrong for radio |
 | Sequential per-anchor sampling in TDMA slots | A full sweep fits in one tick and the skew is below the noise; A-8 already accepts the same simplification for the ring |
 | Enforce the nav-aid rule in the runner or in arena validation | The arena does not know which kinds are aids; and the simulator reports rather than referees — the two-wave rule is scored the same way |
-| A line-of-sight or quality flag in the reading | Tells the policy exactly what a real tag cannot |
+| A line-of-sight flag in the reading | Tells the policy what no tag can know |
+| A quality factor per range | Real kit reports one (F-27), but it does not reliably say whether a range is biased; left out so nothing here leans on it |
 | A UWB `PoseSource` in the same change | Different seam, different audit; the sensor must exist first |

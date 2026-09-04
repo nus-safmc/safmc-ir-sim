@@ -106,11 +106,47 @@ def test_the_tag_is_not_part_of_the_flown_suite():
     (dict(outlier_max_m=-1.0), "outlier_max_m"),
     (dict(anchor_height_m=-0.5), "anchor_height_m"),
     (dict(rate_hz=3.0), "does not divide"),
+    (dict(kind="victim"), "mission kind"),
+    (dict(kind="fire"), "R-POL-3"),
 ])
 def test_impossible_configs_are_refused_at_construction(kw, match):
     with pytest.raises(ConfigError, match=match):
         cfg = UWBConfig(**kw)
         RunConfig(sensors=(cfg,))          # the rate is checked against the tick rate here
+
+
+def test_a_tag_cannot_range_to_the_mission_markers():
+    """Both auditors: UWBConfig(kind="victim") handed every policy the victims' true positions
+    as "surveyed anchors" on the first sweep, and the R-POL-4 walk could not see it -- a
+    position array is exactly what the reading is allowed to carry. Refused by kind."""
+    for kind in ("victim", "bonus_victim", "fire"):
+        with pytest.raises(ConfigError, match="true position"):
+            UWBConfig(kind=kind)
+
+
+def test_a_config_that_skipped_super_post_init_is_caught_at_build():
+    """A sloppy subclass with nlos_drop_probability=5.0 ran a whole mission with every
+    obstructed range dropped, silently. The config is re-validated when the tag is built."""
+    @dataclasses.dataclass(frozen=True)
+    class Sloppy(UWBConfig):
+        def __post_init__(self):
+            pass                                          # forgot super().__post_init__()
+
+    # No anchors in the arena: with some, the runner's orphan-kind check fires first for the
+    # config whose kind is "victim", which is a different refusal.
+    for kw, match in ((dict(nlos_drop_probability=5.0), "probability"),
+                      (dict(max_range_m=float("nan")), "max_range_m"),
+                      (dict(kind="victim"), "mission kind")):
+        with pytest.raises(ConfigError, match=match):
+            Runner(RunConfig(seed=0, policy="sdlw", sensors=(ToFConfig(), Sloppy(**kw)), **SHORT)).build()
+
+
+def test_numpy_scalars_are_accepted_and_a_bool_is_not():
+    cfg = UWBConfig(max_range_m=np.float32(12.0), los_noise_std_m=np.float64(0.04),
+                    nlos_drop_probability=np.int64(0))
+    assert cfg.max_range_m == np.float32(12.0)
+    with pytest.raises(ConfigError, match="finite number"):
+        UWBConfig(max_range_m=True)
 
 
 # -- the geometry -------------------------------------------------------------------------------
@@ -207,6 +243,20 @@ def test_obstruction_is_decided_at_the_drone_s_altitude():
     assert tag.sample(truth_at(10.0, 10.0, z=1.2), low_wall, 1).ranges_m[0] == pytest.approx(d_high)
 
 
+def test_an_anchor_on_the_field_s_edge_is_never_obstructed_by_the_perimeter():
+    """An anchor at x = 0.0 sits on the perimeter's inner face; the strict line-of-sight test
+    lost to rounding one time in a hundred and applied the through-wall bias. Tolerance."""
+    arena = generate_arena(0)
+    edge = Landmark("edge", "uwb_anchor", 0.0, 3.0)
+    world = WorldScene.from_arena(dataclasses.replace(arena, landmarks=(edge,)))
+    tag = make_tag(nlos_bias_m=1.0, los_noise_std_m=0.0, nlos_noise_std_m=0.0, nlos_drop_probability=0.0)
+    rng = np.random.default_rng(0)
+    for _ in range(500):
+        x, y = rng.uniform(0.3, 5.5, size=2)                 # the Start Area: nothing in the way
+        reading = tag.sample(truth_at(x, y), world, 0)
+        assert reading.ranges_m[0] == pytest.approx(true_ranges([x, y, 0.5], reading.anchor_xyz_m)[0])
+
+
 def test_the_generated_arena_s_walls_are_what_obstruct():
     """End to end on a real arena: the tag's obstruction agrees with the mission's LOS scene."""
     arena = generate_arena(4)
@@ -279,7 +329,9 @@ def test_outliers_are_off_by_default_and_positive_when_on():
 
 
 def test_the_noise_stream_does_not_depend_on_the_geometry():
-    """Same seed, a wall in one world and not the other: the generators stay in lockstep."""
+    """Same seed, a wall in one world and not the other, an anchor in reach or not: the
+    generators stay in lockstep. A mutant that drew the Gaussian only for anchors in reach
+    survived the first version of this test, which only varied the walls."""
     anchors = (Landmark("a", "uwb_anchor", 14.0, 10.0), Landmark("b", "uwb_anchor", 10.0, 14.0))
     walled = box_scene(walls=[(12.0, 5.0, 12.0, 15.0)], landmarks=anchors)
     open_ = box_scene(landmarks=anchors)
@@ -288,6 +340,13 @@ def test_the_noise_stream_does_not_depend_on_the_geometry():
         tag_w.sample(truth_at(10.0, 10.0), walled, tick)
         tag_o.sample(truth_at(10.0, 10.0), open_, tick)
     assert tag_w.rng.random() == tag_o.rng.random()
+
+    near, far = make_tag(seed=9, max_range_m=5.0), make_tag(seed=9, max_range_m=5.0)
+    for tick in range(5):
+        near.sample(truth_at(10.0, 10.0), open_, tick)      # both anchors within 5 m
+        reading = far.sample(truth_at(1.0, 1.0), open_, tick)   # neither is
+        assert not reading.heard.any()
+    assert near.rng.random() == far.rng.random()
 
 
 def test_identical_runs_with_the_tag_are_identical():
@@ -405,6 +464,7 @@ def test_the_log_holds_ranges_and_anchor_positions_in_the_header_s_landmark_orde
     t_idx, n_idx = np.nonzero(fresh)
     a = np.repeat(pose[t_idx, n_idx, :2], 4, axis=0)
     b = np.tile(uwb["anchor_xyz_m"][:, :2], (len(t_idx), 1))
+    # At cruise altitude: every crossable structure is 2.0 m, so any flyable altitude agrees.
     clear = segment_clear(los_scene, a, b, 0.5).reshape(len(t_idx), 4)
     heard = np.isfinite(uwb["ranges_m"][t_idx, n_idx])
     los_errors = error[t_idx, n_idx][clear & heard]

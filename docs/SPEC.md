@@ -316,23 +316,27 @@ MUST list every sensor with its config type and whether it was recorded. `record
 pure: recording MUST NOT affect results (R-OBS-4).
 
 **R-SENS-17** *(added with ADR-0006)* The package MUST provide a UWB ranging tag on the
-R-SENS-12 contract (`sensors/uwb.py`) that is NOT part of `flown_sensors()`. Its reading MUST
-be, for every landmark of its configured kind in arena order and fixed for the run: the
-anchor ids, the surveyed anchor positions (each at the configured mount height), and one
-reported range per anchor, `inf` where no measurement was obtained -- and nothing else, in
-particular no bearing and no line-of-sight or quality flag. The true range MUST be the
-three-dimensional distance from the drone's true position to the anchor. An anchor beyond
-`max_range_m` MUST report `inf`. Obstruction MUST be decided against walls and pillars only,
-by the R-SENS-7 segment test at the tag's altitude; solid landmarks and other drones MUST NOT
-obstruct. An unobstructed range MUST be the true range plus zero-mean Gaussian noise of
+R-SENS-12 contract (`sensors/uwb.py`) that is NOT part of `flown_sensors()`. Its configured
+kind MUST NOT be a mission kind: a tag that ranged to the markers would report every
+target's true position (R-POL-3). Its reading MUST be, for every landmark of its kind in
+arena order and fixed for the run: the anchor ids, the surveyed anchor positions (each at
+the configured mount height), and one reported range per anchor, `inf` where no measurement
+was obtained -- and nothing carrying more information than those: no bearing, no
+line-of-sight or quality flag (a derived convenience such as `heard`, `isfinite(ranges_m)`,
+is not a fourth channel). The true range MUST be the three-dimensional distance from the
+drone's true position to the anchor. An anchor beyond `max_range_m` MUST report `inf`.
+Obstruction MUST be decided against walls and pillars only, by the line-of-sight segment
+test of R-MISS-2, height-gated per R-SENS-6, at the tag's altitude; solid landmarks and
+other drones MUST NOT obstruct. An unobstructed range MUST be the true range plus zero-mean Gaussian noise of
 `los_noise_std_m`; an obstructed range MUST be `inf` with probability
 `nlos_drop_probability` and otherwise the true range plus `nlos_bias_m` plus zero-mean
 Gaussian noise of `nlos_noise_std_m`; with probability `outlier_probability` a reported range
 MUST gain a further positive error uniform on `[0, outlier_max_m]`. A reported range MUST NOT
 be negative. Every draw MUST come from the sensor's own generator (R-DET-2), and the number
 of draws per sample MUST NOT depend on the geometry, so the noise stream is a function of the
-seed alone. Every default MUST be a named constant registered in §12 (A-9..A-13). The
-sensor MUST record `ranges_m` shaped `(ticks, agents, anchors)` and the anchor positions as a
+seed alone. Every default of the reach and noise model MUST be a named constant registered
+in §12 (A-9..A-13); the sweep rate and the anchor height are deployment choices, named
+constants outside the register. The sensor MUST record `ranges_m` shaped `(ticks, agents, anchors)` and the anchor positions as a
 static array (R-SENS-16); column `j` MUST be the `j`-th landmark of the sensor's kind in the
 header's landmark list, so anchor identity is recoverable from the log alone (R-OBS-3).
 
@@ -486,8 +490,8 @@ place, not a literal scattered through the code.
 | A-7 | Unknown Search Area doorway count/width | 2 doorways, 1.0 m | Rulebook shows gaps in a not-to-scale diagram. |
 | A-8 | ToF ring sampled synchronously at tick rate | 20 Hz, no skew | Hardware is 15 Hz round-robin with up to 64 ms skew across the ring. |
 | A-9 | UWB line-of-sight ranging noise | 0.05 m std | DW1000-class timestamp noise is 3-4.5 cm and testbeds report 2-8 cm; the team's module is unchosen and unmeasured. |
-| A-10 | UWB maximum range | 20 m | Datasheets say 60 m line of sight; hobby firmware reports 12-20 m indoors. Decides whether Start Area anchors reach the far end of the field. |
-| A-11 | UWB through-wall bias and spread | +0.15 m, 0.40 m std | Measured through one apartment wall on a DW1000; the venue's walls are of unknown material and a path may cross more than one. |
+| A-10 | UWB maximum range | 20 m | Datasheets say 60 m line of sight; hobby firmware reports 12-20 m indoors. At 20 m three Start Area anchors reach every point of the field; at 12 m the far third hears none of them. |
+| A-11 | UWB through-wall bias and spread | +0.15 m, 0.40 m std | One wall or obstacle on a DW1000 in a flat of pre-stressed concrete panels (TELFOR 2017, Table 1: 0.49 ns and 1.39 ns, the spread 0.42 m rounded); behind several walls the same table gives four times the bias. The venue's walls are of unknown material. |
 | A-12 | UWB through-wall dropout probability | 0.10 | No published rate for hobby modules. |
 | A-13 | UWB outlier probability and size | 0 (off), up to 1.5 m | The heavy positive tail is documented, its frequency is not; off until measured. |
 

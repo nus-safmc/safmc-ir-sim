@@ -3,8 +3,9 @@
 **The airframe does not carry one.** The rules permit ultra-wideband by name (Category Swarm
 booklet 6.3, while banning 5.7-5.9 GHz) and say where an anchor may stand (3.3.1 r.14-17:
 any number in the Start Area, at most ten in the Known Search Area, none in the Unknown
-Search Area, each on its own tripod within 1 m x 1 m). This module is what a policy would be
-written against if the team bought a module, and what a future ``PoseSource`` would consume.
+Search Area, each within 1 m x 1 m, secured and not hung from overhead -- a tripod, in
+practice). This module is what a policy would be written against if the team bought a
+module, and what a future ``PoseSource`` would consume.
 It is a model of the literature on DW1000/DW3000-class hobby modules -- Qorvo DWM1001,
 Bitcraze Loco, Pozyx, Makerfabs MaUWB -- not of any device on the bench, and every number in
 it is an assumption with an ID. ADR-0006 records the decisions; R-SENS-17 is the contract.
@@ -17,9 +18,10 @@ coordinates, and each ranging cycle reports, per anchor, a distance or nothing (
 ``dwm_loc_get``: a distance list with the anchor positions beside it; MaUWB: a range per
 anchor slot and a validity mask). So the reading is exactly that and nothing more:
 
-    obs.sensors["uwb"].anchor_ids      # ("anchor_sw", ...) in arena order, fixed for the run
+    obs.sensors["uwb"].anchor_ids      # ("start_w0", ...) in arena order, fixed for the run
     obs.sensors["uwb"].anchor_xyz_m    # (N, 3) surveyed positions, the anchors at mount height
     obs.sensors["uwb"].ranges_m        # (N,) reported range, inf where nothing was measured
+    obs.sensors["uwb"].heard           # (N,) isfinite(ranges_m): a view, not a fourth channel
 
 No bearing, no quality factor, no line-of-sight flag. The whole difficulty of UWB indoors is
 that a biased range looks exactly like a clean one; a reading that told a policy which ranges
@@ -37,19 +39,25 @@ Per anchor, from the drone's **true** position ``(x, y, z)`` and the anchor at
 1. ``d`` is the three-dimensional distance. A 2.0 m anchor 3 m away reads 3.35 m, and a
    policy that trilaterates in the plane must know that.
 2. ``d > max_range_m`` reports ``inf``. Datasheets promise 60 m in line of sight; hobby
-   firmware delivers 12-20 m indoors, and 20 m is the default (A-10). From the Start Area
-   that does not reach the far end of the field, which is why the Known Search Area's ten
-   aids matter.
-3. Line of sight is the same segment test the mission uses (R-SENS-7), against **walls and
-   pillars only** (``WorldScene.structural_scene``), at the drone's altitude. A mission
+   firmware delivers 12-20 m indoors, and 20 m is the default (A-10). At 20 m the whole
+   field is within reach of three Start Area anchors, only just; at the 12 m floor the far
+   third hears none of them. Even in reach, six anchors in a 5 m-deep strip give poor
+   along-field geometry beyond about 14 m and the room's walls obstruct -- which is why the
+   Known Search Area's ten aids matter.
+3. Line of sight is the segment test the mission uses (R-MISS-2), height-gated per R-SENS-6,
+   against **walls and pillars only** (``WorldScene.structural_scene``), at the drone's
+   altitude. A mission
    marker is a cardboard box and a teammate is a 30 cm airframe; radio goes through both.
 4. In line of sight: ``d + N(0, los_noise_std_m)``. DW1000 timestamp noise is 3-4.5 cm and
    calibrated testbeds report 2-8 cm; the noise does not grow with distance (A-9, 0.05 m).
 5. Obstructed: dropped (``inf``) with probability ``nlos_drop_probability`` (A-12, 0.10, no
-   published basis), otherwise ``d + nlos_bias_m + N(0, nlos_noise_std_m)``. Behind one
-   apartment wall a DW1000 measured a mean bias of +0.49 ns and a spread of 1.39 ns, i.e.
-   +0.15 m and 0.40 m (Kolakowski, arXiv 2403.19706) -- and the spread admits negative errors,
-   which the receiver-level bias produces in practice (A-11).
+   published basis), otherwise ``d + nlos_bias_m + N(0, nlos_noise_std_m)``. Through one wall
+   or a single obstacle, a DW1000 in a flat built of pre-stressed concrete panels measured a
+   mean bias of +0.49 ns and a spread of 1.39 ns -- about +0.15 m and 0.42 m, the spread
+   rounded to 0.40 m here (Kolakowski & Modelski, TELFOR 2017, Table 1; arXiv 2403.19706).
+   The spread admits negative errors, which the DW1000's received-level bias produces (A-11).
+   The same table gives +1.92 ns and 2.02 ns, about +0.58 m and 0.61 m, behind several
+   walls; the model does not use it (F-24).
 6. With probability ``outlier_probability`` any reported range gains a further positive
    error uniform on ``[0, outlier_max_m]``. The heavy positive tail is documented everywhere
    (LOS p99 of 32 cm; 1.5 m behind a body; "several metres" behind concrete) and its rate
@@ -59,17 +67,20 @@ Per anchor, from the drone's **true** position ``(x, y, z)`` and the anchor at
 Every draw comes from the sensor's own generator, and the same number of draws is made per
 sample whatever the geometry, so the noise stream is a function of the seed alone (R-DET-2).
 Every anchor is measured in the same tick (F-23): the real tag ranges to them one at a time
-in TDMA slots, but a full sweep of eight fits inside one 50 ms tick and the skew at cruise
-speed is centimetres, below the noise.
+in TDMA slots of 3-4 ms, so a sweep of up to about twelve fits inside one 50 ms tick and the
+first-to-last skew -- under 40 ms for the example's ten -- is under 2 cm at cruise speed,
+below the noise. PANS itself returns four ranges per 100 ms frame; a ten-anchor sweep at
+10 Hz assumes MaUWB-class firmware.
 
 What is not modelled, and matters
 ---------------------------------
 
-- **Wall count and wall material.** Obstruction is a boolean and the one-wall numbers apply
-  behind three walls too, which is optimistic; through concrete or rebar the link would die
-  rather than bias (F-24). Nobody has measured the venue's walls.
-- **Reach.** Whether the module does 20 m or 60 m decides the anchor layout (A-10). Measure
-  this first.
+- **Wall count and wall material.** Obstruction is a boolean: the one-wall numbers apply
+  behind three walls too, where the same source measured four times the bias. Its walls were
+  concrete panels and still ranged; metal is where a link dies. The venue's walls are
+  unmeasured (F-24).
+- **Reach.** Whether the module does 12 m or 20 m decides whether the far third of the field
+  hears the Start Area at all (A-10). Measure this first.
 - **Calibration.** ``nlos_bias_m`` is the only bias. An uncalibrated antenna delay adds
   10-30 cm per anchor pair and drifts about 3 cm per metre; the model assumes the team
   calibrates, which the literature says gets it under 1 cm (F-26).
@@ -110,6 +121,7 @@ from ..constants import (
     UWB_RATE_HZ,
 )
 from ..errors import ConfigError
+from ..world.arena import TARGET_KINDS
 from ..world.landmark import Landmark
 from .base import Sensor, SensorConfig, TrueState, read_only
 from .raycast import RayScene, segment_clear
@@ -123,6 +135,7 @@ __all__ = [
     "true_ranges",
     "line_of_sight",
     "measure",
+    "validate_uwb_config",
 ]
 
 
@@ -133,11 +146,14 @@ __all__ = [
 
 @dataclass(frozen=True)
 class UWBConfig(SensorConfig):
-    """One tag's ranging model. Every default is a named constant with an assumption ID."""
+    """One tag's ranging model. Every default of the reach and noise model is a named constant
+    with an assumption ID; the sweep rate and the anchor height are deployment choices."""
 
     name: str = "uwb"
     rate_hz: float | None = UWB_RATE_HZ
-    """A full sweep of the anchors at 10 Hz, the PANS ceiling. Must divide the tick rate."""
+    """One synchronous sweep of every anchor at 10 Hz. PANS returns four ranges per 100 ms
+    frame; a sweep of all N at this rate is what MaUWB-class firmware delivers (F-23). Must
+    divide the tick rate."""
 
     kind: str = "uwb_anchor"
     """The landmark kind this tag ranges to. Anything else in the arena is silent to it."""
@@ -156,20 +172,7 @@ class UWBConfig(SensorConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not isinstance(self.kind, str) or not self.kind:
-            raise ConfigError(f"kind must be a non-empty landmark kind, got {self.kind!r}")
-        if not _finite(self.max_range_m) or self.max_range_m <= 0.0:
-            raise ConfigError(f"max_range_m must be finite and > 0, got {self.max_range_m!r}")
-        for field_name in ("anchor_height_m", "los_noise_std_m", "nlos_noise_std_m", "outlier_max_m"):
-            value = getattr(self, field_name)
-            if not _finite(value) or value < 0.0:
-                raise ConfigError(f"{field_name} must be finite and >= 0, got {value!r}")
-        if not _finite(self.nlos_bias_m):
-            raise ConfigError(f"nlos_bias_m must be finite, got {self.nlos_bias_m!r}")
-        for field_name in ("nlos_drop_probability", "outlier_probability"):
-            value = getattr(self, field_name)
-            if not _finite(value) or not 0.0 <= value <= 1.0:
-                raise ConfigError(f"{field_name} must be a probability in [0, 1], got {value!r}")
+        validate_uwb_config(self)
 
     @property
     def landmark_kinds(self) -> tuple[str, ...]:
@@ -178,13 +181,52 @@ class UWBConfig(SensorConfig):
         return (self.kind,)
 
     def build(self, rng: np.random.Generator) -> "UWBTag":
+        # Re-checked here, not trusted from construction: a subclass that skipped
+        # super().__post_init__() with nlos_drop_probability=5.0 ran a whole mission with
+        # every obstructed range dropped and no complaint -- an auditor did. The arena
+        # re-validates its landmarks for the same reason.
+        validate_uwb_config(self)
         return UWBTag(self, rng)
 
 
+def validate_uwb_config(cfg: UWBConfig) -> None:
+    """Every invariant a tag's config must satisfy. Run at construction and again at build."""
+    if not isinstance(cfg.kind, str) or not cfg.kind:
+        raise ConfigError(f"kind must be a non-empty landmark kind, got {cfg.kind!r}")
+    if cfg.kind in TARGET_KINDS:
+        # Ranging to the mission markers would hand every policy the exact position of every
+        # victim and fire on the first sweep, as "surveyed anchors" -- the one thing the
+        # observation exists to withhold (R-POL-3). The arena refuses a placed landmark under
+        # a mission kind for the mirror-image reason (R-WORLD-7).
+        raise ConfigError(
+            f"kind {cfg.kind!r} is a mission kind. A tag that ranged to the markers would "
+            f"report every victim's and fire's true position as an anchor, which is exactly "
+            f"the ground truth a policy must not have (R-POL-3). Anchors are things the team "
+            f"placed and surveyed; give them a kind of their own."
+        )
+    if not _finite(cfg.max_range_m) or cfg.max_range_m <= 0.0:
+        raise ConfigError(
+            f"max_range_m must be a finite number > 0, got {cfg.max_range_m!r}"
+        )
+    for field_name in ("anchor_height_m", "los_noise_std_m", "nlos_noise_std_m", "outlier_max_m"):
+        value = getattr(cfg, field_name)
+        if not _finite(value) or value < 0.0:
+            raise ConfigError(f"{field_name} must be a finite number >= 0, got {value!r}")
+    if not _finite(cfg.nlos_bias_m):
+        raise ConfigError(f"nlos_bias_m must be a finite number, got {cfg.nlos_bias_m!r}")
+    for field_name in ("nlos_drop_probability", "outlier_probability"):
+        value = getattr(cfg, field_name)
+        if not _finite(value) or not 0.0 <= value <= 1.0:
+            raise ConfigError(
+                f"{field_name} must be a probability in [0, 1], got {value!r}"
+            )
+
+
 def _finite(value: object) -> bool:
+    """A real number -- Python or numpy, never a bool -- that is finite."""
     return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
+        isinstance(value, (int, float, np.integer, np.floating))
+        and not isinstance(value, (bool, np.bool_))
         and bool(np.isfinite(value))
     )
 

@@ -454,6 +454,21 @@ def test_an_aid_wider_than_a_metre_is_refused():
         validate_nav_aids(dataclasses.replace(arena, landmarks=(stand,)), ("uwb_anchor",))
 
 
+def test_a_string_or_empty_kinds_is_refused_not_silently_passed():
+    """validate_nav_aids(arena, "uwb_anchor") made a set of letters, counted nothing, and
+    approved an anchor in the room -- the most natural wrong call passed everything."""
+    arena = generate_arena(3)
+    x0, y0, x1, y1 = arena.unknown_area
+    placed = dataclasses.replace(arena, landmarks=(Landmark("inside", "uwb_anchor", (x0 + x1) / 2, (y0 + y1) / 2),))
+    with pytest.raises(ArenaError, match="string"):
+        validate_nav_aids(placed, "uwb_anchor")
+    with pytest.raises(ArenaError, match="empty"):
+        validate_nav_aids(placed, ())
+    for kinds in (["uwb_anchor"], {"uwb_anchor"}, (k for k in ("uwb_anchor",))):
+        with pytest.raises(ArenaError, match="Unknown Search Area"):
+            validate_nav_aids(placed, kinds)
+
+
 def test_the_runner_does_not_referee_nav_aid_placement():
     """A run with an anchor in the room is a legitimate experiment; only the check refuses it."""
     from safmc_sim.sensors.tof_ring import ToFConfig
