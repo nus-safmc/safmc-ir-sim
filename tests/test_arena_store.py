@@ -251,14 +251,66 @@ def test_anchor_gap_actually_produces_free_islands():
 
     Retracting only the ends touching a room face left every interior T- and L-junction at
     exactly zero distance, so the knob changed nothing about the property it documented.
+
+    The `touching == 0` assertion alone is satisfiable by a room with no maze walls at all --
+    the same vacuous-assertion class this suite exists to catch -- and retraction really can
+    consume every run, so the walls are counted first.
     """
-    def touching(cfg):
-        n = 0
-        for seed in range(6):
-            a = generate_arena(seed, cfg)
+    def survey(cfg):
+        """(touching pairs, arenas generated, arenas that actually had walls).
+
+        A large anchor gap can retract every run away, which generate_arena now refuses rather
+        than shipping an empty room -- so a refusal is an expected outcome here, not a failure.
+        """
+        touching, generated, with_walls = 0, 0, 0
+        for seed in range(12):
+            try:
+                a = generate_arena(seed, cfg)
+            except ArenaError:
+                continue
+            generated += 1
             mw = [w.polygon() for w in a.walls if w.kind == "maze_wall"]
-            n += sum(1 for i in range(len(mw)) for j in range(i + 1, len(mw))
-                     if mw[i].distance(mw[j]) < 1e-6)
-        return n
-    assert touching(ArenaConfig()) > 0, "an anchored maze should have touching walls"
-    assert touching(ArenaConfig(maze_anchor_gap_m=K.MIN_GAP_WALL_TO_WALL_M)) == 0
+            if mw:
+                with_walls += 1
+            touching += sum(1 for i in range(len(mw)) for j in range(i + 1, len(mw))
+                            if mw[i].distance(mw[j]) < 1e-6)
+        return touching, generated, with_walls
+
+    anchored_touching, anchored_n, anchored_walls = survey(ArenaConfig())
+    assert anchored_n == anchored_walls == 12, "the default maze must furnish every room"
+    assert anchored_touching > 0, "an anchored maze should have touching walls"
+
+    islands_touching, island_n, island_walls = survey(
+        ArenaConfig(maze_anchor_gap_m=K.MIN_GAP_WALL_TO_WALL_M)
+    )
+    assert island_n > 0, "the island reading produced no arena at all"
+    assert island_walls == island_n, (
+        "an arena that generated must still contain maze walls -- a zero-wall room would "
+        "satisfy the touching assertion vacuously"
+    )
+    assert islands_touching == 0
+
+
+def test_an_anchor_gap_that_consumes_every_wall_is_refused_not_shipped():
+    """Retraction costs each run 2 * anchor_gap_m and can leave nothing standing.
+
+    3.3.9 r.2 guarantees the Unknown Search Area contains wall(s), and validate_arena checks
+    connectivity rather than the existence of walls, so an emptied room would pass silently --
+    the failure plan_grid raises for at n < 2 and the braid budget guards against. At
+    maze_anchor_gap_m = 2.0 this hit 17 of 200 seeds.
+    """
+    huge = ArenaConfig(maze_anchor_gap_m=4.0)
+    with pytest.raises(ArenaError, match="no interior wall"):
+        for seed in range(40):
+            generate_arena(seed, huge)
+
+    # And at the documented all-pairs setting, whatever survives is never an empty room.
+    refused = 0
+    for seed in range(40):
+        try:
+            a = generate_arena(seed, ArenaConfig(maze_anchor_gap_m=K.MIN_GAP_WALL_TO_WALL_M))
+        except ArenaError:
+            refused += 1
+            continue
+        assert [w for w in a.walls if w.kind == "maze_wall"]
+    assert refused, "the 2.0 m setting is expected to be infeasible for some seeds"

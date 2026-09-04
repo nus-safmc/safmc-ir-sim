@@ -276,7 +276,7 @@ class ArenaConfig:
     """
 
     maze_anchor_gap_m: float = 0.0
-    """Clearance each maze wall keeps from the room face it points at.
+    """Clearance retracted from BOTH ends of every maze run.
 
     ``0.0`` anchors walls to the room, which is what makes dead ends possible. Setting this to
     ``min_gap_wall_m`` turns every maze wall into a free-floating island and degenerates to the
@@ -629,7 +629,7 @@ def _room_walls(
         ax, ay = a
         bx, by = b
         dx, dy = bx - ax, by - ay
-        if grid is not None:
+        if grid is not None and grid.n >= 3:
             # Snap to a whole cell. The face runs from corner to corner over `size`, while the
             # grid tiles the clear interior starting thickness/2 in, so the cell's span is
             # offset by that half-thickness before being normalised onto the face.
@@ -641,7 +641,16 @@ def _room_walls(
             # L-shaped 4.9 m opening. That happened on 51 of 200 default seeds, including
             # seed 0. Excluding the end cells also matches A-7 as written: the section 3.2
             # diagram draws each doorway roughly centred on its face, not hard against a corner.
-            cell = int(rng.integers(1, grid.n - 1)) if grid.n >= 3 else int(rng.integers(0, grid.n))
+            # Interior cells only. An end cell leaves a corner stub of exactly thickness/2,
+            # which the length guard below then drops, so the doorway ran flush to the corner
+            # and two adjacent faces choosing the same corner deleted the post entirely.
+            #
+            # A 2x2 lattice has no interior cell -- both are end cells -- so it falls through
+            # to the centred placement instead. An earlier cut kept snapping there via an
+            # `else` branch that was the pre-fix code verbatim, which left 177 of 200 seeds
+            # with an open corner at n=2. Snapping would be wrong there anyway: one cell is
+            # 4.90 m, so a "one cell wide" doorway would be half the face.
+            cell = int(rng.integers(1, grid.n - 1))
             lo_m, hi_m = grid.cell_span(cell)
             lo = (thickness / 2.0 + lo_m) / size
             hi = (thickness / 2.0 + hi_m) / size

@@ -288,6 +288,7 @@ def generate_maze(
                 horizontals.setdefault(round(y, 9), []).append((lo, hi))
 
     walls = []
+    dropped_to_retraction = 0
     for axis, buckets in (("v", verticals), ("h", horizontals)):
         for coord, spans in sorted(buckets.items()):
             for lo, hi in _merge_spans(spans):
@@ -303,11 +304,28 @@ def generate_maze(
                     # A run shorter than its own thickness is not a wall. It would also be a
                     # degenerate ray-cast segment, which the raycaster classes as parallel and
                     # never intersects -- an invisible obstacle is worse than no obstacle.
+                    if anchor_gap_m > 0.0:
+                        dropped_to_retraction += 1
                     continue
                 if axis == "v":
                     walls.append(wall_factory(coord, lo, coord, hi, t, height_m, kind))
                 else:
                     walls.append(wall_factory(lo, coord, hi, coord, t, height_m, kind))
+
+    # Retraction takes anchor_gap_m off BOTH ends, so it costs each run 2 * anchor_gap_m and can
+    # consume every one of them. At the documented all-pairs setting (anchor_gap = min_gap_wall_m
+    # = 2.0) that emptied the room's interior on 17 of 200 seeds, and validate_arena passed
+    # because it checks connectivity rather than the existence of walls -- the same silent
+    # degradation plan_grid raises for at n < 2 and the braid budget above guards against.
+    # 3.3.9 r.2 guarantees the Unknown Search Area contains wall(s), so refuse instead.
+    if not walls and dropped_to_retraction:
+        raise ArenaError(
+            f"maze_anchor_gap_m={anchor_gap_m} retracted all {dropped_to_retraction} maze runs "
+            f"below the {t} m wall thickness, leaving the Unknown Search Area with no interior "
+            f"wall at all -- which 3.3.9 r.2 forbids. That gap is only satisfiable by runs "
+            f"longer than 2 * {anchor_gap_m} + {t} m, and this seed drew none. Lower "
+            f"maze_anchor_gap_m, or widen maze_corridor_m so runs are longer."
+        )
     return walls
 
 

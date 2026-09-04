@@ -430,6 +430,29 @@ def test_a_doorway_is_not_narrowed_by_a_maze_wall(arenas):
             )
 
 
+@pytest.mark.parametrize("corridor_m", [2.0, 3.2, 4.0, 4.9])
+def test_no_room_corner_is_open_at_any_lattice_size(corridor_m):
+    """The corner fix has to hold for every grid the corridor knob can produce, not just 4x4.
+
+    A 2x2 lattice has no interior cell, so snapping a doorway to one is impossible there; the
+    first cut kept snapping anyway through an `else` branch that was the pre-fix code verbatim,
+    and 177 of 200 seeds at n=2 had an open corner while the default-config tests stayed green.
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    cfg = ArenaConfig(maze_corridor_m=corridor_m, n_pillars_unknown=0)
+    for seed in range(12):
+        a = generate_arena(seed, cfg)
+        shell = unary_union([w.polygon() for w in a.walls if w.kind == "unknown_wall"])
+        x0, y0, x1, y1 = a.unknown_area
+        for cx, cy, dx, dy in ((x0, y0, 1, 1), (x1, y0, -1, 1), (x0, y1, 1, -1), (x1, y1, -1, -1)):
+            chord = LineString([(cx + dx * 0.02, cy + dy * 1.2), (cx + dx * 1.2, cy + dy * 0.02)])
+            assert chord.intersects(shell), (
+                f"corridor {corridor_m} m, seed {seed}: the corner at ({cx:.2f}, {cy:.2f}) is open"
+            )
+
+
 def test_no_room_corner_is_open(arenas):
     """A doorway flush to a corner deletes the corner post and two doorways merge into one.
 
