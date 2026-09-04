@@ -71,9 +71,9 @@ This is why the team prints its own AprilTags: they own the markers.
 
 | Event | Points |
 |---|---|
-| Regular victim rescued (4 exist) | +5 each |
-| Bonus victim rescued (4 exist) | +15 each |
-| Fire extinguished (4 exist) | +10 each |
+| Regular victim rescued (at most 4) | +5 each |
+| Bonus victim rescued (at most 4) | +15 each |
+| Fire extinguished (at most 4) | +10 each |
 | Victim within 2.5 m of an **unextinguished** fire | that victim scores **0** |
 | At least one relay formed | **2x multiplier on total mission score** |
 
@@ -82,7 +82,12 @@ target position, **with line of sight** — "no walls or pillars on the line". E
 once; extra drones add nothing. Measurement is from the *organiser's* recorded position, not the
 marker, which does not move even if knocked over.
 
-Theoretical maximum: `(4x5 + 4x15 + 4x10) x 2 = 240`.
+Theoretical maximum: `(4x5 + 4x15 + 4x10) x 2 = 240` — an **upper bound, not a target**. 3.3.3
+r.3 and 3.3.5 r.2 publish that a team *supplies* four markers of each type; 3.3.3 r.1 and 3.3.5
+r.1 publish that the number actually placed "will be unknown to the teams". The simulator emits
+exactly 4/4/4 every seed, which hands a policy a census the real field withholds — a policy that
+stops searching after twelve finds would score well here and badly there. Tracked as a known
+divergence; see `N_VICTIMS` in `constants.py`.
 
 **Relay** (§3.3.7): a chain of **landed** drones where adjacent drones are ≤1.0 m apart *and* have
 mutual LOS, the head rescued a bonus victim, and the tail is inside the Start Area. One relay is

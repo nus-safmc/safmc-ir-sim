@@ -203,7 +203,9 @@ def _braid(
     relay chain a single fragile path and turns any collision into a total blockage. Real
     buildings have loops; so should this.
     """
-    if n_loops <= 0:
+    if n_loops < 0:
+        raise ArenaError(f"n_maze_loops must be >= 0, got {n_loops}")
+    if n_loops == 0:
         return
     standing = [
         frozenset({(i, j), (a, b)})
@@ -212,9 +214,15 @@ def _braid(
         for a, b in ((i + 1, j), (i, j + 1))
         if a < n and b < n and frozenset({(i, j), (a, b)}) not in passages
     ]
-    if not standing:
+    # Leave at least one wall standing. An n x n lattice has only (n-1)^2 walls after the
+    # spanning tree, which is exactly ONE at n = 2 -- so the default n_maze_loops of 2 emptied
+    # the room completely and validate_arena passed, because it checks connectivity rather than
+    # the existence of walls. That is the empty room plan_grid raises to prevent at n < 2, and
+    # 3.3.9 r.2 guarantees the Unknown Search Area contains wall(s).
+    budget = min(n_loops, max(0, len(standing) - 1))
+    if budget <= 0:
         return
-    for k in rng.permutation(len(standing))[: min(n_loops, len(standing))]:
+    for k in rng.permutation(len(standing))[:budget]:
         passages.add(standing[int(k)])
 
 
@@ -279,7 +287,13 @@ def generate_maze(
         for coord, spans in sorted(buckets.items()):
             for lo, hi in _merge_spans(spans):
                 if anchor_gap_m > 0.0:
-                    lo, hi = _retract_to_faces(lo, hi, axis, grid, anchor_gap_m)
+                    # Both ends, not only the ones touching a room face. Retracting just the
+                    # face ends left every interior T- and L-junction at exactly zero distance
+                    # -- 75 touching pairs over 40 seeds at anchor_gap 0.0, and still 75 at 2.0
+                    # -- so the knob changed nothing about the property it claimed to control,
+                    # and an arena labelled "generated under the all-pairs reading" was still an
+                    # anchored maze.
+                    lo, hi = lo + anchor_gap_m, hi - anchor_gap_m
                 if hi - lo < t:
                     # A run shorter than its own thickness is not a wall. It would also be a
                     # degenerate ray-cast segment, which the raycaster classes as parallel and
@@ -308,14 +322,3 @@ def _merge_spans(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
     return out
 
 
-def _retract_to_faces(
-    lo: float, hi: float, axis: str, grid: MazeGrid, gap: float
-) -> tuple[float, float]:
-    """Pull a wall's ends back from the room faces it touches, for the free-island reading."""
-    origin = grid.y0_m if axis == "v" else grid.x0_m
-    far = origin + grid.span_m
-    if lo <= origin + 1e-9:
-        lo = origin + gap
-    if hi >= far - 1e-9:
-        hi = far - gap
-    return lo, hi

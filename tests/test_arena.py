@@ -339,19 +339,122 @@ def test_the_maze_has_dead_ends_and_loops(arenas):
     assert total_dead_ends > 0, "no arena had a dead end -- these are not mazes"
 
 
-def test_maze_walls_never_block_a_doorway(arenas):
-    """Doorways are snapped to whole cells so a wall end cannot bisect one.
+def _room_openings(a):
+    """The gaps in each face of the room shell, measured along that face."""
+    x0, y0, x1, y1 = a.unknown_area
+    shell = [w for w in a.walls if w.kind == "unknown_wall"]
+    out = {}
+    for name, coord, axis in (("S", y0, "h"), ("N", y1, "h"), ("W", x0, "v"), ("E", x1, "v")):
+        segs = []
+        for w in shell:
+            if axis == "h" and abs(w.y1 - coord) < 1e-6 and abs(w.y2 - coord) < 1e-6:
+                segs.append((min(w.x1, w.x2), max(w.x1, w.x2)))
+            if axis == "v" and abs(w.x1 - coord) < 1e-6 and abs(w.x2 - coord) < 1e-6:
+                segs.append((min(w.y1, w.y2), max(w.y1, w.y2)))
+        lo, hi = (x0, x1) if axis == "h" else (y0, y1)
+        segs.sort()
+        gaps, cur = [], lo
+        for a_, b_ in segs:
+            if a_ - cur > 1e-6:
+                gaps.append(a_ - cur)
+            cur = max(cur, b_)
+        if hi - cur > 1e-6:
+            gaps.append(hi - cur)
+        out[name] = gaps
+    return out
 
-    Without snapping a grid line lands inside the opening on roughly 42% of faces, halving a
-    doorway that no other validator would object to.
+
+def test_every_face_has_exactly_one_doorway_of_a_whole_cell(arenas):
+    """Snapping means a doorway is one cell wide -- not narrowed, not merged with another.
+
+    The previous version of this test asserted only that the room contained some free space,
+    which is true of an empty box: turning doorway snapping off entirely passed the whole
+    suite. It now measures the openings.
     """
+    from safmc_sim.world.maze import plan_grid
+
     for a in arenas:
-        blocked = a.occupancy_grid(0.05, inflate_m=K.DRONE_RADIUS_M)
+        grid = plan_grid(a.unknown_area[0], a.unknown_area[1], K.UNKNOWN_AREA_SIZE_M,
+                         a.config.wall_thickness_m, a.config.maze_corridor_m)
+        faces = _room_openings(a)
+        assert sum(len(g) for g in faces.values()) == K.UNKNOWN_AREA_DOORWAYS, (
+            f"seed {a.seed}: openings {faces}, expected {K.UNKNOWN_AREA_DOORWAYS}"
+        )
+        for name, gaps in faces.items():
+            for g in gaps:
+                assert g == pytest.approx(grid.corridor_w_m, abs=1e-6), (
+                    f"seed {a.seed} face {name}: opening {g:.3f} m is not one cell "
+                    f"({grid.corridor_w_m:.3f} m)"
+                )
+
+
+def test_a_doorway_is_not_narrowed_by_a_maze_wall(arenas):
+    """What snapping actually buys: the opening stays clear all the way through.
+
+    Four 2.4 m openings in the shell are not enough -- an unsnapped grid line lands *inside* an
+    opening and halves the aperture a drone can fly through, which no other validator objects to
+    and which the shell-geometry tests above cannot see. This measures the free width across
+    each doorway with the drone radius inflated in.
+    """
+    res = 0.05
+    for a in arenas:
+        blocked = a.occupancy_grid(res, inflate_m=K.DRONE_RADIUS_M)
         x0, y0, x1, y1 = a.unknown_area
-        interior = blocked[
-            int(x0 / 0.05) : int(x1 / 0.05), int(y0 / 0.05) : int(y1 / 0.05)
-        ]
-        assert (~interior).any(), f"seed {a.seed}: the room has no free space at all"
+        # Probe a line just inside each face, across the whole face.
+        t = a.config.wall_thickness_m
+        for name, (fixed, axis) in (("S", (y0 + 2 * t, "h")), ("N", (y1 - 2 * t, "h")),
+                                    ("W", (x0 + 2 * t, "v")), ("E", (x1 - 2 * t, "v"))):
+            lo, hi = (x0, x1) if axis == "h" else (y0, y1)
+            free, best = 0, 0
+            u = lo
+            while u <= hi:
+                ix, iy = ((u, fixed) if axis == "h" else (fixed, u))
+                gx, gy = int(ix / res), int(iy / res)
+                if 0 <= gx < blocked.shape[0] and 0 <= gy < blocked.shape[1] and not blocked[gx, gy]:
+                    free += 1
+                    best = max(best, free)
+                else:
+                    free = 0
+                u += res
+            width = best * res
+            assert width >= K.UNKNOWN_AREA_DOORWAY_M - 2 * K.DRONE_RADIUS_M - 3 * res, (
+                f"seed {a.seed} face {name}: widest free run inside the doorway is only "
+                f"{width:.2f} m -- a maze wall is standing in the opening"
+            )
+
+
+def test_no_room_corner_is_open(arenas):
+    """A doorway flush to a corner deletes the corner post and two doorways merge into one.
+
+    Snapping to an end cell left a 0.05 m stub that the length guard dropped, so the opening ran
+    to the corner at 2.45 m; when two adjacent faces both chose the cell at the same corner the
+    post vanished entirely and a drone could fly in diagonally. 51 of 200 seeds, seed 0 included.
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    for a in arenas:
+        shell = unary_union([w.polygon() for w in a.walls if w.kind == "unknown_wall"])
+        x0, y0, x1, y1 = a.unknown_area
+        for cx, cy, dx, dy in ((x0, y0, 1, 1), (x1, y0, -1, 1), (x0, y1, 1, -1), (x1, y1, -1, -1)):
+            chord = LineString([(cx + dx * 0.02, cy + dy * 1.2), (cx + dx * 1.2, cy + dy * 0.02)])
+            assert chord.intersects(shell), (
+                f"seed {a.seed}: the corner at ({cx:.2f}, {cy:.2f}) is open"
+            )
+
+
+def test_the_braid_never_empties_the_room(arenas):
+    """3.3.9 r.2 guarantees the Unknown Search Area contains wall(s).
+
+    An n x n lattice leaves only (n-1)^2 walls after the spanning tree -- exactly one at n=2 --
+    so the default n_maze_loops of 2 emptied the room outright at any corridor in [3.3, 4.9],
+    and validate_arena passed because it checks connectivity, not the existence of walls.
+    """
+    for corridor in (2.0, 2.5, 3.2, 4.0, 4.9):
+        a = generate_arena(0, ArenaConfig(maze_corridor_m=corridor, n_pillars_unknown=0))
+        assert [w for w in a.walls if w.kind == "maze_wall"], (
+            f"corridor {corridor} m produced a room with no maze walls at all"
+        )
 
 
 def test_maze_walls_are_merged_into_long_runs(arenas):

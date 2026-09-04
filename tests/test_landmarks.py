@@ -82,7 +82,11 @@ def test_derived_placement_is_a_dataclass_replace():
 
 def test_generation_keeps_targets_off_a_placed_body():
     """A body placed by config is occupied space to the target placer."""
-    post = Landmark("anchor_0", "uwb_anchor", 1.2, 18.5, radius_m=0.3, height_m=1.0)
+    # (3.0, 18.0): in the Known Search Area for every seed, and close enough to where the
+    # generator actually puts things that the guard has bite. An earlier relocation parked it
+    # at (1.2, 18.5), the extreme corner of the feasible band, where nothing generated ever
+    # came near -- the assertion then held even with the post absent from the config entirely.
+    post = Landmark("anchor_0", "uwb_anchor", 3.0, 18.0, radius_m=0.3, height_m=1.0)
     for seed in range(8):
         arena = generate_arena(seed, ArenaConfig(landmarks=(post,)))
         for t in arena.targets:
@@ -236,7 +240,7 @@ def test_non_finite_landmarks_are_rejected(kw):
 
 
 def test_solid_landmarks_block_the_grid_and_a_fence_walls_a_target_off():
-    post = Landmark("post", "prop", 1.2, 18.5, radius_m=0.3, height_m=1.0)
+    post = Landmark("post", "prop", 3.0, 18.0, radius_m=0.3, height_m=1.0)
     grid = generate_arena(0, ArenaConfig(landmarks=(post,))).occupancy_grid(0.1)
     # Derived from the post, not hard-coded: the index has to follow if the post ever moves.
     assert grid[int(post.x / 0.1), int(post.y / 0.1)], (
@@ -335,7 +339,7 @@ def test_landing_onto_a_body_is_a_crash_not_a_score():
 
 
 def test_a_flat_mark_is_kept_clear_of_generated_structure():
-    mark = Landmark("start_00", "start_mark", 1.2, 18.5, radius_m=0.5)
+    mark = Landmark("start_00", "start_mark", 3.0, 18.0, radius_m=0.5)
     footprint = target_polygon(mark)
     for seed in range(20):
         arena = generate_arena(seed, ArenaConfig(landmarks=(mark,)))

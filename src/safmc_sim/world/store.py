@@ -40,10 +40,26 @@ __all__ = ["SCHEMA_VERSION", "arena_to_dict", "arena_from_dict", "save_arena", "
 SCHEMA_VERSION = "safmc-sim/arena/1"
 
 
+_LANDMARK_FIELDS = ("id", "kind", "x", "y", "radius_m", "height_m")
+
+
 def _landmark_row(lm) -> dict[str, Any]:
-    """Base fields only, so a Landmark subclass still reads back through ``Landmark(**row)``."""
-    return {"id": lm.id, "kind": lm.kind, "x": lm.x, "y": lm.y,
-            "radius_m": lm.radius_m, "height_m": lm.height_m}
+    """The base fields, refusing any subclass state it cannot carry.
+
+    A run log may drop a subclass's extra fields: ``landmark.py`` says so, and re-scoring needs
+    only the geometry. A map file may not. Preservation is its entire purpose, and a silent
+    downgrade would make ``load_arena(save_arena(a)) == a`` false -- so the map-library flow
+    would change the arena between saving it and flying it, with nothing in the file recording
+    that anything was lost.
+    """
+    extra = [f.name for f in dataclasses.fields(lm) if f.name not in _LANDMARK_FIELDS]
+    if extra:
+        raise LogFormatError(
+            f"landmark {lm.id!r} is a {type(lm).__name__} carrying {extra}, which a map file "
+            f"cannot represent -- it would load back as a plain Landmark with that state gone. "
+            f"Save the extra state alongside the map, or place these landmarks after loading."
+        )
+    return {name: getattr(lm, name) for name in _LANDMARK_FIELDS}
 
 
 def arena_to_dict(spec) -> dict[str, Any]:
@@ -96,6 +112,17 @@ def arena_from_dict(data: dict[str, Any]):
         raise LogFormatError(
             f"arena file sets ArenaConfig fields this build does not have: "
             f"{sorted(unknown_keys)}. It was written by a newer build."
+        )
+    # And the reverse. Every field is written, so a missing one means the file was hand-edited
+    # or came from an older build -- and taking this build's default for it is the precise
+    # failure carrying the config exists to prevent: a map generated at min_gap_wall_m=1.4
+    # silently revalidates against 2.0 and is rejected for a violation it never committed, or
+    # passes and is then recorded in the run log as having been flown at 2.0.
+    missing = known - set(raw)
+    if missing:
+        raise LogFormatError(
+            f"arena file is missing ArenaConfig fields: {sorted(missing)}. Loading them from "
+            f"this build's defaults would misreport the arena the map was generated under."
         )
     config = ArenaConfig(**raw)
 

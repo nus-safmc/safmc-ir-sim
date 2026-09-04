@@ -48,6 +48,7 @@ Mirrors [SPEC §12](SPEC.md#12-assumptions-register). Each is a named constant i
 | A-5 | Camera horizontal FOV for detection | 1.0 rad | Derivable from `fx = 163.5` and 320 px width; should be checked against real detections |
 | ~~A-6~~ | ~~Known Search Area depth~~ | 14.0 m | **Retired.** Not an assumption. The v1 and v2 Play Field Element tables are character-identical and neither has a Known Search Area row, so nothing was published and nothing was withdrawn. 20 − 6 forces it |
 | A-7 | Unknown Search Area doorways | 4, each 2.4 m | The sec 3.2 diagram draws four openings, one per face, measuring 2.40–2.83 m at 300 dpi, and 3.3.9 r.1 says the swarm enters "via the open doorways shown in the diagram". Was 2 × 1.0 m, which had no source. Measure the real field |
+| A-10 | Marker census 4/4/4 treated as known | 4 victims, 4 bonus, 4 fires every seed | The rulebook publishes 4 *supplied* markers of each type (3.3.3 r.3) but says the number placed is unknown (3.3.3 r.1, 3.3.5 r.1). Sample a count per seed, or accept that a policy may exploit the census |
 | A-9 | Maze corridor width in the Unknown Search Area | 2.0 m floor → 4×4 grid at 2.40 m | 3.2 pins nothing inside the room, so this is a sampled distribution, not a layout. The published ≥ 2 m gap caps the grid at 4×4; a fifth corridor would be 1.90 m. See `world/maze.py` |
 | A-8 | ToF ring synchronous at tick rate | 20 Hz, zero skew | Same as F-1 |
 

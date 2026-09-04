@@ -597,7 +597,15 @@ def _room_walls(
             # Snap to a whole cell. The face runs from corner to corner over `size`, while the
             # grid tiles the clear interior starting thickness/2 in, so the cell's span is
             # offset by that half-thickness before being normalised onto the face.
-            cell = int(rng.integers(0, grid.n))
+            #
+            # Interior cells only. An end cell leaves a corner stub of exactly thickness/2,
+            # which the length guard below then drops -- so the doorway ran flush to the corner
+            # at 2.45 m instead of 2.40 m, and when two adjacent faces both chose the cell at
+            # the same corner the corner post vanished and the two doorways merged into one
+            # L-shaped 4.9 m opening. That happened on 51 of 200 default seeds, including
+            # seed 0. Excluding the end cells also matches A-7 as written: the section 3.2
+            # diagram draws each doorway roughly centred on its face, not hard against a corner.
+            cell = int(rng.integers(1, grid.n - 1)) if grid.n >= 3 else int(rng.integers(0, grid.n))
             lo_m, hi_m = grid.cell_span(cell)
             lo = (thickness / 2.0 + lo_m) / size
             hi = (thickness / 2.0 + hi_m) / size
@@ -670,9 +678,7 @@ def generate_arena(
     rng_unknown = np.random.default_rng(
         base[1] if unknown_seed is None else np.random.SeedSequence(unknown_seed)
     )
-    rng_mission = np.random.default_rng(
-        base[2] if mission_seed is None else np.random.SeedSequence(mission_seed)
-    )
+    mission_ss = base[2] if mission_seed is None else np.random.SeedSequence(mission_seed)
 
     width, depth = FIELD_WIDTH_M, FIELD_DEPTH_M
     thickness = cfg.wall_thickness_m
@@ -847,7 +853,7 @@ def generate_arena(
             rng_unknown,
         )
 
-    targets = _place_targets(rng_mission, cfg, structure + marks, unknown_area, width, depth)
+    targets = _place_targets(mission_ss, cfg, structure + marks, unknown_area, width, depth)
 
     spec = ArenaSpec(
         seed=seed,
@@ -908,13 +914,24 @@ def _place_pillars_at_cells(
         )
 
 
-def _place_targets(rng, cfg, structure, unknown_area, width, depth) -> list[Target]:
+def _place_targets(mission_ss, cfg, structure, unknown_area, width, depth) -> list[Target]:
     """Place markers, honouring the rulebook's guarantees about where they can be.
 
     Section 3.3.9 r.2 guarantees the Unknown Search Area contains bonus victim(s) and fire(s),
     and 3.3.3 notes bonus victims "are likely to be placed in regions that are harder to
     rescue" -- so one of each is forced into the room and the rest are sampled from the whole
     Known Search Area. Nothing is placed in the Start Area.
+
+    **One RNG substream per marker**, spawned from the mission seed rather than drawn from a
+    single stream. Placement is rejection sampling, so the number of draws a marker consumes
+    depends on what it had to avoid -- and the first two markers are forced into the room,
+    where what they must avoid is the maze. On one shared stream that made every later marker's
+    position a function of ``unknown_seed``: with the Known Search Area bit-identical, changing
+    only the maze moved 7 to 12 of the 12 markers and swung the number of markers outside the
+    room from 6 to 9. That is up to three markers, and up to 45 points of achievable score,
+    migrating between zones because the maze changed -- silently confounding the exact
+    experiment R-WORLD-9 exists to make clean. Per-marker streams cost nothing and make each
+    marker depend only on its own draws and on the geometry it is actually tested against.
     """
     ux0, uy0, ux1, uy1 = unknown_area
     inset = 0.6
@@ -926,13 +943,22 @@ def _place_targets(rng, cfg, structure, unknown_area, width, depth) -> list[Targ
     targets: list[Target] = []
     occupied: list[Polygon] = list(structure)
 
-    def _place(kind: str, index: int, bounds) -> None:
+    # Spawned in a fixed order, so adding a marker kind cannot renumber an existing one.
+    n_slots = 2 + max(0, cfg.n_bonus_victims - 1) + max(0, cfg.n_fires - 1) + cfg.n_victims
+    streams = iter(np.random.default_rng(c) for c in mission_ss.spawn(n_slots))
+
+    room_box = box(ux0, uy0, ux1, uy1)
+
+    def _place(kind: str, index: int, bounds, forbid_room: bool = False) -> None:
+        rng = next(streams)
         bx0, by0, bx1, by1 = bounds
         for _ in range(cfg.max_placement_attempts):
             x = float(rng.uniform(bx0, bx1))
             y = float(rng.uniform(by0, by1))
             target = Target(id=f"{kind}_{index}", kind=kind, x=x, y=y)
             poly = target_polygon(target)
+            if forbid_room and room_box.intersects(poly):
+                continue
             if not _far_enough(poly, occupied, clearance):
                 continue
             targets.append(target)
@@ -946,12 +972,21 @@ def _place_targets(rng, cfg, structure, unknown_area, width, depth) -> list[Targ
     # Forced into the Unknown Search Area by rule 3.3.9 r.2.
     _place("bonus_victim", 0, room_bounds)
     _place("fire", 0, room_bounds)
+    # The rest are Known Search Area markers, and `known_bounds` spans the whole field north of
+    # the Start Area -- the room included. Without this guard 191 of 200 seeds dropped markers
+    # drawn for the known area inside the room instead, up to five in one seed, so the room held
+    # a seed-dependent 2 to 7 markers rather than the two 3.3.9 r.2 requires and neither zone's
+    # reward density was controllable. It is the same guard _place_walls and _place_pillars use.
+    #
+    # The rulebook does not forbid a marker in the room -- 3.3.3 r.1 excludes no zone. What it
+    # does is refuse to tell you, so the honest model is a distribution you control rather than
+    # one that drifts with the maze. Raise n_bonus_victims / n_fires to put more in the room.
     for i in range(1, cfg.n_bonus_victims):
-        _place("bonus_victim", i, known_bounds)
+        _place("bonus_victim", i, known_bounds, forbid_room=True)
     for i in range(1, cfg.n_fires):
-        _place("fire", i, known_bounds)
+        _place("fire", i, known_bounds, forbid_room=True)
     for i in range(cfg.n_victims):
-        _place("victim", i, known_bounds)
+        _place("victim", i, known_bounds, forbid_room=True)
     return targets
 
 

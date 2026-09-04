@@ -181,3 +181,84 @@ def test_a_saved_map_is_flyable(tmp_path):
     result = run(RunConfig(seed=99, n_drones=K.FLEET_MIN, duration_s=10.0, record=False),
                  arena=reloaded)
     assert result.config.arena_config == reloaded.config
+
+
+def test_a_missing_config_field_is_refused_not_defaulted():
+    """The failure carrying the config exists to prevent, reachable by deleting one key.
+
+    Taking this build's default for an absent field means a map generated at
+    min_gap_wall_m=1.4 revalidates against 2.0 and is rejected for a violation it never
+    committed -- or passes, and is then recorded in the run log as flown at 2.0.
+    """
+    data = arena_to_dict(generate_arena(0, ArenaConfig(min_gap_wall_m=1.4)))
+    del data["config"]["min_gap_wall_m"]
+    with pytest.raises(LogFormatError, match="missing ArenaConfig fields"):
+        arena_from_dict(data)
+    data.pop("config")
+    with pytest.raises(LogFormatError, match="missing ArenaConfig fields"):
+        arena_from_dict(data)
+
+
+def test_a_landmark_subclass_is_refused_rather_than_silently_flattened():
+    """A run log may drop subclass state; a map file may not -- preservation is its purpose."""
+
+    @dataclasses.dataclass(frozen=True)
+    class UwbAnchor(Landmark):
+        channel: int = 3
+
+    arena = generate_arena(0)
+    placed = dataclasses.replace(arena, landmarks=(UwbAnchor("a0", "uwb", 1.0, 19.0),))
+    with pytest.raises(LogFormatError, match="cannot represent"):
+        arena_to_dict(placed)
+
+
+def test_the_three_streams_stay_independent_of_each_other():
+    """R-WORLD-9. Rejection sampling made the mission stream a function of the maze.
+
+    The first two markers are forced into the room, so how many draws they burn depends on the
+    maze; on one shared stream that shifted every later marker. With the Known Search Area
+    bit-identical, changing only unknown_seed moved up to 12 of 12 markers and swung the number
+    outside the room from 6 to 9 -- up to 45 points of achievable score migrating between zones
+    because the maze changed.
+    """
+    ref = generate_arena(0, layout_seed=3, unknown_seed=0, mission_seed=11)
+    outside_ref = {t.id: (round(t.x, 6), round(t.y, 6))
+                   for t in ref.targets if not ref.in_unknown_area(t.x, t.y)}
+    counts = {len(outside_ref)}
+    for j in range(1, 12):
+        a = generate_arena(0, layout_seed=3, unknown_seed=j, mission_seed=11)
+        outside = {t.id: (round(t.x, 6), round(t.y, 6))
+                   for t in a.targets if not a.in_unknown_area(t.x, t.y)}
+        counts.add(len(outside))
+        assert outside == outside_ref, (
+            f"unknown_seed={j} moved a Known Search Area marker"
+        )
+    assert len(counts) == 1, f"the marker count outside the room varied: {sorted(counts)}"
+
+
+def test_known_area_markers_do_not_leak_into_the_room():
+    """The room holds exactly the two 3.3.9 r.2 requires, not a seed-dependent 2 to 7."""
+    for seed in range(30):
+        a = generate_arena(seed)
+        inside = [t.id for t in a.targets if a.in_unknown_area(t.x, t.y)]
+        assert sorted(inside) == ["bonus_victim_0", "fire_0"], (
+            f"seed {seed}: room holds {sorted(inside)}"
+        )
+
+
+def test_anchor_gap_actually_produces_free_islands():
+    """maze_anchor_gap_m = min_gap_wall_m must degenerate to the all-pairs reading.
+
+    Retracting only the ends touching a room face left every interior T- and L-junction at
+    exactly zero distance, so the knob changed nothing about the property it documented.
+    """
+    def touching(cfg):
+        n = 0
+        for seed in range(6):
+            a = generate_arena(seed, cfg)
+            mw = [w.polygon() for w in a.walls if w.kind == "maze_wall"]
+            n += sum(1 for i in range(len(mw)) for j in range(i + 1, len(mw))
+                     if mw[i].distance(mw[j]) < 1e-6)
+        return n
+    assert touching(ArenaConfig()) > 0, "an anchored maze should have touching walls"
+    assert touching(ArenaConfig(maze_anchor_gap_m=K.MIN_GAP_WALL_TO_WALL_M)) == 0
