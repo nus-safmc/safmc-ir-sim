@@ -26,7 +26,7 @@ The room's clear interior span is ``UNKNOWN_AREA_SIZE_M - thickness`` = 9.90 m. 
 corridors of clear width ``w`` separated by ``n - 1`` walls of thickness ``t`` requires
 ``n * w + (n - 1) * t = 9.90``, so:
 
-    n = 2  ->  w = 4.900 m
+    n = 2  ->  w = 4.900 m   <- one wall only: (n-1)^2, so the braid must not remove it
     n = 3  ->  w = 3.233 m
     n = 4  ->  w = 2.400 m   <- the densest grid that still clears the published 2 m gap
     n = 5  ->  w = 1.900 m   <- below the published minimum
@@ -49,17 +49,22 @@ That is what makes dead ends and forced backtracking possible.
 
 Both readings stay reachable, and through a metric knob rather than a string enum (which would
 fail ``test_every_config_field_declares_its_units``). ``ArenaConfig.maze_anchor_gap_m`` is the
-clearance each maze wall keeps from the room face it points at: ``0.0`` anchors it, and setting
-it to ``min_gap_wall_m`` turns every maze wall into a free island, degenerating exactly to the
-old all-pairs behaviour. Any result quoted from this simulator should say which value it used.
+clearance retracted from **both ends** of every maze run: ``0.0`` leaves them anchored, and
+setting it to ``min_gap_wall_m`` pulls every run clear of the room *and* of the other runs it
+met, degenerating to the all-pairs reading -- measured, 52 touching wall pairs at ``0.0`` and 0
+at ``2.0``. An earlier cut retracted only the ends touching a room face, which left every
+interior T- and L-junction at exactly zero distance and so changed nothing about the property it
+claimed to control. Any result quoted from this simulator should say which value it used.
 
 Connectivity is structural, not checked-and-hoped
 -------------------------------------------------
 The walls are the complement of a spanning tree over the cells, so every cell reaches every
-other cell by construction. Doorways are snapped to whole cells by :func:`plan_grid`, so a
-doorway opens into a cell rather than being bisected by a wall end. Together those two facts
-mean a generated maze cannot seal a doorway or strand a target. ``validate_arena`` still flood
-fills and asserts it, because a structural argument that is never tested is a comment.
+other cell by construction. ``arena._room_walls`` snaps each doorway to a whole *interior* cell,
+so a doorway opens into a cell rather than being bisected by a wall end, and never runs flush to
+a corner. Together those facts mean a generated maze cannot seal a doorway or strand a target.
+``validate_arena`` still flood fills and asserts it, because a structural argument that is never
+tested is a comment -- and the test that should have guarded the snapping asserted only that the
+room had *some* free space, which is true of an empty box.
 """
 
 from __future__ import annotations
