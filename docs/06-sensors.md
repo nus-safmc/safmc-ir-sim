@@ -8,7 +8,7 @@ the runner through one contract in `sensors/base.py`. Your policy reads every re
 name from `obs.sensors`; `obs.tof` and `obs.markers` are shorthands for the two below.
 
 This page is what those two report, and what the one sensor the platform models but the
-airframe does not carry — a [UWB ranging tag](#the-uwb-ranging-tag--not-flown) — would. The
+airframe does not carry — a [Qorvo DW3000 tag](#the-uwb-ranging-tag--a-dw3000-not-flown) — would. The
 contract itself, how to add a sensor, and what a **landmark** is — the thing you place in the
 arena for a sensor to find — are in
 [Adding a sensor or a landmark](10-adding-sensors-and-landmarks.md).

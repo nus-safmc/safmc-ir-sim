@@ -251,7 +251,7 @@ hover.
 ## Sensors we expect to add
 
 One sensor from the first version of this table now exists: the **UWB ranging tag**,
-`sensors/uwb.py`, described in [06-sensors.md](06-sensors.md#the-uwb-ranging-tag--not-flown)
+`sensors/uwb.py`, described in [06-sensors.md](06-sensors.md#the-uwb-ranging-tag--a-dw3000-not-flown)
 and decided in [ADR-0006](adr/0006-uwb-ranging-sensor.md). It is the worked answer to the
 last column — every number it needs is an assumption with an ID, and the airframe still does
 not carry one. None of the rest exist. Each is a config and a `sample()` away, and each needs

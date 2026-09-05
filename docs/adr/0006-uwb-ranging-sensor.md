@@ -4,6 +4,10 @@
 
 ## Context
 
+*(Written before the part was chosen. The addendum at the foot of this record supersedes the
+hardware framing below: the part is the Qorvo DW3000, and several figures here are DW1000
+ones. The decision itself stands.)*
+
 ADR-0005 made a sensor one file on one contract and shipped `examples/03_custom_sensor.py`, a
 range-only "beacon" sensor that is explicitly a template and not a model of anything (F-22).
 The team now wants the real thing: an ultra-wideband ranging tag that a policy can be written
@@ -98,10 +102,11 @@ such a run without knowing that is what it was.
    nothing about the venue's walls. A pair applied per crossing would dress an unknown in
    precision. The raycaster's private helpers can count segment hits once someone has
    ranged through the venue's walls, and the multi-wall pair is the number to start from.
-3. **Pessimistic defaults where the direction matters.** 20 m reach rather than the
-   datasheet's 60 m keeps the whole field within reach of three Start Area anchors, but only
-   just; at the 12 m hobby-firmware floor the far third of the field hears nothing from the
-   Start Area. Over-estimating localisation coverage is the mistake that survives to the
+3. **Pessimistic defaults where the direction matters.** A 20 m reach keeps the whole field
+   within reach of three Start Area anchors, but only just; at 12 m the far third of the
+   field hears nothing from the Start Area. *(The addendum sharpens this: on the DW3000 the
+   figure is a firmware setting more than a chip limit — 20 m stock, past 90 m indoors at
+   850 kb/s with a long preamble. F-29.)* Over-estimating localisation coverage is the mistake that survives to the
    live run; under-estimating it is caught on the bench.
 4. **Outliers off by default, like ToF noise.** A component with no published rate should
    not silently shape a default result. It is one config field away.

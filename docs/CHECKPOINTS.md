@@ -527,7 +527,9 @@ silently passed. `tests/test_sensor_primitive.py` (+2): a reading's array cannot
 writable again, on its own or through the ring's scan. The R-POL-4 walk now carries a UWB
 reading and still bans the `Landmark`; the units-suffix test covers `UWBConfig`.
 
-**Verified — MEASURED.** `examples/04_uwb_ranging.py`, seed 0, 10 drones, 60 s, ten anchors:
+**Verified — MEASURED**, on the pre-maze arena this checkpoint was built against; the merge
+below re-measured them and C10 carries the current figures. `examples/04_uwb_ranging.py`,
+seed 0, 10 drones, 60 s, ten anchors:
 6 000 fresh sweeps; 70.0 % of tag–anchor paths in line of sight, 93.2 % within 20 m; heard
 on 100 % of in-reach line-of-sight paths and 90.1 % of in-reach paths behind a wall (A-12
 is 0.10); line-of-sight error 0.000 ± 0.050 m (A-9 is 0.05); behind a wall +0.157 ± 0.398 m
