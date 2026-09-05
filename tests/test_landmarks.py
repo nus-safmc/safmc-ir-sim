@@ -443,6 +443,23 @@ def test_a_landmark_inside_the_unknown_area_is_rejected():
         validate_arena(dataclasses.replace(arena, landmarks=(inside,)))
 
 
+def test_a_plain_landmark_smuggled_into_the_targets_list_is_still_caught():
+    """The zone rule reads what a *sensor* reads, not just ``spec.landmarks``.
+
+    An auditor put a plain Landmark of an anchor kind into ``spec.targets`` with
+    dataclasses.replace. It is not a Target, so the mission ignores it; but ``all_landmarks``
+    includes it, so a UWB tag ranged to a free anchor in the middle of the room while the
+    zone rule and the nav-aid cap both looked at the other list."""
+    arena = generate_arena(3)
+    x0, y0, x1, y1 = arena.unknown_area
+    smuggled = Landmark("cheat", "uwb_anchor", (x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    with pytest.raises(ArenaError, match="Unknown Search Area"):
+        validate_arena(dataclasses.replace(arena, targets=arena.targets + (smuggled,)))
+    # Outside the room the same smuggling is legal, so the check is about the zone, not the list.
+    validate_arena(dataclasses.replace(
+        arena, targets=arena.targets + (Landmark("ok", "uwb_anchor", 0.5, 0.5),)))
+
+
 def test_generated_targets_in_the_room_are_not_caught_by_the_zone_rule():
     """3.3.9 r.2 puts bonus victims and fires inside the room by design.
 

@@ -472,7 +472,7 @@ would pass every check. That is R-SENS-11's review obligation, not a property of
 ## C9 — a UWB ranging tag on the sensor contract
 
 Commits `4b273e7` (spec), `dc8689a` (build) and the audit commit after it. ADR-0006,
-R-SENS-17, R-WORLD-11, A-9..A-13, F-23..F-27. Closes C8's first open item: a sensor beyond
+R-SENS-17, R-WORLD-11, A-14..A-18, F-23..F-27. Closes C8's first open item: a sensor beyond
 the flown two is now a model of something, with every number it needs registered.
 
 **Built.**
@@ -490,23 +490,24 @@ the flown two is now a model of something, with every number it needs registered
   with the mission.
 - `world/arena.py` — `validate_nav_aids(arena, kinds)`: the booklet's placement rules
   (§3.3.1 r.14–17) as an opt-in check the runner never applies.
-- `constants.py` — `NAV_AID_*` from the booklet; `UWB_*` as A-9..A-13 with their sources;
+- `constants.py` — `NAV_AID_*` from the booklet; `UWB_*` as A-14..A-18 with their sources;
   `UWB_RATE_HZ` and `UWB_ANCHOR_HEIGHT_M` as deployment defaults.
 - `examples/04_uwb_ranging.py` — six anchors across both rows of the Start Area and four on
   tripods in the Known Search Area, checked against the rules; a policy that reads the tag
   by name; and a grade of the sensor from the log alone.
-- Docs: ADR-0006; SPEC R-SENS-17, R-WORLD-11, an R-POL-3 note, §12; FIDELITY A-9..A-13 and
+- Docs: ADR-0006; SPEC R-SENS-17, R-WORLD-11, an R-POL-3 note, §12; FIDELITY A-14..A-18 and
   F-23..F-27; a UWB section in `docs/06`; the nav-aid rules and the table update in
   `docs/10`; `docs/07`, `docs/04`, ARCHITECTURE, README.
 
-**Verified — TESTED.** 321 tests. `tests/test_uwb.py` (39 items) checks: the defaults are the
+**Verified — TESTED**, at this checkpoint's commit: 321 tests, `tests/test_uwb.py` at 39
+items (44 after C10). It checks: the defaults are the
 registered constants and the tag is not flown; twelve impossible configs refused by
 `UWBConfig` and a rate that does not divide the tick by `RunConfig`; the range is three-dimensional to the anchor at mount height; anchors come
 back in arena order and only the tag's kind; an empty sweep; beyond reach is `inf`; a wall
 biases while a marker and a teammate do not, and the ring disagrees on purpose;
 obstruction follows the drone's altitude; on a generated arena the tag's obstruction equals
 the mission's line-of-sight scene at 40 random poses; the noise model as a pure function —
-zero-mean Gaussian at A-9 in line of sight, biased and wider and dropped at A-11/A-12
+zero-mean Gaussian at A-14 in line of sight, biased and wider and dropped at A-16/A-17
 behind a wall, `inf` beyond reach, never negative, outliers off by default and positive
 when on; the noise stream is independent of the geometry; identical runs identical;
 appending the tag leaves the ring's stream untouched (R-DET-3); the reading reaches the
@@ -531,9 +532,9 @@ reading and still bans the `Landmark`; the units-suffix test covers `UWBConfig`.
 below re-measured them and C10 carries the current figures. `examples/04_uwb_ranging.py`,
 seed 0, 10 drones, 60 s, ten anchors:
 6 000 fresh sweeps; 70.0 % of tag–anchor paths in line of sight, 93.2 % within 20 m; heard
-on 100 % of in-reach line-of-sight paths and 90.1 % of in-reach paths behind a wall (A-12
-is 0.10); line-of-sight error 0.000 ± 0.050 m (A-9 is 0.05); behind a wall +0.157 ± 0.398 m
-(A-11 is +0.15 and 0.40). `uwb.npz` is 207 kB (206,636 bytes) for that run; the numbers are
+on 100 % of in-reach line-of-sight paths and 90.1 % of in-reach paths behind a wall (A-17
+is 0.10); line-of-sight error 0.000 ± 0.050 m (A-14 is 0.05); behind a wall +0.157 ± 0.398 m
+(A-16 is +0.15 and 0.40). `uwb.npz` is 207 kB (206,636 bytes) for that run; the numbers are
 identical before and after the audit fixes. The full suite takes about a minute on a laptop
 (54–96 s across three machines).
 
@@ -576,7 +577,7 @@ against every claim in the docs — and a skeptic pass on the second, which uphe
 Doc claims the audits falsified and that were corrected: "20 m does not reach the far end
 of the field" (three Start Area anchors reach every point at 20 m; at 12 m the far third
 hears none); "give them a footprint for a blind control" (a footprint alone is still
-refused); "through concrete the link would die" (the measurement A-11 rests on was made
+refused); "through concrete the link would die" (the measurement A-16 rests on was made
 through pre-stressed concrete panels, which ranged with a +0.15 m bias); "nobody has
 measured a second wall" (the same table gives +0.58 m and 0.61 m); "a full sweep at 10 Hz is
 the PANS ceiling" (PANS returns four ranges per frame); the skew arithmetic; the F-number
@@ -586,7 +587,7 @@ range; the 1.39 ns → 0.40 m rounding; an R-SENS-7 citation that should have be
 say teams enter the Known Search Area only during setup; F-25's "no taller than the 2.0 m
 inner walls" is the exact condition for this arena.
 
-**Open.** Every number is an assumption: A-10 (reach) first, then A-11/A-12 against the
+**Open.** Every number is an assumption: A-15 (reach) first, then A-16/A-17 against the
 venue's actual walls. Obstruction is boolean — one wall's numbers behind any number of
 walls (F-24) — and calibration is assumed (F-26). No `PoseSource` consumes the tag yet;
 that is the next piece of work (ADR-0003), and until it exists a policy that wants a
@@ -623,7 +624,7 @@ the field edges, are checked to generate and validate on every seed 0-59.
 
 ## C10 — the UWB tag becomes a DW3000
 
-The team chose the part: **Qorvo DW3000**. ADR-0006 addendum, R-SENS-17 amended, A-9..A-13
+The team chose the part: **Qorvo DW3000**. ADR-0006 addendum, R-SENS-17 amended, A-14..A-18
 re-sourced, F-28..F-31.
 
 **Built.**
@@ -658,12 +659,13 @@ and switching the outlier term on must fatten the tail.
 |---|---|---|---|
 | line of sight, mean absolute error | 5.7 cm | 4.0 cm | optimistic by 1.4x |
 | line of sight, 90th percentile | 13.7 cm | 8.2 cm | optimistic by 1.7x |
-| obstructed, mean absolute error | 46.7 cm | 34.2 cm | optimistic by 1.4x |
+| obstructed, mean absolute error | 46.7 cm | 34.1 cm | optimistic by 1.4x |
 | obstructed, 90th percentile | 129.5 cm | 70.3 cm | **optimistic by 1.8x** |
 
 The body is within a factor of two; the tail is not, because a Gaussian tail is not a UWB
-tail. `outlier_probability` (A-13) is the term for that and is off for want of a published
-rate. `los_noise_std_m=0.07` matches the measured line of sight. The example, rerun after the
+tail. `outlier_probability` (A-18) is the term for that and is off for want of a published
+rate. `los_noise_std_m=0.07` matches the measured line-of-sight mean absolute error but not its
+90th percentile: no Gaussian matches both. The example, rerun after the
 maze merge, reports 6 000 sweeps, 64.2% of paths in line of sight (was 70.0% before the
 maze), 94.2% in reach, line-of-sight error 0.000 +/- 0.050 m and 0.155 +/- 0.397 m behind a
 wall, and 89.9% heard behind a wall in reach.
@@ -683,11 +685,48 @@ from its fleet rather than taking the 10 Hz default.
 
 **Open, and this is the honest part.** The DW3000 evidence is thinner than the DW1000
 evidence it replaces. Two independent literature searches disagreed on whether a DW3000
-through-wall measurement exists at all; what is citable is an aggregate error, and A-11's
+through-wall measurement exists at all; what is citable is an aggregate error, and A-16's
 **spread is still a DW1000 number** from the one paper this repository has read in full
 (F-28). Antenna-delay calibration is a per-unit constant offset of up to 15 cm that this
 model has no term for, and which module the team buys decides its size (F-31). Range varies
 3-5x with data rate, preamble and PAC, which one scalar cannot express (F-29). Nothing has
-been measured on the team's own kit in the hall, which is what A-9 through A-13 exist to ask
+been measured on the team's own kit in the hall, which is what A-14 through A-18 exist to ask
 for. And the tag still feeds no `PoseSource` (ADR-0003).
+
+**Audited.** One adversarial pass over both commits, told to falsify. It confirmed the
+arithmetic it could check independently — the channel edges, the F-30 model figures to two
+decimals, `sweep_rate_hz` for every fleet size 10-25 through actual `RunConfig` acceptance,
+`in_known_area` against 80 000 maze-corridor samples, and every changed markdown anchor — and
+found nine defects, all now fixed:
+
+- **The RF claim overclaimed, on the one matter that carries disqualification.** "It cannot
+  break the RF rule", "no configuration reaches it", "provably satisfied". The channel plan
+  proves no channel's *occupied band* overlaps 5.7-5.9 GHz; it does not prove zero emission
+  there, and `constants.py` already said the datasheet shows about -71 dBm/MHz inside the
+  band. All three statements now claim the occupied-bandwidth argument and name its limit.
+- **The merge collided two assumption ids.** PR #5 took A-9 and A-10 for the maze corridor
+  and the marker census while this branch had already taken A-9..A-13, and the merge simply
+  concatenated the tables. The UWB block is now **A-14..A-18**; A-11..A-13 are retired unused
+  and both registers say so. SPEC §12 was also missing the marker-census row entirely, which
+  made FIDELITY's "mirrors SPEC §12" false, and both tables were out of numeric order.
+- **A landmark could reach a run inside the room after all.** `_validate_landmark_zones` read
+  `spec.landmarks` while a sensor reads `all_landmarks`, so a plain `Landmark` smuggled into
+  `spec.targets` with `dataclasses.replace` gave a UWB tag a free anchor in the middle of the
+  Unknown Search Area, past both the zone rule and the cap. The check now walks
+  `all_landmarks` minus actual `Target`s, which keeps 3.3.9 r.2's generated markers exempt.
+- **F-28 named two different divergences.** Eight citations meant "the fixed rate does not
+  carry the fleet", which had no ledger row at all; that is now **F-32**.
+- **F-23 was stale by about eight times.** Its 3-4 ms per-anchor slot premise was overturned
+  by this very change: slots are per tag at 10 ms and an exchange is ~0.51 ms per anchor.
+- **The withdrawn 60 m reach story survived in two live places**, contradicting A-15 fifty
+  lines below it in the same files.
+- **The ADR still called the room rule opt-in.** The withdrawal existed only in a commit
+  message and this file; the record itself now carries the amendment.
+- Smaller: the calibration material cited F-26 where it belongs to F-31; the obstructed mean
+  absolute error is 34.1 cm, not 34.2, which was Monte-Carlo noise recorded as a figure; and
+  "`los_noise_std_m=0.07` matches the measured line of sight" is true of the mean absolute
+  error only — its 90th percentile stays about 16% optimistic, because no Gaussian matches
+  both. That last one is F-30 restating itself.
+
+**379 tests.**
 

@@ -65,10 +65,10 @@ made at the drone's altitude, which is exact while anchors stand no taller than 
 inner walls and pessimistic above that.
 
 **Noise is a three-part mixture, every parameter a named assumption.** In line of sight the
-reported range is the true range plus Gaussian noise (A-9, 0.05 m). Obstructed, it is dropped
-with probability A-12 (0.10) and otherwise biased by A-11 (+0.15 m, spread 0.40 m). With
-probability A-13 any reported range gains a positive uniform error of up to 1.5 m — off by
-default, because the tail is documented and its frequency is not. Anything beyond A-10
+reported range is the true range plus Gaussian noise (A-14, 0.05 m). Obstructed, it is dropped
+with probability A-17 (0.10) and otherwise biased by A-16 (+0.15 m, spread 0.40 m). With
+probability A-18 any reported range gains a positive uniform error of up to 1.5 m — off by
+default, because the tail is documented and its frequency is not. Anything beyond A-15
 (20 m) is `inf`. A reported range is never negative. Every draw comes from the sensor's own
 generator and the same number of draws is made per sample whatever the geometry, so the
 noise stream is a function of the seed alone.
@@ -86,9 +86,16 @@ landmark list, which the recorder writes in the same order the sensor reads.
 **The nav-aid rule is a check, not a referee.** `validate_nav_aids(arena, kinds)` in
 `world/arena.py` refuses a layout the booklet would not allow, taking the kinds that count as
 aids from the caller because the arena does not know a kind's meaning (ADR-0005). The runner
-never calls it. A run with an anchor in the Unknown Search Area answers a real question —
-what would perfect localisation there be worth? — and the check exists so that nobody quotes
-such a run without knowing that is what it was.
+never calls it: an experiment may deliberately exceed the cap to ask what denser coverage
+would be worth, and the check exists so that nobody quotes such a run without knowing that is
+what it was.
+
+> **Amended by the merge with PR #5.** This paragraph originally extended the same argument to
+> an anchor placed *inside the Unknown Search Area*. It no longer holds there. `main` refuses
+> that on every run, in `validate_arena`, calling it the highest-value cheat the rules forbid —
+> and that is the better call, because r.17 needs no notion of what an aid is: nothing a team
+> places may be in the room. The opt-in argument now covers only the cap and the footprint.
+> R-WORLD-11 records the split.
 
 ## Rationale
 
@@ -118,12 +125,12 @@ such a run without knowing that is what it was.
 ## Consequences
 
 - `sensors/uwb.py`, `UWBConfig` / `UWBRanges` / `UWBTag`; `WorldScene.structural_scene`;
-  `validate_nav_aids`; constants A-9..A-13 and `NAV_AID_*`; `examples/04_uwb_ranging.py`,
+  `validate_nav_aids`; constants A-14..A-18 and `NAV_AID_*`; `examples/04_uwb_ranging.py`,
   which places a legal anchor set, runs the flown suite plus the tag, and grades the sensor
   offline from the log alone.
 - `Observation` is unchanged. R-POL-3 is amended to say that a surveyed nav aid's position
   is the team's configuration, not a leaked world position.
-- Every number is an assumption with an ID, and A-10 is the one to measure first for this
+- Every number is an assumption with an ID, and A-15 is the one to measure first for this
   arena: whether the module reaches 12 m or 20 m decides whether the far third of the field
   is covered from the Start Area at all.
 - **Cost:** a run whose arena holds `uwb_anchor` points cannot be flown without the sensor
@@ -132,7 +139,7 @@ such a run without knowing that is what it was.
   sees and a drone can hit.
 - **Cost:** results on this sensor are conditional on five unmeasured numbers, on walls of
   unknown material, and on a module the team has not bought. `docs/FIDELITY.md` says so
-  (F-23..F-27).
+  (F-23..F-32).
 - **Cost:** an anchor placed at fixed coordinates in the Known Search Area can land inside a
   generated wall unless it has a footprint; the example gives its Known-Area anchors a
   0.25 m tripod base so the generator draws around them.
@@ -147,7 +154,7 @@ such a run without knowing that is what it was.
 | A `UWBAnchor(Landmark)` subclass with a per-anchor height | The log records base fields only, so the height would not round-trip; one config height serves a 2.5D sim |
 | Obstruct with `static_sensing_scene` (markers block) | A 1.0 m cardboard marker would block radio at cruise altitude and not above it — the height gate is right for light, wrong for radio |
 | Sequential per-anchor sampling in TDMA slots | A full sweep fits in one tick and the skew is below the noise; A-8 already accepts the same simplification for the ring |
-| Enforce the nav-aid rule in the runner or in arena validation | The arena does not know which kinds are aids; and the simulator reports rather than referees — the two-wave rule is scored the same way |
+| Enforce the *cap* in the runner or in arena validation | The arena does not know which kinds are aids; and the simulator reports rather than referees — the two-wave rule is scored the same way. *(The room rule is different and `main` does enforce it — see the amendment above.)* |
 | A line-of-sight flag in the reading | Tells the policy what no tag can know |
 | A quality factor per range | Real kit reports one (F-27), but it does not reliably say whether a range is biased; left out so nothing here leans on it |
 | A UWB `PoseSource` in the same change | Different seam, different audit; the sensor must exist first |
@@ -163,11 +170,14 @@ adds one fact the rules care about.
 
 **What the choice settles.**
 
-- **The rules are satisfied, provably.** §6.3 bans wireless transmission in 5.7–5.9 GHz on
-  pain of immediate disqualification and permits ultra-wideband in the same sentence. The
-  DW3000 has exactly two channels — 5 at 6489.6 MHz and 9 at 7987.2 MHz, each 499.2 MHz wide
-  — so its nearest band edge, 6240.0 MHz, is 340 MHz clear of 5900 MHz, and no configuration
-  tunes it into the banned band. Worth noting it does *not* offer channel 7, whose wider
+- **The rule is satisfied by the channel plan, which is the strongest claim available.**
+  §6.3 bans wireless transmission in 5.7–5.9 GHz on pain of immediate disqualification and
+  permits ultra-wideband in the same sentence. The DW3000 has exactly two channels — 5 at
+  6489.6 MHz and 9 at 7987.2 MHz, each 499.2 MHz wide — so no channel's *occupied* band
+  overlaps 5.7–5.9 GHz: the nearest edge, 6240.0 MHz, is 340 MHz clear, and no configuration
+  moves it. What this does **not** establish is zero emission there — the datasheet's own
+  channel-5 spectrum shows about −71 dBm/MHz inside the band, ~30 dB below its plateau. The
+  honest statement is "no channel occupies it", not "it cannot transmit there". Worth noting it does *not* offer channel 7, whose wider
   bandwidth about the same centre would have reached down to 5948.8 MHz. `constants.py`
   carries the numbers and a test asserts the arithmetic.
 - **Three priors were wrong.** The datasheet's headline "10 cm" is marketing copy from its
@@ -179,7 +189,7 @@ adds one fact the rules care about.
   anchor is ranged inside one, so ten drones get 10 Hz each and twenty-five get 4 Hz on the
   same radio. `sweep_rate_hz()` computes it; nothing applies it automatically, because a
   sensor config knows nothing about `RunConfig.n_drones` and wiring the two together would
-  make a sensor's timing depend invisibly on the fleet. F-28.
+  make a sensor's timing depend invisibly on the fleet. F-32.
 
 **What it does not settle, and this is the honest part.** The defaults barely moved, because
 the DW3000 evidence is thinner than the DW1000 evidence it replaces:
@@ -190,18 +200,18 @@ the DW3000 evidence is thinner than the DW1000 evidence it replaces:
   read in full. That mixed joint is F-28, and it is the weakest thing in the model.
 - **The model is measurably optimistic.** Against the one independent measurement of the part
   — mean absolute error 5.7 cm in line of sight and 46.7 cm obstructed, 90th percentiles
-  13.7 cm and 129.5 cm — this model at its defaults gives 4.0/34.2 cm and 8.2/70.3 cm. The
+  13.7 cm and 129.5 cm — this model at its defaults gives 4.0/34.1 cm and 8.2/70.3 cm. The
   body is within a factor of two; the tail is out by 1.8×, because a Gaussian tail is not a
   UWB tail. The `outlier_probability` term exists to fix exactly that and is switched off for
   want of a published rate. F-30 records it and a test pins it, so it cannot drift quietly.
 - **Antenna-delay calibration is a per-unit constant this model has no term for.** ±15 cm
   uncalibrated against ±6 cm calibrated, and a DWM3000 ships uncalibrated while a DWM3001C
-  ships factory-calibrated — so which module is bought moves the error by more than A-9 does.
+  ships factory-calibrated — so which module is bought moves the error by more than A-14 does.
   F-31.
 
 **Consequence for anyone quoting a result.** "Given a DW3000" is now a meaningful clause, and
 it is narrower than it sounds: the geometry is the part's, the line-of-sight noise is
 bracketed by two measurements of it, and the through-wall behaviour is still half inherited
 from a different radio. Nothing here has been measured on the team's own hardware in the
-competition hall, which is what A-9 through A-13 exist to ask for.
+competition hall, which is what A-14 through A-18 exist to ask for.
 

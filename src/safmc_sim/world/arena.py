@@ -1175,11 +1175,16 @@ def _validate_landmark_zones(spec: ArenaSpec) -> None:
     the Unknown Search Area -- teams are "NOT allowed to enter the Unknown Search Area at all
     times", so they cannot place anything there.
 
-    Only the zone rule is enforced, and only against ``spec.landmarks``: generated mission
-    markers live in ``spec.targets``, and 3.3.9 r.2 puts bonus victims and fires *inside* the
-    room by design. Placing a tag in there is the highest-value cheat the rules forbid -- a free
-    localisation anchor in the one region where localisation is meant to be hard -- so it is
-    checked rather than documented.
+    Only the zone rule is enforced, and only against things the *team* placed: 3.3.9 r.2 puts
+    bonus victims and fires *inside* the room by design, so anything that is a
+    :class:`Target` is exempt. Placing a tag in there is the highest-value cheat the rules
+    forbid -- a free localisation anchor in the one region where localisation is meant to be
+    hard -- so it is checked rather than documented.
+
+    It walks ``all_landmarks`` minus the targets rather than ``spec.landmarks`` alone, because
+    a sensor reads ``all_landmarks``: an auditor put a plain ``Landmark`` of an anchor kind
+    into ``spec.targets`` with ``dataclasses.replace``, and a UWB tag ranged to it in the
+    middle of the room while both this check and the nav-aid cap looked the other way.
 
     The companion rule, at most ten aids in the Known Search Area
     (:data:`~safmc_sim.constants.NAV_AID_MAX_KNOWN_AREA`), is **not** enforced here. It governs
@@ -1188,7 +1193,9 @@ def _validate_landmark_zones(spec: ArenaSpec) -> None:
     legitimate arenas. Assert it in your own experiment, or give ``Landmark`` a nav-aid flag
     first.
     """
-    for lm in spec.landmarks:
+    for lm in spec.all_landmarks:
+        if isinstance(lm, Target):
+            continue                      # 3.3.9 r.2 puts bonus victims and fires in the room
         if spec.in_unknown_area(lm.x, lm.y):
             raise ArenaError(
                 f"landmark {lm.id!r} at ({lm.x:.2f}, {lm.y:.2f}) is inside the Unknown Search "

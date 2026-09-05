@@ -21,7 +21,7 @@ Three things this shows, in order:
    the header says which paths crossed a wall. Nothing here re-runs the simulator.
 
 The modelled part is the Qorvo DW3000. Every number is an assumption with an ID
-(A-9..A-13, docs/FIDELITY.md); the model is measurably optimistic against the one
+(A-14..A-18, docs/FIDELITY.md); the model is measurably optimistic against the one
 independent measurement of that part (F-30); and no airframe carries one. See
 sensors/uwb.py and ADR-0006.
 

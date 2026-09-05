@@ -88,7 +88,7 @@ def test_defaults_are_the_registered_assumptions():
     assert (cfg.max_range_m, cfg.los_noise_std_m) == (K.UWB_MAX_RANGE_M, K.UWB_LOS_NOISE_STD_M)
     assert (cfg.nlos_bias_m, cfg.nlos_noise_std_m) == (K.UWB_NLOS_BIAS_M, K.UWB_NLOS_NOISE_STD_M)
     assert cfg.nlos_drop_probability == K.UWB_NLOS_DROP_PROBABILITY
-    assert cfg.outlier_probability == K.UWB_OUTLIER_PROBABILITY == 0.0, "outliers are off until measured (A-13)"
+    assert cfg.outlier_probability == K.UWB_OUTLIER_PROBABILITY == 0.0, "outliers are off until measured (A-18)"
     assert cfg.outlier_max_m == K.UWB_OUTLIER_MAX_M
     assert cfg.anchor_height_m == K.UWB_ANCHOR_HEIGHT_M
     # 10 Hz divides the 20 Hz loop; the runner would refuse otherwise.
@@ -110,7 +110,7 @@ def test_the_modelled_part_is_the_dw3000_and_its_channels_clear_the_banned_band(
 
 def test_the_sweep_rate_falls_with_the_fleet_not_the_anchor_count():
     """Slots are per tag and every anchor is swept inside one, so a bigger swarm ranges less
-    often on the same radio. The model's fixed rate does not know that (F-28); this helper
+    often on the same radio. The model's fixed rate does not know that (F-32); this helper
     is how a scenario author finds the right one."""
     assert sweep_rate_hz(10) == pytest.approx(10.0)      # ten drones, 10 ms slots
     assert sweep_rate_hz(25) == pytest.approx(4.0)       # the rulebook's maximum fleet
@@ -368,7 +368,7 @@ def test_the_model_is_optimistic_against_the_measured_dw3000_by_a_known_margin()
     a 60x40 m office, channel 9) reports mean absolute errors of 5.7 cm in line of sight and
     46.7 cm behind an obstruction, with 90th percentiles of 13.7 cm and 129.5 cm. This model
     is optimistic against all four, and most so in the tail -- which is the outlier term
-    (A-13) being off. If a change makes the model *worse* than measured, this fails."""
+    (A-18) being off. If a change makes the model *worse* than measured, this fails."""
     cfg, n, d = UWBConfig(), 400_000, 8.0
     rng = np.random.default_rng(0)
 
@@ -410,7 +410,7 @@ def test_outliers_are_off_by_default_and_positive_when_on():
     n = 1000
     gauss, u_drop, u_out, u_size = np.zeros(n), np.ones(n), np.zeros(n), np.ones(n)
     off = measure(np.full(n, 5.0), np.ones(n, bool), UWBConfig(), gauss, u_drop, u_out, u_size)
-    assert np.allclose(off, 5.0), "outlier_probability defaults to zero (A-13)"
+    assert np.allclose(off, 5.0), "outlier_probability defaults to zero (A-18)"
     on = measure(np.full(n, 5.0), np.ones(n, bool), UWBConfig(outlier_probability=1.0, outlier_max_m=1.5),
                  gauss, u_drop, u_out, u_size)
     assert np.allclose(on, 6.5), "an outlier is a positive error of up to outlier_max_m"

@@ -166,30 +166,33 @@ YAW_RATE_MAX_RADS = 1.5              # A-3-adjacent; no published limit, PX4 def
 #
 # So a number lifted from a DW1000 paper is a number about a different radio, and every one
 # below says which it came from. Where a DW3000 measurement exists it is used; where none
-# exists, the DW1000 figure is kept and labelled, which is the honest state of A-11 and A-12.
+# exists, the DW1000 figure is kept and labelled, which is the honest state of A-16 and A-17.
 #
 # The datasheet's headline "10 cm" is marketing copy from its first page. The electrical
 # specification is Table 14: +/- 6 cm after calibration, +/- 15 cm without it, and a ranging
 # standard deviation of 1.5 cm measured at -85 dBm with double-sided two-way ranging in line
-# of sight. Those are three different quantities and only the last is our A-9.
+# of sight. Those are three different quantities and only the last is our A-14.
 
 UWB_MODULE_PART = "DW3000"
 """Qorvo DW3000. Four variants (DW3110/3120/3210/3220) differing only in package and PDoA
 support, all with the same two channels; the module forms are DWM3000 (radio only, ships
 UNCALIBRATED) and DWM3001C (radio plus an nRF52833, factory-calibrated and FCC/ETSI/IC
-certified). Which one is bought changes F-26, not the model."""
+certified). Which one is bought changes F-31, not the model."""
 
 UWB_LOS_NOISE_STD_M = 0.05
-"""A-9. Bracketed rather than fitted. The datasheet's 1.5 cm (Table 14, at -85 dBm, DS-TWR,
+"""A-14. Bracketed rather than fitted. The datasheet's 1.5 cm (Table 14, at -85 dBm, DS-TWR,
 calibrated, line of sight) is the floor. Two independent DW3000 measurements agree on the
 ceiling: a mean absolute line-of-sight error of 5.7 cm in an office (Ember et al., IFIP 2024,
 Fig. 12) and a median of 6 cm across nine rooms (Flueratoru et al., WiNTECH'22, Table 2).
 Those carry residual bias and multipath this model does not separate out, so 5 cm sits near
 the pessimistic end deliberately -- and still comes out about 30% optimistic against them
-(F-30). A run that wants to match the measured part should set 0.07."""
+(F-30). Setting 0.07 matches the measured *mean absolute* error, 5.6 cm against 5.7; its
+90th percentile stays about 16% optimistic, because no Gaussian matches both -- the
+measured ratio of 90th percentile to mean absolute error is 2.40 and a Gaussian's 2.06.
+That is what F-30 is about."""
 
 UWB_MAX_RANGE_M = 20.0
-"""A-10. Not a chip limit -- a configuration one. 20 m is what a stock MaUWB board reached in
+"""A-15. Not a chip limit -- a configuration one. 20 m is what a stock MaUWB board reached in
 an office at 6.8 Mb/s (CNX Software review, 2024-04-16); Qorvo's staff call 40-50 m typical
 for line of sight; and a peer-reviewed study reached above 90 m in an indoor hallway by
 moving to 850 kb/s with a 4096-symbol preamble and PAC 32 (Han & Jang, Sensors 2025,
@@ -198,7 +201,7 @@ is the pessimistic stock-firmware figure; the team can buy back a factor of four
 firmware before touching the hardware (F-29)."""
 
 UWB_NLOS_BIAS_M = 0.15
-"""A-11. The DW3000 evidence is thinner than the DW1000 evidence it replaces, and two
+"""A-16. The DW3000 evidence is thinner than the DW1000 evidence it replaces, and two
 searches of it disagreed about what exists, so both are recorded. Ember et al. (IFIP 2024)
 put a DW3000's non-line-of-sight mean absolute error at 46.7 cm in an office, with the 90th
 percentile at 129.5 cm -- an aggregate over mixed obstructions, not a bias. Flueratoru et al.
@@ -209,7 +212,7 @@ concrete pillars, so any single number is a compromise; 0.15 m is kept, unchange
 DW1000 value, and the pair below reproduces an aggregate error close to Ember's (F-30)."""
 
 UWB_NLOS_NOISE_STD_M = 0.40
-"""A-11, and the one number here still inherited from the DW1000, because no DW3000 study
+"""A-16, and the one number here still inherited from the DW1000, because no DW3000 study
 publishes a per-obstacle standard deviation. It is 1.39 ns = 0.42 m, rounded, measured
 through one wall or obstacle on a DW1000 in a flat of pre-stressed concrete panels
 (Kolakowski & Modelski, TELFOR 2017, Table 1; arXiv 2403.19706). That paper was read in full
@@ -218,7 +221,7 @@ The same table gives 1.92 ns and 2.02 ns -- about +0.58 m and 0.61 m -- behind s
 which the model does not use (F-24). See F-28."""
 
 UWB_NLOS_DROP_PROBABILITY = 0.10
-"""A-12. No published through-wall dropout rate exists for either part -- a search for one
+"""A-17. No published through-wall dropout rate exists for either part -- a search for one
 came back empty. The only DW3000 evidence is qualitative: through a wall into an adjacent
 room the received level fell to about -90 dBm and the signal became, in the reviewer's words,
 extremely difficult to catch (CNX Software, 2024-04-16). One 802.15.4z study is a warning in
@@ -227,20 +230,20 @@ of the time on the DW3000's own consistency checks, and under Wi-Fi 6E interfere
 half. A tag configured for secure ranging would drop more, not fewer. Measure it."""
 
 UWB_OUTLIER_PROBABILITY = 0.0
-"""A-13. Off by default, and the term that would close the largest gap between this model and
+"""A-18. Off by default, and the term that would close the largest gap between this model and
 the measured part. A DW3000's measured non-line-of-sight 90th percentile is 129.5 cm (Ember
 et al., IFIP 2024) against this model's 70 cm with the outlier term off: the real tail is
 heavier than a Gaussian, which is what this term is for. Its rate is still unpublished, so
 turning it on is a choice a run must make and report (F-30)."""
 
 UWB_OUTLIER_MAX_M = 1.5
-"""A-13. Within the ~2.5 m tail the DW3000 CDF reaches (Flueratoru et al., Fig. 3a)."""
+"""A-18. Within the ~2.5 m tail the DW3000 CDF reaches (Flueratoru et al., Fig. 3a)."""
 
 # Sources for the UWB block, one per number (docs/README.md asks for a URL per claim):
 #   Datasheet   DW3000 Datasheet v1.3 (Decawave/Qorvo, 2020). Table 14 sec 3.9 is the ranging
 #               specification; Table 16 sec 4.2 the channels; Table 12 sec 3.7 the link
 #               budget; Figure 30 sec 6.4.5 the DS-TWR frame timing.
-#   A-9, A-11   E. Ember et al., "Improving the Correction of NLoS-Induced Ranging Errors in
+#   A-14, A-16   E. Ember et al., "Improving the Correction of NLoS-Induced Ranging Errors in
 #               UWB Systems through Enhanced Labeling", IFIP 2024. DW3000 on an nRF52,
 #               channel 9, BPRF, 64-symbol STS, 125 positions in a 60x40 m office; Fig. 12
 #               gives LoS MAE 5.7 cm / 90th 13.7 cm and NLoS MAE 46.7 cm / 90th 129.5 cm.
@@ -248,13 +251,13 @@ UWB_OUTLIER_MAX_M = 1.5
 #               UWB Ranging and Localization Systems", ACM WiNTECH'22, doi
 #               10.1145/3556564.3558238, reported to give per-obstacle medians in Table 2 --
 #               NOT confirmed against the paper here, unlike the DW1000 source below.
-#   A-11 spread M. Kolakowski, J. Modelski, "First path component power based NLOS mitigation
+#   A-16 spread M. Kolakowski, J. Modelski, "First path component power based NLOS mitigation
 #               in UWB positioning system", TELFOR 2017, Table 1 (arXiv 2403.19706). DW1000.
-#   A-10        cnx-software.com MaUWB DW3000 review, 2024-04-16 (the 20 m office figure);
+#   A-15        cnx-software.com MaUWB DW3000 review, 2024-04-16 (the 20 m office figure);
 #               Qorvo forum "DWM3000EVB max range" (40-50 m typical); B. Han, J. Jang,
 #               "Extending the Coverage of IEEE 802.15.4z HRP UWB Ranging", Sensors 2025,
 #               25(10):3058 (above 90 m indoors at 850 kb/s).
-#   A-12, F-24  cnx-software.com as above, qualitative only.
+#   A-17, F-24  cnx-software.com as above, qualitative only.
 #   F-23, F-28  Makerfabs UWB AT Command Manual v1.0.8 sec 3.11 (the TDMA slot arithmetic and
 #               the 8-anchor cap); DW3000 datasheet Figure 30; Decawave APS013 v2.3 (one
 #               frame per millisecond at 6.8 Mb/s, to hold the regulatory mean power limit).
@@ -270,8 +273,8 @@ UWB_RATE_HZ = 10.0
 """One synchronous sweep of every anchor per 100 ms. The period matches Decawave's PANS
 superframe, but PANS itself returns four ranges per tag per frame; a sweep of all N anchors
 at 10 Hz is what MaUWB-class firmware delivers (eight anchors per 10 ms tag slot, ten slots).
-A deployment choice, not a measurement (F-23); it must divide the tick rate, so 20 Hz is the
-other sensible value on the 20 Hz loop."""
+A deployment choice, not a measurement (F-23, F-32); it must divide the tick rate, so 20 Hz
+is the other sensible value on the 20 Hz loop."""
 
 UWB_ANCHOR_HEIGHT_M = 2.0
 """Where the anchors' antennas sit. The rules put no limit on a navigation aid's height
@@ -328,7 +331,7 @@ UWB_SLOT_S = 0.010
 """One tag's TDMA slot at 6.8 Mb/s, the floor a shipping firmware allows (Makerfabs AT
 manual v1.0.8 sec 3.11; 850 kb/s needs 15 ms). Slots are per TAG, and every anchor is swept
 inside one -- so the sweep rate falls with FLEET size, not anchor count. See
-``uwb.sweep_rate_hz`` and F-28."""
+``uwb.sweep_rate_hz`` and F-32."""
 
 UWB_MAX_ANCHORS_FIRMWARE = 8
 """Anchors one tag ranges to in a single sweep, on a shipping AT firmware. Eight is the size
