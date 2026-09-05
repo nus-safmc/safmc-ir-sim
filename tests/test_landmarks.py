@@ -66,14 +66,17 @@ def test_landmarks_placed_by_config_reach_the_arena_and_the_scene():
     world = WorldScene.from_arena(arena)
     assert world.landmarks == arena.all_landmarks
     assert world.landmarks_of("nav_tag", "uwb_anchor") == (tag, post)
-    assert len(world.static_sensing_scene.circles) == len(arena.pillars) + len(arena.targets) + 1
+    # 2 circles per pillar (shaft + weighted base), plus the targets, plus the one
+    # solid placed landmark.
+    assert len(world.static_sensing_scene.circles) == 2 * len(arena.pillars) + len(arena.targets) + 1
 
 
 def test_derived_placement_is_a_dataclass_replace():
     """A tag on every doorway: generate first, then place from the generated layout."""
     arena = generate_arena(1)
     x0, y0, x1, y1 = arena.unknown_area
-    tags = (Landmark("tag_sw", "nav_tag", x0, y0), Landmark("tag_ne", "nav_tag", x1, y1))
+    tags = (Landmark("tag_sw", "nav_tag", x0 - 1.0, y0 - 1.0),
+            Landmark("tag_ne", "nav_tag", x1 + 1.0, y1 + 1.0))
     placed = dataclasses.replace(arena, landmarks=tags)
     validate_arena(placed)
     assert placed.landmarks == tags and placed.targets == arena.targets
@@ -81,7 +84,11 @@ def test_derived_placement_is_a_dataclass_replace():
 
 def test_generation_keeps_targets_off_a_placed_body():
     """A body placed by config is occupied space to the target placer."""
-    post = Landmark("anchor_0", "uwb_anchor", 10.0, 12.0, radius_m=0.3, height_m=1.0)
+    # (3.0, 18.0): in the Known Search Area for every seed, and close enough to where the
+    # generator actually puts things that the guard has bite. An earlier relocation parked it
+    # at (1.2, 18.5), the extreme corner of the feasible band, where nothing generated ever
+    # came near -- the assertion then held even with the post absent from the config entirely.
+    post = Landmark("anchor_0", "uwb_anchor", 3.0, 18.0, radius_m=0.3, height_m=1.0)
     for seed in range(8):
         arena = generate_arena(seed, ArenaConfig(landmarks=(post,)))
         for t in arena.targets:
@@ -180,7 +187,8 @@ def test_a_supplied_arena_runs_and_the_log_rescores_it():
 
     arena = generate_arena(1)
     x0, y0, x1, y1 = arena.unknown_area
-    tags = (Landmark("tag_sw", "nav_tag", x0, y0), Landmark("tag_ne", "nav_tag", x1, y1))
+    tags = (Landmark("tag_sw", "nav_tag", x0 - 1.0, y0 - 1.0),
+            Landmark("tag_ne", "nav_tag", x1 + 1.0, y1 + 1.0))
     placed = dataclasses.replace(arena, landmarks=tags)
     cfg = RunConfig(seed=1, n_drones=10, duration_s=3.0, policy="sdlw",
                     sensors=(ToFConfig(), MarkerCamConfig(kinds=TARGET_KINDS + ("nav_tag",))))
@@ -234,9 +242,12 @@ def test_non_finite_landmarks_are_rejected(kw):
 
 
 def test_solid_landmarks_block_the_grid_and_a_fence_walls_a_target_off():
-    post = Landmark("post", "prop", 10.0, 12.0, radius_m=0.3, height_m=1.0)
+    post = Landmark("post", "prop", 3.0, 18.0, radius_m=0.3, height_m=1.0)
     grid = generate_arena(0, ArenaConfig(landmarks=(post,))).occupancy_grid(0.1)
-    assert grid[100, 120], "a solid landmark must be blocked in the occupancy grid"
+    # Derived from the post, not hard-coded: the index has to follow if the post ever moves.
+    assert grid[int(post.x / 0.1), int(post.y / 0.1)], (
+        "a solid landmark must be blocked in the occupancy grid"
+    )
 
     # A ring of tall posts around a target, tight enough that a 0.18 m drone cannot pass:
     # nothing inside the ring is reachable and nothing within the 1 m landing radius is
@@ -255,14 +266,20 @@ def test_solid_landmarks_block_the_grid_and_a_fence_walls_a_target_off():
             # North of the Start Area by the whole fence: every free Start Area cell is
             # reachable by definition, so a fence overlapping it would not enclose anything.
             and arena.start_area_depth_m + clear_m < t.y < arena.depth_m - clear_m
+            # In the Known Search Area: a fence is a team-placed thing, and 3.3.1 r.17 bars
+            # teams from the Unknown Search Area, so a target in the room cannot be fenced.
+            and arena.in_known_area(t.x, t.y)
         )
 
-    for seed in range(12):
+    # Scanned rather than fixed, because which seed offers a target with 2 m of clear space
+    # is an accident of the generator. The range is wide enough to survive a reseeding: the
+    # maze and the three-stream split both reshuffled every arena, and a range of 12 did not.
+    for seed in range(64):
         arena = generate_arena(seed)
         target = next((t for t in arena.targets if far_from_everything(arena, t)), None)
         if target is not None:
             break
-    assert target is not None, "no seed in 0..11 has a target with 2 m of clear space"
+    assert target is not None, "no seed in 0..63 has a target with 2 m of clear space"
     angles = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
     fence = tuple(
         Landmark(f"fence_{i}", "prop", target.x + ring_m * np.cos(a), target.y + ring_m * np.sin(a),
@@ -324,7 +341,7 @@ def test_landing_onto_a_body_is_a_crash_not_a_score():
 
 
 def test_a_flat_mark_is_kept_clear_of_generated_structure():
-    mark = Landmark("start_00", "start_mark", 10.0, 9.0, radius_m=0.5)
+    mark = Landmark("start_00", "start_mark", 3.0, 18.0, radius_m=0.5)
     footprint = target_polygon(mark)
     for seed in range(20):
         arena = generate_arena(seed, ArenaConfig(landmarks=(mark,)))
@@ -389,3 +406,70 @@ def test_a_supplied_arena_s_config_replaces_the_dead_one_in_the_log():
     assert result.config.arena_config == arena.config
     assert header["config"]["arena_config"]["n_pillars_known"] == 3
     assert header["seed"] == 1 and header["arena"]["seed"] == 5
+
+
+# ---------------------------------------------------------------------------------------
+# Zone permissions (rulebook 3.3.1 r.15-17). The three zones differ in what a team may DO in
+# them, not just in where they are: unlimited aids in the Start Area, at most ten in the Known
+# Search Area, and none at all in the Unknown Search Area, which teams may never enter.
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_three_zones_partition_the_field():
+    """Every point in the field is in exactly one zone, and the room is not the known area."""
+    arena = generate_arena(0)
+    for x in np.linspace(0.05, 19.95, 40):
+        for y in np.linspace(0.05, 19.95, 40):
+            zones = [
+                arena.in_start_area(x, y),
+                arena.in_known_area(x, y),
+                arena.in_unknown_area(x, y),
+            ]
+            assert sum(zones) == 1, f"({x:.2f}, {y:.2f}) is in {sum(zones)} zones, not 1"
+
+
+def test_a_landmark_inside_the_unknown_area_is_rejected():
+    """The highest-value cheat the rules forbid: a surveyed anchor where teams may never go.
+
+    Regression: point landmarks have radius 0, so they were in neither the `bodies` nor the
+    `marks` list that room placement consults, and were never considered at all. Fifteen nav
+    tags scattered over the field put a mean of 11.3 of them inside the room, in 200 seeds
+    out of 200.
+    """
+    arena = generate_arena(0)
+    x0, y0, x1, y1 = arena.unknown_area
+    inside = Landmark("cheat", "nav_tag", (x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    with pytest.raises(ArenaError, match="Unknown Search Area"):
+        validate_arena(dataclasses.replace(arena, landmarks=(inside,)))
+
+
+def test_generated_targets_in_the_room_are_not_caught_by_the_zone_rule():
+    """3.3.9 r.2 puts bonus victims and fires inside the room by design.
+
+    The zone rule reads `spec.landmarks`, never `all_landmarks`, so the mission markers the
+    generator is *required* to put in there are untouched by it.
+    """
+    for seed in range(6):
+        arena = generate_arena(seed)
+        assert any(arena.in_unknown_area(t.x, t.y) for t in arena.targets_of("bonus_victim"))
+        validate_arena(arena)  # raises if the zone rule caught a generated target
+
+
+def test_nav_aids_are_placed_after_survey_not_fixed_in_config():
+    """The faithful ordering: the room exists, the team surveys it, then places aids.
+
+    A fixed ArenaConfig position cannot work in general -- 33 m^2 at the centre of the field is
+    inside the room for every seed -- so this is the pattern the docs point to.
+    """
+    rng = np.random.default_rng(0)
+    for seed in range(8):
+        arena = generate_arena(seed)
+        aids = []
+        while len(aids) < K.NAV_AID_MAX_KNOWN_AREA:
+            x, y = float(rng.uniform(0.5, 19.5)), float(rng.uniform(0.5, 19.5))
+            if arena.in_known_area(x, y):
+                aids.append(Landmark(f"aid_{len(aids)}", "nav_tag", x, y))
+        placed = dataclasses.replace(arena, landmarks=tuple(aids))
+        validate_arena(placed)
+        assert len(placed.landmarks) == K.NAV_AID_MAX_KNOWN_AREA
+        assert not any(placed.in_unknown_area(lm.x, lm.y) for lm in placed.landmarks)

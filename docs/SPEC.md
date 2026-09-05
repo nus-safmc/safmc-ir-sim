@@ -103,7 +103,7 @@ positions "will NOT be given" and the Unknown Search Area layout is "intentional
 
 **R-WORLD-2** The default arena MUST encode the published 2026 Category Swarm geometry:
 field 20.0 m x 20.0 m; Start Area 20.0 m x 6.0 m on the south edge; Unknown Search Area
-10.0 m x 10.0 m walled with doorways; perimeter wall height 1.5 m on west/north/east only;
+10.0 m x 10.0 m walled with four doorways, interior maze sampled per seed; perimeter wall height 1.5 m on west/north/east only;
 inner wall height 2.0 m; pillars 0.30 m diameter, 2.0 m tall on a 0.50 m x 0.15 m base; minimum
 wall-to-wall gap 2.0 m; minimum pillar gap 1.0 m; flight ceiling 1.4 m
 [src: SAFMC 2026 Cat Swarm Challenge Booklet v2.0 §3.2, §3.3.1 r.13].
@@ -146,6 +146,27 @@ construction.
 ---
 
 ## 6. Drone model
+
+**R-WORLD-9** Arena generation MUST expose three independent RNG streams — `layout_seed` (the
+Known Search Area and the room's position), `unknown_seed` (the maze and the pillars inside the
+room) and `mission_seed` (victim, bonus-victim and fire placement) — each defaulting to a child
+of the arena seed via `SeedSequence.spawn` (R-DET-3). Pinning one stream MUST leave the others
+free, so that a result can be attributed to the factor that was varied. The maze pattern MUST be
+invariant, in room-relative coordinates, to `layout_seed`: moving the room translates the maze
+rather than resampling it. The seeds actually used MUST be recorded on the `ArenaSpec`, so an
+arena built with overrides is regenerable and not merely replayable.
+
+> A fixed set of maps is a *development* set. Policies overfit to it, which is the failure the
+> rulebook's withholding exists to punish, so final numbers MUST be quoted from seeds that were
+> never inspected.
+
+**R-WORLD-10** An arena MUST be serialisable to, and restorable from, a standalone file
+independent of any run log. The file MUST carry the geometry, the per-stream seeds and the full
+`ArenaConfig` — a standalone map has no run header to fall back on, so a dropped config would let
+revalidation re-check a map against gaps it was never generated under. Config fields MUST be
+serialised from `dataclasses.fields`, so a knob added later cannot silently vanish. Loading MUST
+validate by default, and MUST refuse a file whose schema differs or whose config carries fields
+this build does not know, rather than dropping them silently.
 
 **R-DRONE-1** Drone state MUST be `[x, y, theta, z, vx, vy]` where `vx, vy` are ARENA-frame
 velocities carried as state so that a first-order velocity lag can be modelled.
@@ -446,8 +467,9 @@ place, not a literal scattered through the code.
 | A-3 | Climb rate limit | 0.5 m/s | Not in firmware; PX4 default territory. |
 | A-4 | Marker detection range | 3.0 m | Firmware comment claims ~1 m for a screen-displayed tag; no measured data. |
 | A-5 | Camera horizontal FOV for detection | 1.0 rad | Derived from QVGA intrinsics `fx=163.5`, not measured. |
-| A-6 | Known Search Area depth | 14.0 m | Published in 2025, withdrawn from the 2026 table; derived as 20 - 6. |
-| A-7 | Unknown Search Area doorway count/width | 2 doorways, 1.0 m | Rulebook shows gaps in a not-to-scale diagram. |
+| ~~A-6~~ | ~~Known Search Area depth~~ | 14.0 m | **Retired — not an assumption.** The booklet v1 and v2 Play Field Element tables are character-identical and neither contains a Known Search Area row, so the figure was never published and never withdrawn. It is forced by 20 - 6. |
+| A-7 | Unknown Search Area doorway count/width | 4 doorways, 2.4 m | The sec 3.2 diagram draws one opening per face at 2.40-2.83 m, and 3.3.9 r.1 routes entry through "the open doorways shown in the diagram". Previously 2 x 1.0 m, which had no source and serialised entry. |
+| A-9 | Maze corridor width in the Unknown Search Area | 2.0 m floor, giving a 4x4 grid at 2.40 m | Sec 3.2 states the layout there is "intentionally NOT shown", so a distribution is sampled. The published 2 m gap caps the grid at 4x4. |
 | A-8 | ToF ring sampled synchronously at tick rate | 20 Hz, no skew | Hardware is 15 Hz round-robin with up to 64 ms skew across the ring. |
 
 **R-ASSUME-1** `docs/FIDELITY.md` MUST list every entry in this table together with what would be

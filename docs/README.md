@@ -22,6 +22,7 @@ decide whether a strategy works.
 | 8 | [Porting to ROS 2](08-porting-to-ros.md) | The seam that keeps this from being a dead end |
 | 9 | [Related work](09-related-work.md) | The two papers/codebases this must be able to host |
 | 10 | [**Adding a sensor or a landmark**](10-adding-sensors-and-landmarks.md) | **Start here if you are adding a sensor, or placing something for one to find** |
+| 11 | [**Building a map library**](11-map-libraries.md) | **Start here if you want a fixed set of arenas to develop against**: the three generation streams, saving maps, placing your own objects |
 
 ## Normative and process documents
 

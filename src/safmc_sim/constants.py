@@ -26,6 +26,13 @@ PERIMETER_WALL_HEIGHT_M = 1.5   # sec 3.2, three sides only: west, north, east
 INNER_WALL_HEIGHT_M = 2.0       # sec 3.2
 PILLAR_DIAMETER_M = 0.30        # sec 3.2
 PILLAR_HEIGHT_M = 2.0           # sec 3.2
+PILLAR_BASE_DIAMETER_M = 0.50   # sec 3.2, "includes a weighted circular base of 0.5m diameter
+PILLAR_BASE_HEIGHT_M = 0.15     # and 0.15m height". Staging hardware -- a heavy foot so a 2 m
+                                # column does not topple -- not an obstacle feature, so the
+                                # published >= 1 m pillar gap is measured off the 0.30 m shaft,
+                                # which is the only part inside the flight envelope. The base is
+                                # modelled as a second, low height band so a drone descending to
+                                # land beside a pillar meets it; see world/arena.py Pillar.
 
 MIN_GAP_WALL_TO_WALL_M = 2.0    # sec 3.2
 MIN_GAP_PILLAR_M = 1.0          # sec 3.2, pillar-to-pillar and pillar-to-wall
@@ -51,6 +58,11 @@ POINTS_FIRE = 10                # sec 3.4
 N_VICTIMS = 4                   # sec 3.3.3 r.3
 N_BONUS_VICTIMS = 4             # sec 3.3.3 r.3
 N_FIRES = 4                     # sec 3.3.5 r.2
+
+NAV_AID_MAX_KNOWN_AREA = 10     # sec 3.3.1 r.15, "a maximum of TEN (10) navigation aids is
+                                # allowed in the Known Search Area". r.16 puts no limit on the
+                                # Start Area; r.17 allows NONE in the Unknown Search Area and
+                                # bars teams from entering it at all times.
 
 MARKER_FOOTPRINT_M = 0.30       # sec 3.3.3 r.3, 30 x 30 x 100 cm
 MARKER_HEIGHT_M = 1.00          # sec 3.3.3 r.3 -- taller than cruise altitude, so it occludes
@@ -116,8 +128,20 @@ VELOCITY_TAU_S = 0.35           # A-2  no step-response data from the airframe
 CLIMB_RATE_MAX_MS = 0.5         # A-3  not present in firmware
 MARKER_DETECT_RANGE_M = 3.0     # A-4  MEASURE THIS FIRST -- it dominates every search result
 MARKER_DETECT_FOV_RAD = 1.0     # A-5  derived from fx=163.5 over 320 px, not measured
-UNKNOWN_AREA_DOORWAYS = 2       # A-7  rulebook diagram is explicitly not to scale
-UNKNOWN_AREA_DOORWAY_M = 1.0    # A-7
+UNKNOWN_AREA_DOORWAYS = 4       # A-7  one per face. The sec 3.2 diagram draws four openings,
+                                # one roughly centred on each side of the room, and 3.3.9 r.1
+                                # says the swarm enters "via the open doorways shown in the
+                                # diagram". Was 2 until the diagram was measured; two doorways
+                                # halved the entrances and serialised every entry.
+UNKNOWN_AREA_DOORWAY_M = 2.4    # A-7  the four openings measure 2.40-2.83 m on the diagram at
+                                # 300 dpi. The diagram is explicitly not to scale, so this is
+                                # still an assumption -- but 2.4 m is also exactly one maze cell
+                                # (world/maze.py) and clears the published 2 m gap, so the three
+                                # independent constraints agree. Was 1.0 m, which was 2.4x too
+                                # narrow and had no source at all.
+MAZE_CORRIDOR_M = 2.0           # A-9  the published >= 2 m wall-to-wall gap, reused as the floor
+                                # on corridor width inside the Unknown Search Area. See
+                                # world/maze.py for why this fixes the grid at 4 x 4.
 YAW_RATE_MAX_RADS = 1.5              # A-3-adjacent; no published limit, PX4 default territory
 
 # Simulation defaults (not claims about the world)
@@ -154,8 +178,6 @@ without ever leaving the Start Area. Real drones are placed by hand with room ar
 # throw away the research; leaving them unlabelled would imply the simulator honours them.
 # If you start using one, move it up into the block above.
 # --------------------------------------------------------------------------------------
-PILLAR_BASE_DIAMETER_M = 0.50   # sec 3.2, weighted base, 0.15 m tall
-PILLAR_BASE_HEIGHT_M = 0.15     # sec 3.2
 DRONE_BBOX_M = 0.30             # sec 6, must fit a 30 cm cube including propellers
 TOF_RATE_HZ = 15.0              # tof_task.c:475, 8 sensors x 8 ms round robin. Also the
                                 # VL53L5CX's own max rate at 8x8 (it does 60 Hz only at 4x4)
@@ -167,4 +189,11 @@ YAW_TOLERANCE_RAD = 0.10        # nav_task.c, ROTATING -> FLYING threshold
 COLLISION_DANGER_M = 0.40       # nav_task.c:122
 COLLISION_CLEAR_M = 0.50        # nav_task.c:123
 SETPOINT_STALE_TIMEOUT_S = 0.30  # mavlink_task.c:93, SP_STALE_TIMEOUT_MS
-KNOWN_AREA_DEPTH_M = 14.0       # A-6  published in 2025, withdrawn from the 2026 table
+KNOWN_AREA_DEPTH_M = 14.0       # DERIVED, not assumed: FIELD_DEPTH_M - START_AREA_DEPTH_M.
+                                # This carried assumption id A-6 and the note "published in 2025,
+                                # withdrawn from the 2026 table". Both halves were wrong. The
+                                # Play Field Element tables in booklet v1 and v2 are
+                                # character-identical and NEITHER has a Known Search Area row, so
+                                # nothing was ever published and nothing was withdrawn. The
+                                # figure is arithmetically forced by two published numbers, so
+                                # A-6 has been retired rather than left as a standing unknown.
