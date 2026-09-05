@@ -331,9 +331,13 @@ inside one -- so the sweep rate falls with FLEET size, not anchor count. See
 ``uwb.sweep_rate_hz`` and F-28."""
 
 UWB_MAX_ANCHORS_FIRMWARE = 8
-"""Anchors one shipping AT firmware supports (Makerfabs, sec 1.2: 8 anchors, 64 tags). The
-rules allow ten aids in the Known Search Area plus any number in the Start Area, so a legal
-layout can exceed what an off-the-shelf tag will actually range to. Not enforced."""
+"""Anchors one tag ranges to in a single sweep, on a shipping AT firmware. Eight is the size
+of that firmware's range report and has not changed; what did change is the pool it draws
+from -- its 2024 manual capped a network at eight anchors outright, and a 2025 revision made
+the pool unlimited with each tag selecting the eight nearest. So a legal layout of ten aids
+in the Known Search Area plus any number in the Start Area is fine on current firmware, and
+a tag still hears eight of them at a time. Not enforced here: the model ranges to every
+anchor placed, which is the optimistic direction (F-29)."""
 
 TOF_RATE_HZ = 15.0              # tof_task.c:475, 8 sensors x 8 ms round robin. Also the
                                 # VL53L5CX's own max rate at 8x8 (it does 60 Hz only at 4x4)
