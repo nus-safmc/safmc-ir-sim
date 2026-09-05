@@ -64,6 +64,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Iterable
 
 import numpy as np
 from shapely.geometry import Point, Polygon, box
@@ -78,9 +79,10 @@ from ..constants import (
     MARKER_FOOTPRINT_M,
     MARKER_HEIGHT_M,
     MAZE_CORRIDOR_M,
-    NAV_AID_MAX_KNOWN_AREA,
     MIN_GAP_PILLAR_M,
     MIN_GAP_WALL_TO_WALL_M,
+    NAV_AID_FOOTPRINT_M,
+    NAV_AID_MAX_KNOWN_AREA,
     N_BONUS_VICTIMS,
     N_FIRES,
     N_VICTIMS,
@@ -110,6 +112,8 @@ __all__ = [
     "ArenaSpec",
     "ArenaConfig",
     "generate_arena",
+    "validate_arena",
+    "validate_nav_aids",
     "TARGET_KINDS",
 ]
 
@@ -1090,6 +1094,58 @@ def validate_arena(spec: ArenaSpec, drone_radius_m: float = DRONE_RADIUS_M) -> N
     _validate_room_connectivity(spec, drone_radius_m)
 
 
+def validate_nav_aids(spec: ArenaSpec, kinds: Iterable[str]) -> None:
+    """The navigation-aid rules that :func:`validate_arena` deliberately does not enforce.
+
+    Two of the rulebook's three aid rules need no help. r.17 -- nothing in the Unknown Search
+    Area, which teams may never enter -- is enforced for every placed landmark by
+    :func:`_validate_landmark_zones` on every run, because it is the highest-value cheat the
+    rules forbid. r.16 puts no limit on the Start Area, so there is nothing to check.
+
+    What is left is the pair that cannot be checked without knowing which landmarks are
+    *navigation aids*: r.15's cap of ten in the Known Search Area, and r.14 f's 1 m x 1 m
+    footprint. A :class:`~safmc_sim.world.landmark.Landmark` may equally be scenery, a prop or
+    a venue feature, and the primitive carries no field that says which -- so ``kinds`` says,
+    and the caller is the one who knows. Every kind listed is counted together, which is what
+    the rule does: ten aids in the Known Search Area means ten, whether they are tags or
+    anchors or both.
+
+    Opt-in, and called by whoever builds the scenario, never by the runner: an experiment
+    that wants twenty anchors in order to ask what dense coverage would be worth is a
+    legitimate experiment, and this exists so that nobody quotes one without knowing that is
+    what it was. ``examples/04_uwb_ranging.py`` calls it on its anchors.
+
+    Raises:
+        ArenaError: naming the offending landmarks and the rule they break.
+    """
+    if isinstance(kinds, str):
+        # set("uwb_anchor") is a set of letters, and then nothing is an aid and every layout
+        # passes -- the most natural wrong call approved anything. An auditor made it.
+        raise ArenaError(
+            f"kinds must be a sequence of landmark kinds, got the string {kinds!r}; "
+            f"write ({kinds!r},)"
+        )
+    wanted = set(kinds)
+    if not wanted:
+        raise ArenaError("kinds is empty, so nothing would count as a navigation aid")
+    aids = [lm for lm in spec.all_landmarks if lm.kind in wanted]
+
+    too_wide = [lm.id for lm in aids if 2.0 * lm.radius_m > NAV_AID_FOOTPRINT_M]
+    if too_wide:
+        raise ArenaError(
+            f"navigation aid(s) {too_wide} exceed the {NAV_AID_FOOTPRINT_M:g} m x "
+            f"{NAV_AID_FOOTPRINT_M:g} m footprint the rules allow (sec 3.3.1 r.14 f)"
+        )
+
+    in_known = [lm.id for lm in aids if spec.in_known_area(lm.x, lm.y)]
+    if len(in_known) > NAV_AID_MAX_KNOWN_AREA:
+        raise ArenaError(
+            f"{len(in_known)} navigation aids in the Known Search Area, where the rules "
+            f"allow at most {NAV_AID_MAX_KNOWN_AREA} (sec 3.3.1 r.15): {in_known}. The "
+            f"Start Area takes any number (r.16)."
+        )
+
+
 def _validate_landmarks(spec: ArenaSpec) -> None:
     seen: set[str] = set()
     for lm in spec.all_landmarks:
@@ -1119,11 +1175,16 @@ def _validate_landmark_zones(spec: ArenaSpec) -> None:
     the Unknown Search Area -- teams are "NOT allowed to enter the Unknown Search Area at all
     times", so they cannot place anything there.
 
-    Only the zone rule is enforced, and only against ``spec.landmarks``: generated mission
-    markers live in ``spec.targets``, and 3.3.9 r.2 puts bonus victims and fires *inside* the
-    room by design. Placing a tag in there is the highest-value cheat the rules forbid -- a free
-    localisation anchor in the one region where localisation is meant to be hard -- so it is
-    checked rather than documented.
+    Only the zone rule is enforced, and only against things the *team* placed: 3.3.9 r.2 puts
+    bonus victims and fires *inside* the room by design, so anything that is a
+    :class:`Target` is exempt. Placing a tag in there is the highest-value cheat the rules
+    forbid -- a free localisation anchor in the one region where localisation is meant to be
+    hard -- so it is checked rather than documented.
+
+    It walks ``all_landmarks`` minus the targets rather than ``spec.landmarks`` alone, because
+    a sensor reads ``all_landmarks``: an auditor put a plain ``Landmark`` of an anchor kind
+    into ``spec.targets`` with ``dataclasses.replace``, and a UWB tag ranged to it in the
+    middle of the room while both this check and the nav-aid cap looked the other way.
 
     The companion rule, at most ten aids in the Known Search Area
     (:data:`~safmc_sim.constants.NAV_AID_MAX_KNOWN_AREA`), is **not** enforced here. It governs
@@ -1132,7 +1193,9 @@ def _validate_landmark_zones(spec: ArenaSpec) -> None:
     legitimate arenas. Assert it in your own experiment, or give ``Landmark`` a nav-aid flag
     first.
     """
-    for lm in spec.landmarks:
+    for lm in spec.all_landmarks:
+        if isinstance(lm, Target):
+            continue                      # 3.3.9 r.2 puts bonus victims and fires in the room
         if spec.in_unknown_area(lm.x, lm.y):
             raise ArenaError(
                 f"landmark {lm.id!r} at ({lm.x:.2f}, {lm.y:.2f}) is inside the Unknown Search "

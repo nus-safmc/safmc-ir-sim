@@ -443,6 +443,23 @@ def test_a_landmark_inside_the_unknown_area_is_rejected():
         validate_arena(dataclasses.replace(arena, landmarks=(inside,)))
 
 
+def test_a_plain_landmark_smuggled_into_the_targets_list_is_still_caught():
+    """The zone rule reads what a *sensor* reads, not just ``spec.landmarks``.
+
+    An auditor put a plain Landmark of an anchor kind into ``spec.targets`` with
+    dataclasses.replace. It is not a Target, so the mission ignores it; but ``all_landmarks``
+    includes it, so a UWB tag ranged to a free anchor in the middle of the room while the
+    zone rule and the nav-aid cap both looked at the other list."""
+    arena = generate_arena(3)
+    x0, y0, x1, y1 = arena.unknown_area
+    smuggled = Landmark("cheat", "uwb_anchor", (x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    with pytest.raises(ArenaError, match="Unknown Search Area"):
+        validate_arena(dataclasses.replace(arena, targets=arena.targets + (smuggled,)))
+    # Outside the room the same smuggling is legal, so the check is about the zone, not the list.
+    validate_arena(dataclasses.replace(
+        arena, targets=arena.targets + (Landmark("ok", "uwb_anchor", 0.5, 0.5),)))
+
+
 def test_generated_targets_in_the_room_are_not_caught_by_the_zone_rule():
     """3.3.9 r.2 puts bonus victims and fires inside the room by design.
 
@@ -473,3 +490,96 @@ def test_nav_aids_are_placed_after_survey_not_fixed_in_config():
         validate_arena(placed)
         assert len(placed.landmarks) == K.NAV_AID_MAX_KNOWN_AREA
         assert not any(placed.in_unknown_area(lm.x, lm.y) for lm in placed.landmarks)
+
+# ---------------------------------------------------------------------------------------
+# R-WORLD-11: the aid rules validate_arena deliberately leaves alone.
+#
+# The zone rule above (r.17) is enforced on every run. The cap of ten in the Known Search
+# Area (r.15) and the 1 m x 1 m footprint (r.14 f) cannot be, because a Landmark may be
+# scenery or a prop and the primitive does not say which -- so the caller names the kinds
+# that are aids, and calls this itself. The runner never does.
+# ---------------------------------------------------------------------------------------
+
+from safmc_sim.world.arena import validate_nav_aids  # noqa: E402
+
+
+def _aids_in_known_area(arena, n, kind="uwb_anchor", prefix="a"):
+    """``n`` aids at surveyed positions inside the Known Search Area of THIS arena.
+
+    Surveyed, not fixed: the room moves with the seed, so a hard-coded coordinate is inside
+    it for some seeds. This is the ordering the docs prescribe -- generate, survey, place.
+    """
+    rng = np.random.default_rng(abs(hash(prefix)) % (2**32))
+    aids = []
+    while len(aids) < n:
+        x, y = float(rng.uniform(0.5, 19.5)), float(rng.uniform(0.5, 19.5))
+        if arena.in_known_area(x, y):
+            aids.append(Landmark(f"{prefix}{len(aids)}", kind, x, y))
+    return tuple(aids)
+
+
+def test_any_number_of_aids_in_the_start_area_and_ten_in_the_known_area():
+    arena = generate_arena(0)
+    start = tuple(Landmark(f"s{i}", "uwb_anchor", 0.5 + i * 1.5, 0.5) for i in range(13))
+    known = _aids_in_known_area(arena, K.NAV_AID_MAX_KNOWN_AREA)
+    placed = dataclasses.replace(arena, landmarks=start + known)
+    validate_arena(placed)
+    validate_nav_aids(placed, ("uwb_anchor",))          # r.15 and r.16: allowed
+
+
+def test_an_eleventh_aid_in_the_known_area_is_refused_and_kinds_count_together():
+    arena = generate_arena(0)
+    eleven = _aids_in_known_area(arena, K.NAV_AID_MAX_KNOWN_AREA + 1)
+    with pytest.raises(ArenaError, match="at most 10"):
+        validate_nav_aids(dataclasses.replace(arena, landmarks=eleven), ("uwb_anchor",))
+    # Ten pass -- the check bites on the count, not on the placement.
+    validate_nav_aids(dataclasses.replace(arena, landmarks=eleven[:-1]), ("uwb_anchor",))
+    # Six anchors and five tags are eleven aids (r.15 counts aids, not kinds)...
+    mixed = _aids_in_known_area(arena, 6) + _aids_in_known_area(arena, 5, "nav_tag", "t")
+    with pytest.raises(ArenaError, match="11 navigation aids"):
+        validate_nav_aids(dataclasses.replace(arena, landmarks=mixed), ("uwb_anchor", "nav_tag"))
+    # ...but a kind the caller did not name is not an aid.
+    validate_nav_aids(dataclasses.replace(arena, landmarks=mixed), ("uwb_anchor",))
+    # Nor is an aid in the Start Area counted against the Known Area's ten (r.16).
+    start = tuple(Landmark(f"s{i}", "uwb_anchor", 0.5 + i * 1.4, 0.5) for i in range(13))
+    validate_nav_aids(dataclasses.replace(arena, landmarks=eleven[:-1] + start), ("uwb_anchor",))
+
+
+def test_the_room_rule_and_the_cap_are_enforced_in_different_places():
+    """Division of labour: validate_arena refuses the room on every run (r.17), and only the
+    caller can apply the cap (r.15), because only the caller knows which kinds are aids."""
+    arena = generate_arena(3)
+    x0, y0, x1, y1 = arena.unknown_area
+    in_room = dataclasses.replace(
+        arena, landmarks=(Landmark("cheat", "uwb_anchor", (x0 + x1) / 2, (y0 + y1) / 2),))
+    with pytest.raises(ArenaError, match="Unknown Search Area"):
+        validate_arena(in_room)                        # the run itself refuses it...
+    validate_nav_aids(in_room, ("uwb_anchor",))        # ...so this need not, and does not
+
+    over_cap = dataclasses.replace(arena, landmarks=_aids_in_known_area(arena, 11))
+    validate_arena(over_cap)                           # a legal placement, so the run allows it
+    with pytest.raises(ArenaError, match="at most 10"):
+        validate_nav_aids(over_cap, ("uwb_anchor",))   # only this says it breaks r.15
+
+
+def test_an_aid_wider_than_a_metre_is_refused():
+    arena = generate_arena(0)
+    tripod = Landmark("tripod", "uwb_anchor", 3.0, 1.0, radius_m=0.5)      # exactly 1 m: fine
+    stand = Landmark("stand", "uwb_anchor", 8.0, 1.0, radius_m=0.51)       # 1.02 m: not
+    validate_nav_aids(dataclasses.replace(arena, landmarks=(tripod,)), ("uwb_anchor",))
+    with pytest.raises(ArenaError, match="r.14"):
+        validate_nav_aids(dataclasses.replace(arena, landmarks=(stand,)), ("uwb_anchor",))
+
+
+def test_a_string_or_empty_kinds_is_refused_not_silently_passed():
+    """validate_nav_aids(arena, "uwb_anchor") made a set of letters, counted nothing, and
+    approved eleven aids -- the most natural wrong call passed everything."""
+    arena = generate_arena(3)
+    over_cap = dataclasses.replace(arena, landmarks=_aids_in_known_area(arena, 11))
+    with pytest.raises(ArenaError, match="string"):
+        validate_nav_aids(over_cap, "uwb_anchor")
+    with pytest.raises(ArenaError, match="empty"):
+        validate_nav_aids(over_cap, ())
+    for kinds in (["uwb_anchor"], {"uwb_anchor"}, (k for k in ("uwb_anchor",))):
+        with pytest.raises(ArenaError, match="at most 10"):
+            validate_nav_aids(over_cap, kinds)

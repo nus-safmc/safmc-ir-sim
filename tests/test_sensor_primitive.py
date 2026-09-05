@@ -17,7 +17,13 @@ from safmc_sim.api import Land, Policy, Velocity, register_policy
 from safmc_sim.errors import ConfigError
 from safmc_sim.recorder import Recorder, load_run
 from safmc_sim.runner import RunConfig, Runner, flown_sensors, run
-from safmc_sim.sensors.base import Sensor, SensorConfig, TrueState, read_only
+from safmc_sim.sensors.base import (
+    Sensor,
+    SensorConfig,
+    TrueState,
+    check_reading_is_immutable,
+    read_only,
+)
 from safmc_sim.sensors.marker_cam import MarkerCamConfig
 from safmc_sim.sensors.tof_ring import ToFConfig
 from safmc_sim.world.arena import ArenaConfig, TARGET_KINDS
@@ -566,16 +572,50 @@ def test_readings_have_no_writable_base():
         def step(self, obs):
             for array in (obs.tof.ranges_m, obs.tof.zone_bearings_rad, obs.tof.ranger_bearings_rad):
                 base = array
-                while base is not None:
+                # The chain ends at the read-only bytes a read_only() array lies over.
+                while isinstance(base, np.ndarray):
                     assert not base.flags.writeable
                     base = base.base
+                assert isinstance(base, bytes)
             return Velocity()
 
     run(RunConfig(seed=0, policy="_probes_base", **SHORT))
     from safmc_sim.testing import make_observation
 
     scan = make_observation().tof
-    assert scan.ranges_m.base is None or not scan.ranges_m.base.flags.writeable
+    assert not scan.ranges_m.flags.writeable and isinstance(scan.ranges_m.base.base, bytes)
+
+
+def test_a_reading_s_array_cannot_be_made_writable_again():
+    """numpy lets ``flags.writeable = True`` through on an array that owns its memory. An
+    auditor used it to move a UWB anchor for the rest of a run and to write -123 into a held
+    ToF scan and the log. A read_only() array lies over a bytes object and refuses the flip."""
+    arr = read_only(np.array([[1.0, 2.0], [3.0, 4.0]]))
+    with pytest.raises(ValueError, match="WRITEABLE"):
+        arr.flags.writeable = True
+    with pytest.raises(ValueError, match="WRITEABLE"):
+        arr.base.flags.writeable = True
+    check_reading_is_immutable("x", arr)
+    for shape, dtype in (((0, 3), float), ((), float), ((2, 2), bool), ((3,), np.int32)):
+        out = read_only(np.zeros(shape, dtype=dtype))
+        assert out.shape == shape and out.dtype == dtype and not out.flags.writeable
+    # A non-contiguous source is copied into a contiguous read-only array with the same values.
+    strided = np.arange(12.0).reshape(3, 4)[:, ::2]
+    out = read_only(strided)
+    assert np.array_equal(out, strided) and not out.flags.writeable
+    with pytest.raises(ConfigError, match="object array"):
+        read_only(np.array([object()], dtype=object))
+
+
+def test_the_ring_s_scan_cannot_be_flipped_writable_through_the_observation():
+    @register_policy("_flips_flag")
+    class Flips(Policy):
+        def step(self, obs):
+            with pytest.raises(ValueError, match="WRITEABLE"):
+                obs.tof.ranges_m.flags.writeable = True
+            return Velocity()
+
+    run(RunConfig(seed=0, policy="_flips_flag", **SHORT))
 
 
 @pytest.mark.parametrize("variant, match", [

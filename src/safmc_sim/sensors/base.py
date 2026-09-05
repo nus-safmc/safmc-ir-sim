@@ -3,8 +3,8 @@
 A sensor is a function from the drone's **true** state and the world to a frozen reading,
 sampled at a rate that divides the tick rate. The runner owns it, steps it after motion, and
 hands its latest reading to the policy under the sensor's name. That is the whole contract.
-The two sensors that ship -- the ToF ring and the marker camera -- are written against it, so
-a third sensor is a third file rather than a third special case.
+The two flown sensors -- the ToF ring and the marker camera -- and the opt-in UWB tag are
+written against it, so the next sensor is one more file rather than a special case.
 
 The rule that keeps a policy honest
 -----------------------------------
@@ -231,17 +231,28 @@ class Sensor(ABC):
 
 
 def read_only(array: np.ndarray) -> np.ndarray:
-    """A copy that cannot be written through -- not through ``.base`` either.
+    """A copy that cannot be written through -- not through ``.base``, not by flipping a flag.
 
     A frozen dataclass blocks rebinding but not in-place numpy writes. Without this, a policy
     doing ``obs.tof.zone_bearings_rad[:] += 0.5`` would permanently re-aim its own ring,
     silently and irrecoverably. It is a copy rather than a view because a read-only *view*
     still exposes the writable original as ``.base`` -- an auditor re-aimed the ring through
-    ``zone_bearings_rad.base[:] += 0.5``. A fresh copy owns its memory and has no base.
+    ``zone_bearings_rad.base[:] += 0.5``.
+
+    The copy is laid over a ``bytes`` object rather than owning its memory, because numpy
+    lets ``array.flags.writeable = True`` succeed on any array that owns its data -- a second
+    auditor moved a UWB anchor for the rest of the run that way, and wrote ``-123`` into a
+    held ToF scan and so into the log. An array over a read-only buffer refuses the flip:
+    ``ValueError: cannot set WRITEABLE flag to True of this array``.
     """
-    copy = np.array(array, copy=True)
-    copy.flags.writeable = False
-    return copy
+    source = np.asarray(array)
+    if source.dtype == object:
+        raise ConfigError(
+            "read_only() cannot take an object array: it can hold anything mutable and cannot "
+            "be recorded. Use a numeric array or a tuple."
+        )
+    # tobytes() serialises in C order whatever the source's strides, and keeps a 0-d shape.
+    return np.frombuffer(source.tobytes(), dtype=source.dtype).reshape(source.shape)
 
 
 _IMMUTABLE_SCALARS = (str, bytes, int, float, bool, complex, type(None), np.generic)
@@ -264,7 +275,8 @@ def check_reading_is_immutable(sensor_name: str, reading: Any, path: str = "read
                 f"mutable and cannot be recorded. Use a numeric array or a tuple."
             )
         base = reading
-        while base is not None:
+        # The chain ends at None, or at the read-only ``bytes`` a read_only() array lies over.
+        while isinstance(base, np.ndarray):
             if base.flags.writeable:
                 raise ConfigError(
                     f"sensor {sensor_name!r}: {path} is a writable array"

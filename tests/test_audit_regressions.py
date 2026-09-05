@@ -412,18 +412,19 @@ def test_every_config_field_declares_its_units():
     from safmc_sim.kinematics import QuadParams
     from safmc_sim.sensors.marker_cam import MarkerCamConfig
     from safmc_sim.sensors.tof_ring import ToFConfig
+    from safmc_sim.sensors.uwb import UWBConfig
     from safmc_sim.world.arena import ArenaConfig
 
     allowed = ("_m", "_rad", "_s", "_ms", "_hz", "_rads", "_index", "_ticks")
     dimensionless = {
         "n_rangers", "zones_per_ranger", "front_index", "seed", "n_drones", "policy",
-        "policy_config", "arena_config", "quad_params", "sensors", "name", "kinds",
+        "policy_config", "arena_config", "quad_params", "sensors", "name", "kinds", "kind",
         "collision_behaviour", "record", "pose_source", "n_inner_walls", "n_pillars_known",
         "n_unknown_walls", "n_pillars_unknown", "n_victims", "n_bonus_victims", "n_fires",
         "max_placement_attempts", "tick_hz", "landmarks",
-        "duration_s", "n_maze_loops",
+        "duration_s", "n_maze_loops", "nlos_drop_probability", "outlier_probability",
     }
-    for cls in (RunConfig, QuadParams, ToFConfig, MarkerCamConfig, ArenaConfig):
+    for cls in (RunConfig, QuadParams, ToFConfig, MarkerCamConfig, ArenaConfig, UWBConfig):
         for field in dataclasses.fields(cls):
             if field.name in dimensionless:
                 continue

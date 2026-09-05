@@ -168,6 +168,24 @@ serialised from `dataclasses.fields`, so a knob added later cannot silently vani
 validate by default, and MUST refuse a file whose schema differs or whose config carries fields
 this build does not know, rather than dropping them silently.
 
+**R-WORLD-11** *(added with ADR-0006)* The rulebook's navigation-aid rules
+[src: SAFMC 2026 Cat Swarm Challenge Booklet v2.0 §3.3.1 r.14-17] MUST be enforced in two
+places, because they are not all checkable from the arena alone.
+
+Arena validation MUST refuse any placed landmark inside the Unknown Search Area, on every
+run (r.17: teams may never enter it, so nothing they place can be there). That rule needs no
+notion of what an aid is — nothing at all may be in the room — so it is not the caller's to
+opt into.
+
+The remaining two do need it: at most **ten** aids in the Known Search Area (r.15), and each
+aid within **1 m x 1 m** (r.14 f). A `Landmark` may equally be scenery, a prop or a venue
+feature, and the primitive carries no field that distinguishes them, so the package MUST
+provide a check that takes the landmark kinds counting as aids **from its caller**, counts
+every listed kind together, and names the offending landmarks and the rule. The runner MUST
+NOT apply that check: an experiment may deliberately exceed the cap to ask what denser
+coverage would be worth, and the check exists so that nobody quotes such a run without
+knowing that is what it was.
+
 **R-DRONE-1** Drone state MUST be `[x, y, theta, z, vx, vy]` where `vx, vy` are ARENA-frame
 velocities carried as state so that a first-order velocity lag can be modelled.
 
@@ -327,6 +345,35 @@ disk. (A failure of the disk itself mid-write can still leave a partial director
 MUST list every sensor with its config type and whether it was recorded. `record()` MUST be
 pure: recording MUST NOT affect results (R-OBS-4).
 
+**R-SENS-17** *(added with ADR-0006, amended with its DW3000 addendum)* The package MUST
+provide a UWB ranging tag on the R-SENS-12 contract (`sensors/uwb.py`) that is NOT part of
+`flown_sensors()`. It MUST model a **named part** -- the Qorvo DW3000
+[src: DW3000 Datasheet v1.3] -- and every default MUST record whether its source measured
+that part or the older DW1000, because most of the published UWB literature is DW1000 work
+and the two differ [src: DW3000 Datasheet §1.2]. Its configured
+kind MUST NOT be a mission kind: a tag that ranged to the markers would report every
+target's true position (R-POL-3). Its reading MUST be, for every landmark of its kind in
+arena order and fixed for the run: the anchor ids, the surveyed anchor positions (each at
+the configured mount height), and one reported range per anchor, `inf` where no measurement
+was obtained -- and nothing carrying more information than those: no bearing, no
+line-of-sight or quality flag (a derived convenience such as `heard`, `isfinite(ranges_m)`,
+is not a fourth channel). The true range MUST be the three-dimensional distance from the
+drone's true position to the anchor. An anchor beyond `max_range_m` MUST report `inf`.
+Obstruction MUST be decided against walls and pillars only, by the line-of-sight segment
+test of R-MISS-2, height-gated per R-SENS-6, at the tag's altitude; solid landmarks and
+other drones MUST NOT obstruct. An unobstructed range MUST be the true range plus zero-mean Gaussian noise of
+`los_noise_std_m`; an obstructed range MUST be `inf` with probability
+`nlos_drop_probability` and otherwise the true range plus `nlos_bias_m` plus zero-mean
+Gaussian noise of `nlos_noise_std_m`; with probability `outlier_probability` a reported range
+MUST gain a further positive error uniform on `[0, outlier_max_m]`. A reported range MUST NOT
+be negative. Every draw MUST come from the sensor's own generator (R-DET-2), and the number
+of draws per sample MUST NOT depend on the geometry, so the noise stream is a function of the
+seed alone. Every default of the reach and noise model MUST be a named constant registered
+in §12 (A-14..A-18); the sweep rate and the anchor height are deployment choices, named
+constants outside the register. The sensor MUST record `ranges_m` shaped `(ticks, agents, anchors)` and the anchor positions as a
+static array (R-SENS-16); column `j` MUST be the `j`-th landmark of the sensor's kind in the
+header's landmark list, so anchor identity is recoverable from the log alone (R-OBS-3).
+
 ---
 
 ## 8. Policy interface
@@ -345,6 +392,12 @@ unfound target or landmark positions) MUST NOT be reachable from `Observation`.
 > Amended with ADR-0005. The original wording named "the ToF product, marker detections",
 > which was the sensor list of the day rather than a rule. Readings now arrive under
 > `sensors`; the flown two keep their shorthands.
+>
+> Amended with ADR-0006. "Landmark positions" means positions the drone has neither measured
+> nor been given. A navigation aid the team placed and surveyed is the team's own
+> configuration, and the sensor that reads it MAY report the surveyed position beside the
+> measurement, as a UWB tag configured with its anchor list does (R-SENS-17). What stays
+> unreachable is everything the team did not put there: targets, structure, the room.
 
 **R-POL-4** Violating R-POL-3 MUST be detectable: an auditor MUST be able to enumerate every
 public attribute reachable from an `Observation` and find no reference to the environment, the
@@ -467,10 +520,18 @@ place, not a literal scattered through the code.
 | A-3 | Climb rate limit | 0.5 m/s | Not in firmware; PX4 default territory. |
 | A-4 | Marker detection range | 3.0 m | Firmware comment claims ~1 m for a screen-displayed tag; no measured data. |
 | A-5 | Camera horizontal FOV for detection | 1.0 rad | Derived from QVGA intrinsics `fx=163.5`, not measured. |
-| ~~A-6~~ | ~~Known Search Area depth~~ | 14.0 m | **Retired — not an assumption.** The booklet v1 and v2 Play Field Element tables are character-identical and neither contains a Known Search Area row, so the figure was never published and never withdrawn. It is forced by 20 - 6. |
 | A-7 | Unknown Search Area doorway count/width | 4 doorways, 2.4 m | The sec 3.2 diagram draws one opening per face at 2.40-2.83 m, and 3.3.9 r.1 routes entry through "the open doorways shown in the diagram". Previously 2 x 1.0 m, which had no source and serialised entry. |
-| A-9 | Maze corridor width in the Unknown Search Area | 2.0 m floor, giving a 4x4 grid at 2.40 m | Sec 3.2 states the layout there is "intentionally NOT shown", so a distribution is sampled. The published 2 m gap caps the grid at 4x4. |
 | A-8 | ToF ring sampled synchronously at tick rate | 20 Hz, no skew | Hardware is 15 Hz round-robin with up to 64 ms skew across the ring. |
+| A-9 | Maze corridor width in the Unknown Search Area | 2.0 m floor, giving a 4x4 grid at 2.40 m | Sec 3.2 states the layout there is "intentionally NOT shown", so a distribution is sampled. The published 2 m gap caps the grid at 4x4. |
+| A-10 | Marker census 4/4/4 treated as known | 4 victims, 4 bonus, 4 fires every seed | The rulebook publishes the counts but says the placements are unknown; the generator reproduces the counts exactly, which a real team could not rely on. |
+| A-14 | DW3000 line-of-sight ranging noise | 0.05 m std | Bracketed by the datasheet's 1.5 cm (Table 14, calibrated, at -85 dBm) and two independent measurements of the part at 5.7-6 cm; ~30% optimistic against the latter (F-30). Not measured on the team's kit. |
+| A-15 | DW3000 maximum range | 20 m | A firmware setting more than a chip limit: 20 m stock at 6.8 Mb/s, 40-50 m typical, past 90 m indoors at 850 kb/s with a long preamble (F-29). At 20 m three Start Area anchors reach every point of the field; at 12 m the far third hears none. |
+| A-16 | DW3000 through-wall bias and spread | +0.15 m, 0.40 m std | No DW3000 study publishes a bias in this form; the aggregate is 46.7 cm mean absolute error (Ember et al. 2024). The spread is still a DW1000 number (TELFOR 2017, Table 1) — the model's weakest joint, F-28. |
+| A-17 | DW3000 through-wall dropout probability | 0.10 | No published rate for either part. Secure 802.15.4z ranging drops far more. |
+| A-18 | DW3000 outlier probability and size | 0 (off), up to 1.5 m | The heavy positive tail is documented, its frequency is not; off until measured, and it is the gap in F-30. |
+| ~~A-6~~ | ~~Known Search Area depth~~ | 14.0 m | **Retired — not an assumption.** The booklet v1 and v2 Play Field Element tables are character-identical and neither contains a Known Search Area row, so the figure was never published and never withdrawn. It is forced by 20 - 6. |
+
+*A-11 to A-13 are unused: they were briefly held by the UWB assumptions on an unmerged branch, which renumbered to A-14..A-18 when PR #5 took A-9 and A-10 first. An id is never reused.*
 
 **R-ASSUME-1** `docs/FIDELITY.md` MUST list every entry in this table together with what would be
 needed to resolve it, and MUST list every known divergence between the simulator and the real

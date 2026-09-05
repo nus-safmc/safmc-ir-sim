@@ -35,6 +35,7 @@ flowchart TB
         BASE["sensors/base.py<br/><i>the sensor contract</i>"]
         RING["sensors/tof_ring.py"]
         CAM["sensors/marker_cam.py"]
+        UWB["sensors/uwb.py<br/><i>opt-in</i>"]
         RAY["sensors/raycast.py"]
     end
 
@@ -45,11 +46,11 @@ flowchart TB
     RUN -->|"calls step(obs)"| POL
     RUN --> MIS & REC & BB & PS
     RUN -->|"sample(truth, world)"| BASE
-    BASE --- RING & CAM
+    BASE --- RING & CAM & UWB
     SEN -->|"implements"| BASE
     SEN -.->|"places"| ARENA
     RUN -->|"env.step(velocity)"| IRSIM
-    RING & CAM --> RAY
+    RING & CAM & UWB --> RAY
     ARENA --> RAY
     ARENA -->|"builds the scene"| IRSIM
 
@@ -86,7 +87,7 @@ choice a strategy made. There is a test that fails if that is ever violated.
 | **Scoring** | `mission.py` | Read if curious | Which targets counted and why |
 | **Observability** | `recorder.py`, `metrics.py`, `tools/viz.py` | Use the outputs | The log, the numbers, the replay page |
 | **Deferred seams** | `pose.py`, `blackboard.py` | Extend later | Where pose noise and a lossy radio will go |
-| **Sensors** | `sensors/base.py`, `sensors/tof_ring.py`, `sensors/marker_cam.py` | **Extend** | The contract every sensor implements, and the two the airframe carries |
+| **Sensors** | `sensors/base.py`, `sensors/tof_ring.py`, `sensors/marker_cam.py`, `sensors/uwb.py` | **Extend** | The contract every sensor implements, the two the airframe carries, and a UWB ranging tag it could carry (opt-in) |
 | **Landmarks** | `world/landmark.py` | **Extend** | Things placed in the world for sensors to find: markers, nav tags, anchors |
 | **The world** | `world/arena.py`, `sensors/raycast.py`, `sensors/scene.py` | Rarely | Arena generation, ray casting, the world as a sensor sees it |
 | **Foundations** | `constants.py`, `frames.py`, `errors.py` | Look things up | Every published number, angle conventions, exception types |

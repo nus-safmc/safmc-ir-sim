@@ -18,6 +18,7 @@ Architecture, from `esp-everything/CLAUDE.md:7`:
 | Ranging | **8 x ST VL53L5CX** multizone ToF behind a TCA9548A I2C mux |
 | Camera | OV2640, grayscale QVGA 320x240, pitched **45 degrees nose-down**, 0.02 m forward |
 | Optical flow / downward range | **Not on the ESP32.** Listed as "Potential Expansion" in `pcb_hardware`. Height comes from PX4's `LOCAL_POSITION_NED.z` |
+| UWB ranging | **Not flown.** The team has chosen the **Qorvo DW3000** and the simulator models it ([06-sensors.md](06-sensors.md#the-uwb-ranging-tag--a-dw3000-not-flown)), but no airframe carries one and no number in the model has been measured on the team's kit. A module is a new SPI subscription on the ESP32, not an adapter — see [08-porting-to-ros.md](08-porting-to-ros.md) |
 | Collision radius used by nav | 0.18 m (`vfh.h:43`) |
 
 The PX4 forks contain **no SAFMC customisation** worth porting. Across every branch the only
