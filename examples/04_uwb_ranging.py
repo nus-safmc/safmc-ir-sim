@@ -7,8 +7,11 @@ Three things this shows, in order:
    (booklet 3.3.1 r.14-17). The layout below is six anchors across both rows of the Start
    Area -- collinear anchors leave a mirror ambiguity, so use both rows -- and four on
    tripods in the Known Search Area, two in its far corners and two half-way up its sides,
-   a rectangle rather than a line, checked with ``validate_nav_aids``.
-   The runner would not have refused an illegal layout; the check is yours to call.
+   a rectangle rather than a line. These sit near the field edges, clear of the room on
+   every seed (a test checks it); anywhere less marginal, survey the generated arena with
+   ``in_known_area`` and place with ``dataclasses.replace`` rather than fixing coordinates.
+   The run refuses an anchor in the room by itself; the cap of ten is ``validate_nav_aids``,
+   which is yours to call.
 2. **Reading the tag.** ``obs.sensors["uwb"]`` is ``UWBRanges``: anchor ids, their surveyed
    positions, and one range each, ``inf`` where nothing was heard. No bearing, no flag that
    says which ranges are biased -- that is the problem a localiser has to solve, and it is
@@ -163,7 +166,8 @@ def grade(log_dir: str) -> dict[str, float]:
 
 if __name__ == "__main__":
     config = make_config()
-    # The runner does not referee anchor placement (R-WORLD-9); this does.
+    # The run refuses an anchor inside the room by itself; the cap of ten in the Known
+    # Search Area is only checkable if you say which kinds are aids (R-WORLD-11), so:
     validate_nav_aids(generate_arena(config.seed, config.arena_config), ("uwb_anchor",))
 
     result = run(config, recorder=Recorder("runs/uwb", overwrite=True))

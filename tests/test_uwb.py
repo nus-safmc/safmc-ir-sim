@@ -7,6 +7,7 @@ the log and the determinism guarantees are tested end to end, the way the contra
 from __future__ import annotations
 
 import dataclasses
+import functools
 import importlib.util
 import tempfile
 from pathlib import Path
@@ -34,7 +35,12 @@ from safmc_sim.sensors.uwb import (
     measure,
     true_ranges,
 )
-from safmc_sim.world.arena import ArenaConfig, generate_arena, validate_nav_aids
+from safmc_sim.world.arena import (
+    ArenaConfig,
+    generate_arena,
+    validate_arena,
+    validate_nav_aids,
+)
 from safmc_sim.world.landmark import Landmark
 
 SHORT = dict(n_drones=10, duration_s=3.0, record=False)
@@ -502,7 +508,9 @@ def test_record_static_before_the_first_sample_is_a_contract_violation():
 # -- the example and the rulebook ----------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=1)
 def _load_example():
+    # Cached: executing the module twice re-registers its policy, which warns by design.
     path = Path(__file__).resolve().parent.parent / "examples" / "04_uwb_ranging.py"
     spec = importlib.util.spec_from_file_location("example_uwb", path)
     module = importlib.util.module_from_spec(spec)
@@ -514,9 +522,21 @@ def test_the_example_places_a_legal_anchor_set_and_runs():
     example = _load_example()
     cfg = example.make_config(seed=0, duration_s=2.0)
     arena = generate_arena(cfg.seed, cfg.arena_config)
-    validate_nav_aids(arena, ("uwb_anchor",))                    # R-WORLD-9: the rules allow it
-    n_known = sum(1 for lm in arena.landmarks
-                  if not arena.in_start_area(lm.x, lm.y) and not arena.in_unknown_area(lm.x, lm.y))
-    assert 0 < n_known <= K.NAV_AID_LIMIT_KNOWN_AREA
+    validate_nav_aids(arena, ("uwb_anchor",))                   # R-WORLD-11: the rules allow it
+    n_known = sum(1 for lm in arena.landmarks if arena.in_known_area(lm.x, lm.y))
+    assert 0 < n_known <= K.NAV_AID_MAX_KNOWN_AREA
     result = run(dataclasses.replace(cfg, record=False))
     assert result.ticks == 40
+
+
+def test_the_example_s_fixed_anchors_clear_the_room_on_every_seed():
+    """The room moves with the seed, so a fixed coordinate is a trap, and the maze on main
+    made it a sharper one. The example hugs the field edges to stay legal on every seed;
+    this is what says so."""
+    example = _load_example()
+    arena_config = example.make_config().arena_config
+    for seed in range(30):
+        arena = generate_arena(seed, arena_config)
+        validate_arena(arena)                    # refuses anything inside the room (r.17)
+        validate_nav_aids(arena, ("uwb_anchor",))
+        assert not any(arena.in_unknown_area(lm.x, lm.y) for lm in arena.landmarks)

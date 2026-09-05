@@ -46,8 +46,10 @@ Mirrors [SPEC §12](SPEC.md#12-assumptions-register). Each is a named constant i
 | A-3 | Climb rate limit | 0.5 m/s | Read from the PX4 parameter set actually flown |
 | A-4 | Marker detection range | 3.0 m | **Cheap and high value.** Fly at a tag, log detections vs distance. Firmware's only claim is an inherited comment about ~1 m for a screen-displayed tag |
 | A-5 | Camera horizontal FOV for detection | 1.0 rad | Derivable from `fx = 163.5` and 320 px width; should be checked against real detections |
-| A-6 | Known Search Area depth | 14.0 m | Published in 2025, withdrawn in 2026. Derived as 20 − 6 |
-| A-7 | Unknown Search Area doorways | 2, each 1.0 m | Rulebook shows gaps in a not-to-scale diagram |
+| ~~A-6~~ | ~~Known Search Area depth~~ | 14.0 m | **Retired.** Not an assumption. The v1 and v2 Play Field Element tables are character-identical and neither has a Known Search Area row, so nothing was published and nothing was withdrawn. 20 − 6 forces it |
+| A-7 | Unknown Search Area doorways | 4, each 2.4 m | The sec 3.2 diagram draws four openings, one per face, measuring 2.40–2.83 m at 300 dpi, and 3.3.9 r.1 says the swarm enters "via the open doorways shown in the diagram". Was 2 × 1.0 m, which had no source. Measure the real field |
+| A-10 | Marker census 4/4/4 treated as known | 4 victims, 4 bonus, 4 fires every seed | The rulebook publishes 4 *supplied* markers of each type (3.3.3 r.3) but says the number placed is unknown (3.3.3 r.1, 3.3.5 r.1). Sample a count per seed, or accept that a policy may exploit the census |
+| A-9 | Maze corridor width in the Unknown Search Area | 2.0 m floor → 4×4 grid at 2.40 m | 3.2 pins nothing inside the room, so this is a sampled distribution, not a layout. The published ≥ 2 m gap caps the grid at 4×4; a fifth corridor would be 1.90 m. See `world/maze.py` |
 | A-8 | ToF ring synchronous at tick rate | 20 Hz, zero skew | Same as F-1 |
 | A-9 | UWB line-of-sight ranging noise | 0.05 m std | Range to one anchor over a tape measure in line of sight, 1-20 m; the residual's std is this number and its slope is the calibration (F-26). DW1000-class modules publish 3-8 cm |
 | A-10 | UWB maximum range | 20 m | **Cheap and decisive.** Walk a tag away from an anchor in the hall until ranging stops. Datasheets say 60 m, hobby firmware reports 12-20 m indoors. At 20 m three Start Area anchors reach every point of the field; at 12 m the far third hears none of them |

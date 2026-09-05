@@ -205,16 +205,22 @@ run(config, arena=placed)          # validated; header records arena_source: "su
 **Where the rules let you put one.** A navigation aid — a UWB anchor, a surveyed tag — may
 stand anywhere in the Start Area, at most ten may stand in the Known Search Area, none may
 stand in the Unknown Search Area, and each must fit within 1 m x 1 m on its own tripod
-(booklet §3.3.1 r.14–17). `validate_nav_aids(arena, kinds)` in `world/arena.py` checks a
-layout against that, counting every kind you name together, and names the offending
-landmarks and the rule. **The runner never calls it** (R-WORLD-9): the arena cannot know
-which kinds are aids, and a layout the rules forbid is a legitimate experiment when you
-asked for it — what would perfect localisation in the room be worth? — so the check exists
-to make sure nobody quotes such a run without knowing. Call it where you build the
-scenario, as `examples/04_uwb_ranging.py` does. A point placed at fixed coordinates in the
-Known Search Area can also end up inside a generated wall; a small footprint
-(`radius_m=0.25`, a tripod base) makes it a flat mark the generator keeps clear, still
-invisible to the ring and to collision.
+(booklet §3.3.1 r.14–17). Those rules are enforced in two places, because they are not all
+checkable from the arena alone (R-WORLD-11).
+
+The room rule needs no notion of an aid — *nothing* a team places may be in there — so
+`validate_arena` refuses it on every run. The other two do: a `Landmark` may equally be
+scenery or a prop, and the primitive has no field that says which. So
+`validate_nav_aids(arena, kinds)` takes the kinds that count as aids from you, counts every
+kind you name together, and names the offending landmarks and the rule. **The runner never
+calls it**: twenty anchors is a legitimate experiment when you asked for it, and the check
+exists so nobody quotes such a run without knowing. Call it where you build the scenario, as
+`examples/04_uwb_ranging.py` does.
+
+A point at a fixed coordinate is also a trap: the room moves with the seed, so **survey the
+generated arena and then place** — `in_known_area` picks the positions, `dataclasses.replace`
+places them. A small footprint (`radius_m=0.25`, a tripod base) makes each a flat mark the
+generator keeps clear, still invisible to the ring and to collision.
 
 A placed landmark with a footprint is fixed structure to the generator: walls and pillars
 keep their published gaps from a body, nothing is built over a flat mark, targets are not

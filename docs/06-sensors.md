@@ -261,14 +261,18 @@ noise stream depends on the seed alone.
 ### Placing anchors, legally
 
 An anchor is a `Landmark` of the tag's kind. A point (no footprint) is invisible to the ring
-and to collision, which is right for a radio, but a point at fixed coordinates in the Known
-Search Area can end up inside a generated wall; give it a tripod base, `radius_m=0.25`, and
-the generator draws around it while the ring and collision still ignore it. The rulebook's
-placement rules — any number in the Start Area, at most ten in the Known Search Area, none
-in the Unknown Search Area, each within 1 m x 1 m — are `validate_nav_aids(arena,
-("uwb_anchor",))` in `world/arena.py`. **The runner does not call it** (R-WORLD-9): a run
-with an anchor in the room is a legitimate experiment when you asked for it, and the check
-exists so that nobody quotes one without knowing. Collinear anchors leave a mirror
-ambiguity, so use both rows of the Start Area. `examples/04_uwb_ranging.py` does all of
-this and then grades the sensor from the log alone: true ranges from `states.npz`, anchor
-positions from `uwb.npz`, and the recorded arena to say which paths crossed a wall.
+and to collision, which is right for a radio, but a point at a fixed coordinate can land
+inside a generated wall — or inside the room, where the rules forbid it and `validate_arena`
+refuses it on every run. **Survey, then place**: generate the arena, pick positions with
+`in_known_area`, and place them with `dataclasses.replace`. A tripod base, `radius_m=0.25`,
+makes the generator draw around each one while the ring and collision still ignore it.
+
+The two aid rules the arena cannot check for itself — at most ten in the Known Search Area,
+each within 1 m x 1 m — are `validate_nav_aids(arena, ("uwb_anchor",))` in `world/arena.py`,
+which takes the kinds that count as aids from you, because a `Landmark` may equally be
+scenery. **The runner never calls it** (R-WORLD-11): twenty anchors is a legitimate
+experiment when you asked for it, and the check exists so nobody quotes one without knowing.
+Collinear anchors leave a mirror ambiguity, so use both rows of the Start Area.
+`examples/04_uwb_ranging.py` does all of this and then grades the sensor from the log alone:
+true ranges from `states.npz`, anchor positions from `uwb.npz`, and the recorded arena to
+say which paths crossed a wall.

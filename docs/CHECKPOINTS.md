@@ -472,7 +472,7 @@ would pass every check. That is R-SENS-11's review obligation, not a property of
 ## C9 — a UWB ranging tag on the sensor contract
 
 Commits `4b273e7` (spec), `dc8689a` (build) and the audit commit after it. ADR-0006,
-R-SENS-17, R-WORLD-9, A-9..A-13, F-23..F-27. Closes C8's first open item: a sensor beyond
+R-SENS-17, R-WORLD-11, A-9..A-13, F-23..F-27. Closes C8's first open item: a sensor beyond
 the flown two is now a model of something, with every number it needs registered.
 
 **Built.**
@@ -495,7 +495,7 @@ the flown two is now a model of something, with every number it needs registered
 - `examples/04_uwb_ranging.py` — six anchors across both rows of the Start Area and four on
   tripods in the Known Search Area, checked against the rules; a policy that reads the tag
   by name; and a grade of the sensor from the log alone.
-- Docs: ADR-0006; SPEC R-SENS-17, R-WORLD-9, an R-POL-3 note, §12; FIDELITY A-9..A-13 and
+- Docs: ADR-0006; SPEC R-SENS-17, R-WORLD-11, an R-POL-3 note, §12; FIDELITY A-9..A-13 and
   F-23..F-27; a UWB section in `docs/06`; the nav-aid rules and the table update in
   `docs/10`; `docs/07`, `docs/04`, ARCHITECTURE, README.
 
@@ -590,4 +590,30 @@ walls (F-24) — and calibration is assumed (F-26). No `PoseSource` consumes the
 that is the next piece of work (ADR-0003), and until it exists a policy that wants a
 position from these ranges trilaterates for itself. The CLI has no `--sensors`, so the tag
 is configured in Python, as the example shows. The replay does not draw `uwb.npz`.
+
+**Merged with `main` at `adb78f3` (PR #5, the maze and the arena's three streams).** Two
+requirements and one check collided, and the reconciliation is the interesting part.
+
+- **R-WORLD-9 was taken.** `main` uses it for the three independent arena RNG streams and
+  R-WORLD-10 for the arena store, so the nav-aid requirement is now **R-WORLD-11**, rewritten
+  to describe a division of labour rather than one check.
+- **`main` already enforces the room rule.** `_validate_landmark_zones` refuses any placed
+  landmark inside the Unknown Search Area on every run, calling it "the highest-value cheat
+  the rules forbid". That is stronger than this branch's opt-in check and it wins: a run with
+  an anchor in the room is no longer possible, and ADR-0006's argument that such a run is a
+  legitimate experiment is withdrawn for the room specifically. It still stands for the cap.
+- **`main` explicitly left the cap of ten undone**, because "a `Landmark` may equally be
+  scenery, a prop or a venue feature; the primitive carries no field distinguishing them, so
+  a blanket cap would reject legitimate arenas. Assert it in your own experiment, or give
+  `Landmark` a nav-aid flag first." `validate_nav_aids(arena, kinds)` is the other answer to
+  that question: the caller names the kinds, so no flag on the primitive is needed. The
+  function now checks only what `validate_arena` cannot -- the cap (r.15) and the 1 m x 1 m
+  footprint (r.14 f) -- and its room check is gone as redundant.
+- `NAV_AID_LIMIT_KNOWN_AREA` became `main`'s `NAV_AID_MAX_KNOWN_AREA`; `NAV_AID_FOOTPRINT_M`
+  is new and stays. The nav-aid tests now survey the generated arena with `in_known_area`
+  rather than assuming a column of fixed coordinates clears the room, which the maze made a
+  trap: the room moves with the seed.
+
+**Verified — TESTED.** 372 tests pass on the merge. The example's ten anchors, which sit near
+the field edges, are checked to generate and validate on every seed 0-59.
 

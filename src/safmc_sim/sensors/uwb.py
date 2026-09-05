@@ -95,11 +95,18 @@ Placing anchors
 
 An anchor is a :class:`~safmc_sim.world.landmark.Landmark` of the sensor's ``kind``. A point
 (no footprint) is invisible to the ring and to collision, which is right for a radio -- but a
-point placed at fixed coordinates in the Known Search Area can end up inside a generated
-wall. Give it a tripod base, ``radius_m=0.25``, and the generator draws around it while the
-ring and the collision check still ignore it (a flat mark is not solid). Check the layout
-against the rulebook with :func:`~safmc_sim.world.arena.validate_nav_aids`; the runner does
-not, deliberately (R-WORLD-9). ``examples/04_uwb_ranging.py`` does all of this.
+point placed at fixed coordinates can end up inside a generated wall, or inside the Unknown
+Search Area, where the rules forbid it and ``validate_arena`` refuses it on every run. So
+**survey the generated arena, then place**: ``generate_arena`` first, ``in_known_area`` to
+choose positions, ``dataclasses.replace(arena, landmarks=...)`` to place them. Give each a
+tripod base, ``radius_m=0.25``, and the generator draws around it while the ring and the
+collision check still ignore it (a flat mark is not solid).
+
+Two of the aid rules the arena cannot check for itself -- the cap of ten in the Known Search
+Area and the 1 m x 1 m footprint -- because it cannot know which landmarks are aids rather
+than scenery. Name the kinds and call
+:func:`~safmc_sim.world.arena.validate_nav_aids` yourself; the runner never does (R-WORLD-11).
+``examples/04_uwb_ranging.py`` does all of this.
 """
 
 from __future__ import annotations

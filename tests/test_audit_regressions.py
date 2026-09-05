@@ -422,7 +422,7 @@ def test_every_config_field_declares_its_units():
         "collision_behaviour", "record", "pose_source", "n_inner_walls", "n_pillars_known",
         "n_unknown_walls", "n_pillars_unknown", "n_victims", "n_bonus_victims", "n_fires",
         "max_placement_attempts", "tick_hz", "landmarks",
-        "duration_s", "nlos_drop_probability", "outlier_probability",
+        "duration_s", "n_maze_loops", "nlos_drop_probability", "outlier_probability",
     }
     for cls in (RunConfig, QuadParams, ToFConfig, MarkerCamConfig, ArenaConfig, UWBConfig):
         for field in dataclasses.fields(cls):
