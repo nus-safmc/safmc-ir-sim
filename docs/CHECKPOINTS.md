@@ -617,3 +617,75 @@ requirements and one check collided, and the reconciliation is the interesting p
 **Verified — TESTED.** 372 tests pass on the merge. The example's ten anchors, which sit near
 the field edges, are checked to generate and validate on every seed 0-59.
 
+---
+
+## C10 — the UWB tag becomes a DW3000
+
+The team chose the part: **Qorvo DW3000**. ADR-0006 addendum, R-SENS-17 amended, A-9..A-13
+re-sourced, F-28..F-31.
+
+**Built.**
+
+- `constants.py` — `UWB_MODULE_PART = "DW3000"` and a part-number block in the style of the
+  VL53L5CX one, because the same trap exists: a number from a DW1000 paper is a number about
+  a different radio. Every assumption's docstring now says which part its source measured.
+  New: the two channel centres and the bandwidth, the 10 ms TDMA slot, and the 8-anchor cap a
+  shipping firmware imposes.
+- `sensors/uwb.py` — `sweep_rate_hz(n_tags, slot_s)`. The model's fixed rate hid the fact
+  that TDMA slots belong to tags, so the sweep rate falls with the *fleet*: 10 Hz at ten
+  drones, 4 Hz at twenty-five, on the same radio and the same anchors. It is a helper the
+  scenario author calls, not something the runner applies, because a sensor config knows
+  nothing about `RunConfig.n_drones`.
+- `examples/04_uwb_ranging.py` — takes `n_drones` and derives its rate from it.
+- Docs: the ADR addendum; `docs/06` gains a part-number callout and the RF-compliance
+  argument; `docs/02` records the choice in the hardware table; SPEC R-SENS-17 and §12;
+  FIDELITY F-28..F-31.
+
+**Verified — TESTED.** 378 tests. New in `tests/test_uwb.py`: the modelled part is the
+DW3000 and both its channels clear the banned 5.7-5.9 GHz band by arithmetic on the
+constants; the sweep rate is `1/(n_tags * slot)` and does not mention anchors, with the
+fleets that divide the 20 Hz tick and one that does not; a 25-drone run really does age its
+reading four ticks between sweeps; and **F-30 is pinned** -- the model must stay optimistic
+against the measured DW3000 in all four statistics, but within a factor of two in the body,
+and switching the outlier term on must fatten the tail.
+
+**Verified — MEASURED.** The model against the one independent measurement of the part
+(Ember et al., IFIP 2024: a DW3000 on channel 9, 125 positions in a 60x40 m office):
+
+| | measured | this model | |
+|---|---|---|---|
+| line of sight, mean absolute error | 5.7 cm | 4.0 cm | optimistic by 1.4x |
+| line of sight, 90th percentile | 13.7 cm | 8.2 cm | optimistic by 1.7x |
+| obstructed, mean absolute error | 46.7 cm | 34.2 cm | optimistic by 1.4x |
+| obstructed, 90th percentile | 129.5 cm | 70.3 cm | **optimistic by 1.8x** |
+
+The body is within a factor of two; the tail is not, because a Gaussian tail is not a UWB
+tail. `outlier_probability` (A-13) is the term for that and is off for want of a published
+rate. `los_noise_std_m=0.07` matches the measured line of sight. The example, rerun after the
+maze merge, reports 6 000 sweeps, 64.2% of paths in line of sight (was 70.0% before the
+maze), 94.2% in reach, line-of-sight error 0.000 +/- 0.050 m and 0.155 +/- 0.397 m behind a
+wall, and 89.9% heard behind a wall in reach.
+
+**Found while building.** Three priors were wrong and are corrected in the ADR: the
+datasheet's "10 cm" is marketing copy from page one, not the specification (Table 14 says
++/-6 cm calibrated, +/-15 cm uncalibrated, 1.5 cm standard deviation); the DW3000 is **not
+faster** than the DW1000, per-frame airtime being essentially identical; and it is
+**shorter**-ranged, having dropped the DW1000's 110 kb/s long-range mode. Its gains are power
+and 802.15.4z security. Also: a first draft of `sweep_rate_hz`'s docstring claimed fifteen
+drones give a rate the runner refuses. It does not -- 6.67 Hz divides 20 Hz exactly. The rule
+is that the decimation is `0.2 * n_tags`, so multiples of five divide and the rest do not.
+
+**Behaviour that changed.** Defaults are unchanged, so an existing UWB run reproduces
+exactly. What changed is what the numbers are *about*, and the example now derives its rate
+from its fleet rather than taking the 10 Hz default.
+
+**Open, and this is the honest part.** The DW3000 evidence is thinner than the DW1000
+evidence it replaces. Two independent literature searches disagreed on whether a DW3000
+through-wall measurement exists at all; what is citable is an aggregate error, and A-11's
+**spread is still a DW1000 number** from the one paper this repository has read in full
+(F-28). Antenna-delay calibration is a per-unit constant offset of up to 15 cm that this
+model has no term for, and which module the team buys decides its size (F-31). Range varies
+3-5x with data rate, preamble and PAC, which one scalar cannot express (F-29). Nothing has
+been measured on the team's own kit in the hall, which is what A-9 through A-13 exist to ask
+for. And the tag still feeds no `PoseSource` (ADR-0003).
+

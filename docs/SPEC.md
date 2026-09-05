@@ -345,8 +345,12 @@ disk. (A failure of the disk itself mid-write can still leave a partial director
 MUST list every sensor with its config type and whether it was recorded. `record()` MUST be
 pure: recording MUST NOT affect results (R-OBS-4).
 
-**R-SENS-17** *(added with ADR-0006)* The package MUST provide a UWB ranging tag on the
-R-SENS-12 contract (`sensors/uwb.py`) that is NOT part of `flown_sensors()`. Its configured
+**R-SENS-17** *(added with ADR-0006, amended with its DW3000 addendum)* The package MUST
+provide a UWB ranging tag on the R-SENS-12 contract (`sensors/uwb.py`) that is NOT part of
+`flown_sensors()`. It MUST model a **named part** -- the Qorvo DW3000
+[src: DW3000 Datasheet v1.3] -- and every default MUST record whether its source measured
+that part or the older DW1000, because most of the published UWB literature is DW1000 work
+and the two differ [src: DW3000 Datasheet §1.2]. Its configured
 kind MUST NOT be a mission kind: a tag that ranged to the markers would report every
 target's true position (R-POL-3). Its reading MUST be, for every landmark of its kind in
 arena order and fixed for the run: the anchor ids, the surveyed anchor positions (each at
@@ -520,11 +524,11 @@ place, not a literal scattered through the code.
 | A-7 | Unknown Search Area doorway count/width | 4 doorways, 2.4 m | The sec 3.2 diagram draws one opening per face at 2.40-2.83 m, and 3.3.9 r.1 routes entry through "the open doorways shown in the diagram". Previously 2 x 1.0 m, which had no source and serialised entry. |
 | A-9 | Maze corridor width in the Unknown Search Area | 2.0 m floor, giving a 4x4 grid at 2.40 m | Sec 3.2 states the layout there is "intentionally NOT shown", so a distribution is sampled. The published 2 m gap caps the grid at 4x4. |
 | A-8 | ToF ring sampled synchronously at tick rate | 20 Hz, no skew | Hardware is 15 Hz round-robin with up to 64 ms skew across the ring. |
-| A-9 | UWB line-of-sight ranging noise | 0.05 m std | DW1000-class timestamp noise is 3-4.5 cm and testbeds report 2-8 cm; the team's module is unchosen and unmeasured. |
-| A-10 | UWB maximum range | 20 m | Datasheets say 60 m line of sight; hobby firmware reports 12-20 m indoors. At 20 m three Start Area anchors reach every point of the field; at 12 m the far third hears none of them. |
-| A-11 | UWB through-wall bias and spread | +0.15 m, 0.40 m std | One wall or obstacle on a DW1000 in a flat of pre-stressed concrete panels (TELFOR 2017, Table 1: 0.49 ns and 1.39 ns, the spread 0.42 m rounded); behind several walls the same table gives four times the bias. The venue's walls are of unknown material. |
-| A-12 | UWB through-wall dropout probability | 0.10 | No published rate for hobby modules. |
-| A-13 | UWB outlier probability and size | 0 (off), up to 1.5 m | The heavy positive tail is documented, its frequency is not; off until measured. |
+| A-9 | DW3000 line-of-sight ranging noise | 0.05 m std | Bracketed by the datasheet's 1.5 cm (Table 14, calibrated, at -85 dBm) and two independent measurements of the part at 5.7-6 cm; ~30% optimistic against the latter (F-30). Not measured on the team's kit. |
+| A-10 | DW3000 maximum range | 20 m | A firmware setting more than a chip limit: 20 m stock at 6.8 Mb/s, 40-50 m typical, past 90 m indoors at 850 kb/s with a long preamble (F-29). At 20 m three Start Area anchors reach every point of the field; at 12 m the far third hears none. |
+| A-11 | DW3000 through-wall bias and spread | +0.15 m, 0.40 m std | No DW3000 study publishes a bias in this form; the aggregate is 46.7 cm mean absolute error (Ember et al. 2024). The spread is still a DW1000 number (TELFOR 2017, Table 1) — the model's weakest joint, F-28. |
+| A-12 | DW3000 through-wall dropout probability | 0.10 | No published rate for either part. Secure 802.15.4z ranging drops far more. |
+| A-13 | DW3000 outlier probability and size | 0 (off), up to 1.5 m | The heavy positive tail is documented, its frequency is not; off until measured, and it is the gap in F-30. |
 
 **R-ASSUME-1** `docs/FIDELITY.md` MUST list every entry in this table together with what would be
 needed to resolve it, and MUST list every known divergence between the simulator and the real

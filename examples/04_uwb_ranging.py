@@ -20,8 +20,16 @@ Three things this shows, in order:
    from ``states.npz`` and the anchor positions stored beside the readings, and the arena in
    the header says which paths crossed a wall. Nothing here re-runs the simulator.
 
-Every number in the model is an assumption with an ID (A-9..A-13, docs/FIDELITY.md), and
-the airframe does not carry a UWB module. See sensors/uwb.py and ADR-0006.
+The modelled part is the Qorvo DW3000. Every number is an assumption with an ID
+(A-9..A-13, docs/FIDELITY.md); the model is measurably optimistic against the one
+independent measurement of that part (F-30); and no airframe carries one. See
+sensors/uwb.py and ADR-0006.
+
+A note on fleet size, because it bites here: UWB time slots belong to TAGS, and a tag sweeps
+every anchor inside its own slot. So the sweep rate falls with the number of drones, not the
+number of anchors -- ten drones get 10 Hz each, twenty-five get 4 Hz. This example uses
+``sweep_rate_hz(n)`` rather than the default, so changing ``n_drones`` changes the rate the
+way the real radio would.
 
 Run:  python examples/04_uwb_ranging.py
 """
@@ -34,7 +42,7 @@ from safmc_sim.api import Command, Observation, Policy, Velocity, register_polic
 from safmc_sim.recorder import Recorder, arena_from_log, load_run
 from safmc_sim.runner import RunConfig, flown_sensors, run
 from safmc_sim.sensors.raycast import segment_clear
-from safmc_sim.sensors.uwb import UWBConfig, UWBRanges
+from safmc_sim.sensors.uwb import UWBConfig, UWBRanges, sweep_rate_hz
 from safmc_sim.toolbox import body_to_world
 from safmc_sim.world.arena import ArenaConfig, generate_arena, validate_nav_aids
 from safmc_sim.world.landmark import Landmark
@@ -104,14 +112,17 @@ class UWBWalk(Policy):
 # ------------------------------------------------------------------------------------------
 
 
-def make_config(seed: int = 0, duration_s: float = 60.0) -> RunConfig:
+def make_config(seed: int = 0, duration_s: float = 60.0, n_drones: int = 10) -> RunConfig:
+    # The sweep rate is the fleet's, not the tag's: 10 drones -> 10 Hz, 25 -> 4 Hz. Fleets
+    # that are a multiple of five give a rate that divides the 20 Hz tick; the runner refuses
+    # the rest rather than rounding a sensor's latency.
     return RunConfig(
         seed=seed,
-        n_drones=10,
+        n_drones=n_drones,
         policy="uwb_walk",
         duration_s=duration_s,
         arena_config=ArenaConfig(landmarks=ANCHORS),
-        sensors=flown_sensors() + (UWBConfig(),),
+        sensors=flown_sensors() + (UWBConfig(rate_hz=sweep_rate_hz(n_drones)),),
     )
 
 

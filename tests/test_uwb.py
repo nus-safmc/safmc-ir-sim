@@ -33,6 +33,7 @@ from safmc_sim.sensors.uwb import (
     anchor_positions,
     line_of_sight,
     measure,
+    sweep_rate_hz,
     true_ranges,
 )
 from safmc_sim.world.arena import (
@@ -92,6 +93,57 @@ def test_defaults_are_the_registered_assumptions():
     assert cfg.anchor_height_m == K.UWB_ANCHOR_HEIGHT_M
     # 10 Hz divides the 20 Hz loop; the runner would refuse otherwise.
     RunConfig(sensors=(cfg,))
+
+
+def test_the_modelled_part_is_the_dw3000_and_its_channels_clear_the_banned_band():
+    """Rule 6.3 bans 5.7-5.9 GHz outright and permits ultra-wideband in the same sentence.
+    The DW3000 has exactly two channels and neither reaches the banned band -- the nearer
+    edge is 340 MHz clear. This is the compliance argument, as arithmetic."""
+    assert K.UWB_MODULE_PART == "DW3000"
+    banned_lo, banned_hi = 5.7e9, 5.9e9
+    for centre in (K.UWB_CHANNEL_5_HZ, K.UWB_CHANNEL_9_HZ):
+        lo = centre - K.UWB_CHANNEL_BANDWIDTH_HZ / 2
+        hi = centre + K.UWB_CHANNEL_BANDWIDTH_HZ / 2
+        assert lo > banned_hi or hi < banned_lo, f"channel at {centre/1e9:.4f} GHz overlaps"
+    assert K.UWB_CHANNEL_5_HZ - K.UWB_CHANNEL_BANDWIDTH_HZ / 2 - banned_hi == pytest.approx(340e6)
+
+
+def test_the_sweep_rate_falls_with_the_fleet_not_the_anchor_count():
+    """Slots are per tag and every anchor is swept inside one, so a bigger swarm ranges less
+    often on the same radio. The model's fixed rate does not know that (F-28); this helper
+    is how a scenario author finds the right one."""
+    assert sweep_rate_hz(10) == pytest.approx(10.0)      # ten drones, 10 ms slots
+    assert sweep_rate_hz(25) == pytest.approx(4.0)       # the rulebook's maximum fleet
+    assert sweep_rate_hz(20) == pytest.approx(5.0)
+    # It is 1 / (n_tags * slot): the anchor count does not appear.
+    assert sweep_rate_hz(10, slot_s=0.015) == pytest.approx(1.0 / 0.15)
+    # A fleet that is a multiple of five divides the 20 Hz tick; eleven drones does not, and
+    # the runner refuses it rather than rounding a sensor's latency.
+    for n in (10, 15, 20, 25):
+        RunConfig(n_drones=n, sensors=(UWBConfig(rate_hz=sweep_rate_hz(n)),))
+    with pytest.raises(ConfigError, match="does not divide"):
+        RunConfig(n_drones=11, sensors=(UWBConfig(rate_hz=sweep_rate_hz(11)),))
+    for bad in (0, -1, 2.5, True):
+        with pytest.raises(ConfigError, match="n_tags"):
+            sweep_rate_hz(bad)
+    with pytest.raises(ConfigError, match="slot_s"):
+        sweep_rate_hz(10, slot_s=0.0)
+
+
+def test_a_full_fleet_ranges_at_four_hertz_end_to_end():
+    """The 25-drone case the fixed default hides: same radio, same anchors, 4 Hz not 10."""
+    seen = []
+
+    @register_policy("_reads_uwb_at_4hz")
+    class Reads(Policy):
+        def step(self, obs):
+            seen.append(obs.stale_ticks["uwb"])
+            return Velocity(vz=0.4)
+
+    run(RunConfig(seed=0, policy="_reads_uwb_at_4hz", n_drones=25, duration_s=3.0, record=False,
+                  arena_config=ArenaConfig(landmarks=START_ANCHORS),
+                  sensors=(ToFConfig(), UWBConfig(rate_hz=sweep_rate_hz(25)))))
+    assert max(seen) == 4, "4 Hz on a 20 Hz loop: a reading ages to four ticks between sweeps"
 
 
 def test_the_tag_is_not_part_of_the_flown_suite():
@@ -307,6 +359,42 @@ def test_obstructed_ranges_are_biased_wider_and_sometimes_dropped():
     assert np.std(r[heard]) == pytest.approx(cfg.nlos_noise_std_m, abs=0.02)
     # A dropped anchor is inf, never a number: "nothing heard" and "far away" stay distinct.
     assert np.isinf(r[~heard]).all()
+
+
+def test_the_model_is_optimistic_against_the_measured_dw3000_by_a_known_margin():
+    """F-30, pinned so it cannot drift silently.
+
+    The only independent measurement of the chosen part (Ember et al., IFIP 2024: a DW3000 in
+    a 60x40 m office, channel 9) reports mean absolute errors of 5.7 cm in line of sight and
+    46.7 cm behind an obstruction, with 90th percentiles of 13.7 cm and 129.5 cm. This model
+    is optimistic against all four, and most so in the tail -- which is the outlier term
+    (A-13) being off. If a change makes the model *worse* than measured, this fails."""
+    cfg, n, d = UWBConfig(), 400_000, 8.0
+    rng = np.random.default_rng(0)
+
+    def error(los):
+        draws = (rng.normal(0, 1, n), rng.random(n), rng.random(n), rng.random(n))
+        r = measure(np.full(n, d), np.full(n, los), cfg, *draws)
+        return np.abs(r[np.isfinite(r)] - d)
+
+    los, nlos = error(True), error(False)
+    measured = {"los_mae": 0.057, "los_p90": 0.137, "nlos_mae": 0.467, "nlos_p90": 1.295}
+    model = {
+        "los_mae": los.mean(), "los_p90": np.percentile(los, 90),
+        "nlos_mae": nlos.mean(), "nlos_p90": np.percentile(nlos, 90),
+    }
+    for key, measured_value in measured.items():
+        assert model[key] < measured_value, f"{key}: model {model[key]:.3f} is no longer optimistic"
+    # ...but not wildly so in the body of the distribution: within a factor of two.
+    assert model["los_mae"] > measured["los_mae"] / 2
+    assert model["nlos_mae"] > measured["nlos_mae"] / 2
+    # The tail is where the gap is worst, and switching the outlier term on narrows it.
+    assert model["nlos_p90"] < measured["nlos_p90"] / 1.5
+    heavier = UWBConfig(outlier_probability=0.15)
+    draws = (rng.normal(0, 1, n), rng.random(n), rng.random(n), rng.random(n))
+    r = measure(np.full(n, d), np.zeros(n, bool), heavier, *draws)
+    tail = np.percentile(np.abs(r[np.isfinite(r)] - d), 90)
+    assert tail > model["nlos_p90"], "the outlier term is what fattens the tail"
 
 
 def test_out_of_reach_is_inf_and_a_reported_range_is_never_negative():

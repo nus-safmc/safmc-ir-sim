@@ -148,39 +148,119 @@ MAZE_CORRIDOR_M = 2.0           # A-9  the published >= 2 m wall-to-wall gap, re
                                 # world/maze.py for why this fixes the grid at 4 x 4.
 YAW_RATE_MAX_RADS = 1.5              # A-3-adjacent; no published limit, PX4 default territory
 
-# --- UWB ranging: a sensor the airframe does NOT carry (ADR-0006) ------------------------
+# --- UWB ranging: the Qorvo DW3000, a part chosen but not yet carried (ADR-0006) ---------
 #
-# The module is unchosen, so nothing here is HW. These are literature values for
-# DW1000/DW3000-class hobby modules (Qorvo DWM1001, Bitcraze Loco, Pozyx, Makerfabs MaUWB),
-# each standing in for a measurement the team has not made; docs/FIDELITY.md section 3 says
-# what would resolve each. A-10 is the one to measure first for THIS arena: whether the
-# module reaches 20 m or 60 m decides where the anchors have to go.
-UWB_LOS_NOISE_STD_M = 0.05      # A-9   DW1000 timestamp noise 3-4.5 cm; testbeds 2-8 cm
-UWB_MAX_RANGE_M = 20.0          # A-10  datasheet 60 m LOS; hobby firmware 12-20 m indoors
-UWB_NLOS_BIAS_M = 0.15          # A-11  one wall or obstacle, DW1000, concrete-panel flat: +0.49 ns
-UWB_NLOS_NOISE_STD_M = 0.40     # A-11  ...spread 1.39 ns = 0.42 m, rounded (TELFOR 2017, Table 1)
-UWB_NLOS_DROP_PROBABILITY = 0.10  # A-12  no published rate for hobby modules
-UWB_OUTLIER_PROBABILITY = 0.0   # A-13  the heavy positive tail is documented, its rate is not
-UWB_OUTLIER_MAX_M = 1.5         # A-13  "up to 1.5 m" through-wall; p99 1.53 m behind a body
+# Part number matters, the same way it does for the ranging sensor above. The team has
+# chosen the **DW3000** (Qorvo, formerly Decawave). It is not the DW1000 that most of the
+# published UWB literature and every turnkey anchor kit uses, and the differences run the
+# wrong way for a first guess:
+#
+#   * It is NOT faster. Per-frame airtime is essentially identical -- ~170 us against the
+#     DW1000's ~180 us at 6.8 Mb/s -- so a ranging exchange costs the same. The DW3000's
+#     real gains are power (~half) and 802.15.4z secure ranging.
+#   * It is SHORTER-ranged. The DW3000 drops the DW1000's 110 kb/s long-range mode, and
+#     Qorvo's own applications staff say that reduces maximum range.
+#   * It is over-the-air compatible with the DW1000 only on channel 5 at 6.8 and 850 kb/s
+#     (datasheet 1.2). Not pin compatible, not driver compatible: the register map differs.
+#     What IS pin compatible is the *module* -- a DWM3000 drops into a DWM1000 footprint.
+#
+# So a number lifted from a DW1000 paper is a number about a different radio, and every one
+# below says which it came from. Where a DW3000 measurement exists it is used; where none
+# exists, the DW1000 figure is kept and labelled, which is the honest state of A-11 and A-12.
+#
+# The datasheet's headline "10 cm" is marketing copy from its first page. The electrical
+# specification is Table 14: +/- 6 cm after calibration, +/- 15 cm without it, and a ranging
+# standard deviation of 1.5 cm measured at -85 dBm with double-sided two-way ranging in line
+# of sight. Those are three different quantities and only the last is our A-9.
+
+UWB_MODULE_PART = "DW3000"
+"""Qorvo DW3000. Four variants (DW3110/3120/3210/3220) differing only in package and PDoA
+support, all with the same two channels; the module forms are DWM3000 (radio only, ships
+UNCALIBRATED) and DWM3001C (radio plus an nRF52833, factory-calibrated and FCC/ETSI/IC
+certified). Which one is bought changes F-26, not the model."""
+
+UWB_LOS_NOISE_STD_M = 0.05
+"""A-9. Bracketed rather than fitted. The datasheet's 1.5 cm (Table 14, at -85 dBm, DS-TWR,
+calibrated, line of sight) is the floor. Two independent DW3000 measurements agree on the
+ceiling: a mean absolute line-of-sight error of 5.7 cm in an office (Ember et al., IFIP 2024,
+Fig. 12) and a median of 6 cm across nine rooms (Flueratoru et al., WiNTECH'22, Table 2).
+Those carry residual bias and multipath this model does not separate out, so 5 cm sits near
+the pessimistic end deliberately -- and still comes out about 30% optimistic against them
+(F-30). A run that wants to match the measured part should set 0.07."""
+
+UWB_MAX_RANGE_M = 20.0
+"""A-10. Not a chip limit -- a configuration one. 20 m is what a stock MaUWB board reached in
+an office at 6.8 Mb/s (CNX Software review, 2024-04-16); Qorvo's staff call 40-50 m typical
+for line of sight; and a peer-reviewed study reached above 90 m in an indoor hallway by
+moving to 850 kb/s with a 4096-symbol preamble and PAC 32 (Han & Jang, Sensors 2025,
+25(10):3058), which also measured a 2-3x range gain from the PAC setting alone. The default
+is the pessimistic stock-firmware figure; the team can buy back a factor of four in the
+firmware before touching the hardware (F-29)."""
+
+UWB_NLOS_BIAS_M = 0.15
+"""A-11. The DW3000 evidence is thinner than the DW1000 evidence it replaces, and two
+searches of it disagreed about what exists, so both are recorded. Ember et al. (IFIP 2024)
+put a DW3000's non-line-of-sight mean absolute error at 46.7 cm in an office, with the 90th
+percentile at 129.5 cm -- an aggregate over mixed obstructions, not a bias. Flueratoru et al.
+(WiNTECH'22, Table 2) are reported to give medians per obstacle -- a half wall +0.08 m, a
+door +0.10 m, a concrete pillar +0.57 m -- which this repository has NOT confirmed against
+the paper itself, unlike the DW1000 figures below. This arena is 0.10 m walls and 0.30 m
+concrete pillars, so any single number is a compromise; 0.15 m is kept, unchanged from the
+DW1000 value, and the pair below reproduces an aggregate error close to Ember's (F-30)."""
+
+UWB_NLOS_NOISE_STD_M = 0.40
+"""A-11, and the one number here still inherited from the DW1000, because no DW3000 study
+publishes a per-obstacle standard deviation. It is 1.39 ns = 0.42 m, rounded, measured
+through one wall or obstacle on a DW1000 in a flat of pre-stressed concrete panels
+(Kolakowski & Modelski, TELFOR 2017, Table 1; arXiv 2403.19706). That paper was read in full
+here and the numbers are verbatim, which is more than can be said for the DW3000 sources.
+The same table gives 1.92 ns and 2.02 ns -- about +0.58 m and 0.61 m -- behind several walls,
+which the model does not use (F-24). See F-28."""
+
+UWB_NLOS_DROP_PROBABILITY = 0.10
+"""A-12. No published through-wall dropout rate exists for either part -- a search for one
+came back empty. The only DW3000 evidence is qualitative: through a wall into an adjacent
+room the received level fell to about -90 dBm and the signal became, in the reviewer's words,
+extremely difficult to catch (CNX Software, 2024-04-16). One 802.15.4z study is a warning in
+the other direction: with packet reception at 100%, *secure* timestamping still failed 10-40%
+of the time on the DW3000's own consistency checks, and under Wi-Fi 6E interference more than
+half. A tag configured for secure ranging would drop more, not fewer. Measure it."""
+
+UWB_OUTLIER_PROBABILITY = 0.0
+"""A-13. Off by default, and the term that would close the largest gap between this model and
+the measured part. A DW3000's measured non-line-of-sight 90th percentile is 129.5 cm (Ember
+et al., IFIP 2024) against this model's 70 cm with the outlier term off: the real tail is
+heavier than a Gaussian, which is what this term is for. Its rate is still unpublished, so
+turning it on is a choice a run must make and report (F-30)."""
+
+UWB_OUTLIER_MAX_M = 1.5
+"""A-13. Within the ~2.5 m tail the DW3000 CDF reaches (Flueratoru et al., Fig. 3a)."""
 
 # Sources for the UWB block, one per number (docs/README.md asks for a URL per claim):
-#   A-9   DW1000 timestamp noise 100-150 ps (3-4.5 cm) and DS-TWR 8.2 cm mean absolute error
-#         with per-pair bias up to 31 cm uncalibrated: Rathje & Landsiedel, arXiv 2410.12826.
-#         LOS median 4 cm, p99 32 cm: PMC10575093. Timing std 0.2 ns: Kolakowski, below.
-#   A-10  "60 m line-of-sight range typical": DWM1001 datasheet (Decawave/Qorvo). 12-20 m
-#         indoors on hobby firmware: cnx-software.com MaUWB DW3000 review, 2024-04-16;
-#         github.com/thotro/arduino-dw1000 issue 19.
-#   A-11  M. Kolakowski, J. Modelski, "First path component power based NLOS mitigation in
-#         UWB positioning system", TELFOR 2017, Table 1 (arXiv 2403.19706,
-#         doi 10.1109/TELFOR.2017.8249313). Read in full; the numbers are verbatim.
-#   A-12  none found. The dropout rate of a hobby module behind a wall is unpublished.
-#   A-13  the positive tail: PMC10575093 (p99 1.53 m with a body in the path); "several
-#         metres" behind concrete with rebar: pozyx.io, "Ultra-wideband and obstacles".
-#   F-23  PANS 100 ms superframe, four anchors per tag per frame: PMC7961798; Bitcraze Loco
-#         TWR 4 ms slots: bitcraze.io Loco positioning documentation; MaUWB AT-command
-#         manual sec. 3.11 and 3.15 (github.com/Makerfabs).
-#   F-26  antenna-delay calibration and received-level bias: Smaoui et al., COMSNETS 2020
-#         (nsl.cs.uh.edu/papers/uwberrormodel-comsnets2020.pdf); Decawave APS011.
+#   Datasheet   DW3000 Datasheet v1.3 (Decawave/Qorvo, 2020). Table 14 sec 3.9 is the ranging
+#               specification; Table 16 sec 4.2 the channels; Table 12 sec 3.7 the link
+#               budget; Figure 30 sec 6.4.5 the DS-TWR frame timing.
+#   A-9, A-11   E. Ember et al., "Improving the Correction of NLoS-Induced Ranging Errors in
+#               UWB Systems through Enhanced Labeling", IFIP 2024. DW3000 on an nRF52,
+#               channel 9, BPRF, 64-symbol STS, 125 positions in a 60x40 m office; Fig. 12
+#               gives LoS MAE 5.7 cm / 90th 13.7 cm and NLoS MAE 46.7 cm / 90th 129.5 cm.
+#               A. Flueratoru, E. S. Lohan, D. Niculescu, "Challenges in Platform-Independent
+#               UWB Ranging and Localization Systems", ACM WiNTECH'22, doi
+#               10.1145/3556564.3558238, reported to give per-obstacle medians in Table 2 --
+#               NOT confirmed against the paper here, unlike the DW1000 source below.
+#   A-11 spread M. Kolakowski, J. Modelski, "First path component power based NLOS mitigation
+#               in UWB positioning system", TELFOR 2017, Table 1 (arXiv 2403.19706). DW1000.
+#   A-10        cnx-software.com MaUWB DW3000 review, 2024-04-16 (the 20 m office figure);
+#               Qorvo forum "DWM3000EVB max range" (40-50 m typical); B. Han, J. Jang,
+#               "Extending the Coverage of IEEE 802.15.4z HRP UWB Ranging", Sensors 2025,
+#               25(10):3058 (above 90 m indoors at 850 kb/s).
+#   A-12, F-24  cnx-software.com as above, qualitative only.
+#   F-23, F-28  Makerfabs UWB AT Command Manual v1.0.8 sec 3.11 (the TDMA slot arithmetic and
+#               the 8-anchor cap); DW3000 datasheet Figure 30; Decawave APS013 v2.3 (one
+#               frame per millisecond at 6.8 Mb/s, to hold the regulatory mean power limit).
+#   F-26        DW3000 datasheet Table 14 note 1 (+/-15 cm uncalibrated, +/-6 cm calibrated);
+#               DWM3000 Data Sheet Rev B sec 2 ("no transmit power or antenna delay
+#               calibration"); DWM3001C Data Sheet Rev B sec 1 (factory calibrated).
 
 # Simulation defaults (not claims about the world)
 DEFAULT_TICK_HZ = 20.0          # matches NAV_RATE_HZ
@@ -231,6 +311,30 @@ without ever leaving the Start Area. Real drones are placed by hand with room ar
 # If you start using one, move it up into the block above.
 # --------------------------------------------------------------------------------------
 DRONE_BBOX_M = 0.30             # sec 6, must fit a 30 cm cube including propellers
+UWB_CHANNEL_5_HZ = 6_489_600_000.0
+UWB_CHANNEL_9_HZ = 7_987_200_000.0
+UWB_CHANNEL_BANDWIDTH_HZ = 499_200_000.0
+"""The only two channels the DW3000 has (datasheet Table 16, sec 4.2), and the reason the
+part is legal here. Rule 6.3 bans wireless transmission in 5.7-5.9 GHz on pain of immediate
+disqualification and permits ultra-wideband in the same breath; channel 5 occupies
+6240.0-6739.2 MHz and channel 9 occupies 7737.6-8236.8 MHz, so the nearer band edge sits
+340 MHz clear of 5900 MHz. The datasheet's own channel-5 spectrum plot (Figure 4) reads
+about -71 dBm/MHz or lower across 5.7-5.9 GHz, some 30 dB under the in-band plateau. Note
+the DW3000 does NOT offer channel 7, whose 1081.6 MHz bandwidth about the same centre would
+have reached down to 5948.8 MHz. The simulator models no radio band; these are here so the
+compliance argument is written down where the numbers live."""
+
+UWB_SLOT_S = 0.010
+"""One tag's TDMA slot at 6.8 Mb/s, the floor a shipping firmware allows (Makerfabs AT
+manual v1.0.8 sec 3.11; 850 kb/s needs 15 ms). Slots are per TAG, and every anchor is swept
+inside one -- so the sweep rate falls with FLEET size, not anchor count. See
+``uwb.sweep_rate_hz`` and F-28."""
+
+UWB_MAX_ANCHORS_FIRMWARE = 8
+"""Anchors one shipping AT firmware supports (Makerfabs, sec 1.2: 8 anchors, 64 tags). The
+rules allow ten aids in the Known Search Area plus any number in the Start Area, so a legal
+layout can exceed what an off-the-shelf tag will actually range to. Not enforced."""
+
 TOF_RATE_HZ = 15.0              # tof_task.c:475, 8 sensors x 8 ms round robin. Also the
                                 # VL53L5CX's own max rate at 8x8 (it does 60 Hz only at 4x4)
 VFH_BINS = 32                   # vfh.h:19

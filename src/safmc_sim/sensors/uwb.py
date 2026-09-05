@@ -1,22 +1,28 @@
 """The UWB ranging tag -- range-only radio localisation, on the sensor contract.
 
-**The airframe does not carry one.** The rules permit ultra-wideband by name (Category Swarm
-booklet 6.3, while banning 5.7-5.9 GHz) and say where an anchor may stand (3.3.1 r.14-17:
-any number in the Start Area, at most ten in the Known Search Area, none in the Unknown
-Search Area, each within 1 m x 1 m, secured and not hung from overhead -- a tripod, in
-practice). This module is what a policy would be written against if the team bought a
-module, and what a future ``PoseSource`` would consume.
-It is a model of the literature on DW1000/DW3000-class hobby modules -- Qorvo DWM1001,
-Bitcraze Loco, Pozyx, Makerfabs MaUWB -- not of any device on the bench, and every number in
-it is an assumption with an ID. ADR-0006 records the decisions; R-SENS-17 is the contract.
+**The part is the Qorvo DW3000, and the airframe does not carry one yet.** The team has
+chosen the chip; nothing here has been measured on it. So this models the DW3000 as its
+datasheet and the published measurements of it describe it, and every number is an
+assumption with an ID (A-9..A-13) saying which source it came from and whether that source
+used a DW3000 or the older DW1000 most of the literature is written about. ADR-0006 records
+the decisions; R-SENS-17 is the contract; ``constants.py`` carries the provenance.
+
+**On the rules.** 6.3 bans wireless transmission in 5.7-5.9 GHz on pain of immediate
+disqualification and permits ultra-wideband in the same sentence. The DW3000 has exactly two
+channels -- 5 at 6489.6 MHz and 9 at 7987.2 MHz, each 499.2 MHz wide -- so the nearer band
+edge, 6240.0 MHz, sits 340 MHz clear of 5900 MHz, and there is no configuration that tunes
+it into the banned band. 3.3.1 r.14-17 then say where an anchor may stand: any number in the
+Start Area, at most ten in the Known Search Area, none in the Unknown Search Area, each
+within 1 m x 1 m, secured and not hung from overhead -- a tripod, in practice.
 
 What a tag reports
 ------------------
 
 A tag in a real-time-location network is configured with its anchors and their surveyed
-coordinates, and each ranging cycle reports, per anchor, a distance or nothing (Decawave PANS
-``dwm_loc_get``: a distance list with the anchor positions beside it; MaUWB: a range per
-anchor slot and a validity mask). So the reading is exactly that and nothing more:
+coordinates, and each ranging cycle reports, per anchor, a distance or nothing (a DW3000 AT
+firmware answers ``AT+RANGE`` with a range and a received level per anchor slot; Decawave's
+PANS returns a distance list with the anchor positions beside it). So the reading is exactly
+that and nothing more:
 
     obs.sensors["uwb"].anchor_ids      # ("start_w0", ...) in arena order, fixed for the run
     obs.sensors["uwb"].anchor_xyz_m    # (N, 3) surveyed positions, the anchors at mount height
@@ -48,16 +54,19 @@ Per anchor, from the drone's **true** position ``(x, y, z)`` and the anchor at
    against **walls and pillars only** (``WorldScene.structural_scene``), at the drone's
    altitude. A mission
    marker is a cardboard box and a teammate is a 30 cm airframe; radio goes through both.
-4. In line of sight: ``d + N(0, los_noise_std_m)``. DW1000 timestamp noise is 3-4.5 cm and
-   calibrated testbeds report 2-8 cm; the noise does not grow with distance (A-9, 0.05 m).
-5. Obstructed: dropped (``inf``) with probability ``nlos_drop_probability`` (A-12, 0.10, no
-   published basis), otherwise ``d + nlos_bias_m + N(0, nlos_noise_std_m)``. Through one wall
-   or a single obstacle, a DW1000 in a flat built of pre-stressed concrete panels measured a
-   mean bias of +0.49 ns and a spread of 1.39 ns -- about +0.15 m and 0.42 m, the spread
-   rounded to 0.40 m here (Kolakowski & Modelski, TELFOR 2017, Table 1; arXiv 2403.19706).
-   The spread admits negative errors, which the DW1000's received-level bias produces (A-11).
-   The same table gives +1.92 ns and 2.02 ns, about +0.58 m and 0.61 m, behind several
-   walls; the model does not use it (F-24).
+4. In line of sight: ``d + N(0, los_noise_std_m)``. The DW3000's datasheet claims a 1.5 cm
+   ranging standard deviation, calibrated, at -85 dBm; the best independent measurement of
+   the part puts the median line-of-sight error at 6 cm. The default is 5 cm, near the
+   pessimistic end of that bracket on purpose (A-9). No published DW3000 error-versus-
+   distance curve exists, so the noise does not grow with range here.
+5. Obstructed: dropped (``inf``) with probability ``nlos_drop_probability`` (A-12, 0.10, a
+   guess -- nobody has published a dropout rate for either part), otherwise
+   ``d + nlos_bias_m + N(0, nlos_noise_std_m)``. The bias is a DW3000 measurement: median
+   distance error by obstacle, from a half wall at +0.08 m and a door at +0.10 m up to a
+   concrete pillar at +0.57 m (Flueratoru et al., WiNTECH'22, Table 2). This arena has both
+   thin walls and concrete pillars and one boolean cannot hold both, so the default is
+   +0.15 m (A-11). The spread is the number still inherited from the DW1000, because that
+   paper publishes medians and no per-obstacle deviation (F-28).
 6. With probability ``outlier_probability`` any reported range gains a further positive
    error uniform on ``[0, outlier_max_m]``. The heavy positive tail is documented everywhere
    (LOS p99 of 32 cm; 1.5 m behind a body; "several metres" behind concrete) and its rate
@@ -66,11 +75,15 @@ Per anchor, from the drone's **true** position ``(x, y, z)`` and the anchor at
 
 Every draw comes from the sensor's own generator, and the same number of draws is made per
 sample whatever the geometry, so the noise stream is a function of the seed alone (R-DET-2).
-Every anchor is measured in the same tick (F-23): the real tag ranges to them one at a time
-in TDMA slots of 3-4 ms, so a sweep of up to about twelve fits inside one 50 ms tick and the
-first-to-last skew -- under 40 ms for the example's ten -- is under 2 cm at cruise speed,
-below the noise. PANS itself returns four ranges per 100 ms frame; a ten-anchor sweep at
-10 Hz assumes MaUWB-class firmware.
+
+Every anchor is measured in the same tick, which the radio makes reasonable: a DS-TWR
+exchange is three frames of about 170 us, so the whole sweep lives inside one tag's TDMA
+slot and the first-to-last skew is under 2 cm at cruise speed (F-23). **What the fixed rate
+does not carry is the fleet.** Slots are per tag, so the sweep rate is
+``1 / (n_tags * slot)`` -- ten drones get 10 Hz each and twenty-five get 4 Hz, on the same
+radio. :func:`sweep_rate_hz` computes it and the caller passes the answer to ``rate_hz``;
+nothing does it automatically, because a sensor config knows nothing about the fleet
+(F-28).
 
 What is not modelled, and matters
 ---------------------------------
@@ -79,11 +92,15 @@ What is not modelled, and matters
   behind three walls too, where the same source measured four times the bias. Its walls were
   concrete panels and still ranged; metal is where a link dies. The venue's walls are
   unmeasured (F-24).
-- **Reach.** Whether the module does 12 m or 20 m decides whether the far third of the field
-  hears the Start Area at all (A-10). Measure this first.
-- **Calibration.** ``nlos_bias_m`` is the only bias. An uncalibrated antenna delay adds
-  10-30 cm per anchor pair and drifts about 3 cm per metre; the model assumes the team
-  calibrates, which the literature says gets it under 1 cm (F-26).
+- **Reach, and that it is a firmware setting.** 20 m is a stock 6.8 Mb/s configuration in an
+  office; 850 kb/s with a long preamble has been measured past 90 m indoors on this part.
+  The model has one scalar and cannot express that trade (F-29), so measure A-10 in the
+  configuration you will actually fly.
+- **Calibration, which is a per-unit constant, not noise.** The DW3000 datasheet puts
+  ranging at +/-15 cm uncalibrated and +/-6 cm calibrated, and a DWM3000 module ships with no
+  antenna-delay calibration at all while a DWM3001C ships factory-calibrated. That is a fixed
+  offset per anchor pair, structurally unlike the zero-mean noise modelled here, and it is
+  absent (F-26). Which module the team buys decides how big it is.
 - **Anchors above 2.0 m.** The line-of-sight test is made at the drone's altitude, exact
   while anchors stand no taller than the inner walls and over-reporting obstruction above
   that (F-25).
@@ -118,6 +135,7 @@ import numpy as np
 
 from ..constants import (
     UWB_ANCHOR_HEIGHT_M,
+    UWB_SLOT_S,
     UWB_LOS_NOISE_STD_M,
     UWB_MAX_RANGE_M,
     UWB_NLOS_BIAS_M,
@@ -142,8 +160,43 @@ __all__ = [
     "true_ranges",
     "line_of_sight",
     "measure",
+    "sweep_rate_hz",
     "validate_uwb_config",
 ]
+
+
+# ------------------------------------------------------------------------------------------
+# Picking a rate: the one DW3000 number that depends on the fleet
+# ------------------------------------------------------------------------------------------
+
+
+def sweep_rate_hz(n_tags: int, slot_s: float = UWB_SLOT_S) -> float:
+    """How often one tag completes a full sweep of its anchors, in a fleet of ``n_tags``.
+
+    A TDMA network gives each **tag** a slot and lets it range to every anchor inside that
+    slot, so the sweep rate is ``1 / (n_tags * slot_s)`` -- it falls with the size of the
+    swarm and does *not* depend on how many anchors are placed. At the 10 ms slot a shipping
+    6.8 Mb/s firmware allows, ten drones get 10 Hz each and twenty-five get 4 Hz.
+
+    This is a helper for choosing :attr:`UWBConfig.rate_hz`, not something the runner applies:
+    a sensor config knows nothing about the fleet, and wiring one to the other would make a
+    sensor's timing depend on a field of ``RunConfig`` invisibly. Call it, and pass the answer:
+
+        n = 25
+        RunConfig(n_drones=n, sensors=flown_sensors() + (UWBConfig(rate_hz=sweep_rate_hz(n)),))
+
+    The rate must still divide the tick rate exactly (R-TIME-3), and not every fleet size
+    gives one that does. On the 20 Hz loop at a 10 ms slot the decimation works out to
+    ``0.2 * n_tags``, so fleets that are a multiple of five divide exactly (10 drones give
+    10 Hz, 15 give 6.67 Hz, 25 give 4 Hz) and the rest do not -- eleven drones want 9.09 Hz,
+    which the runner refuses by design rather than rounding it. Pick the next rate down that
+    divides, and say in the write-up that you did. F-28.
+    """
+    if not isinstance(n_tags, int) or isinstance(n_tags, bool) or n_tags < 1:
+        raise ConfigError(f"n_tags must be an integer >= 1, got {n_tags!r}")
+    if not _finite(slot_s) or slot_s <= 0.0:
+        raise ConfigError(f"slot_s must be a finite number > 0, got {slot_s!r}")
+    return 1.0 / (n_tags * slot_s)
 
 
 # ------------------------------------------------------------------------------------------

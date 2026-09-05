@@ -1,6 +1,6 @@
 # ADR-0006: A UWB ranging tag as a first-class sensor
 
-**Status:** Accepted · **Date:** 2026-09-04
+**Status:** Accepted · **Date:** 2026-09-04 · **Amended:** 2026-09-05 (the part is chosen)
 
 ## Context
 
@@ -146,3 +146,57 @@ such a run without knowing that is what it was.
 | A line-of-sight flag in the reading | Tells the policy what no tag can know |
 | A quality factor per range | Real kit reports one (F-27), but it does not reliably say whether a range is biased; left out so nothing here leans on it |
 | A UWB `PoseSource` in the same change | Different seam, different audit; the sensor must exist first |
+
+---
+
+## Addendum, 2026-09-05: the part is the Qorvo DW3000
+
+The original decision modelled "DW1000/DW3000-class hobby modules" because no module had been
+chosen. The team has now chosen the **Qorvo DW3000**. That does not change the contract, the
+reading, or the shape of the model; it changes what every number in it is *about*, and it
+adds one fact the rules care about.
+
+**What the choice settles.**
+
+- **The rules are satisfied, provably.** §6.3 bans wireless transmission in 5.7–5.9 GHz on
+  pain of immediate disqualification and permits ultra-wideband in the same sentence. The
+  DW3000 has exactly two channels — 5 at 6489.6 MHz and 9 at 7987.2 MHz, each 499.2 MHz wide
+  — so its nearest band edge, 6240.0 MHz, is 340 MHz clear of 5900 MHz, and no configuration
+  tunes it into the banned band. Worth noting it does *not* offer channel 7, whose wider
+  bandwidth about the same centre would have reached down to 5948.8 MHz. `constants.py`
+  carries the numbers and a test asserts the arithmetic.
+- **Three priors were wrong.** The datasheet's headline "10 cm" is marketing copy from its
+  first page; the electrical specification is ±6 cm calibrated, ±15 cm uncalibrated, and a
+  1.5 cm ranging standard deviation. The DW3000 is **not faster** than the DW1000 — per-frame
+  airtime is essentially the same — and it is **shorter-ranged**, having dropped the DW1000's
+  110 kb/s long-range mode. Its real gains are power and 802.15.4z security.
+- **The sweep rate depends on the fleet, not the anchors.** TDMA slots are per *tag* and every
+  anchor is ranged inside one, so ten drones get 10 Hz each and twenty-five get 4 Hz on the
+  same radio. `sweep_rate_hz()` computes it; nothing applies it automatically, because a
+  sensor config knows nothing about `RunConfig.n_drones` and wiring the two together would
+  make a sensor's timing depend invisibly on the fleet. F-28.
+
+**What it does not settle, and this is the honest part.** The defaults barely moved, because
+the DW3000 evidence is thinner than the DW1000 evidence it replaces:
+
+- **No DW3000 through-wall measurement in the form this model needs.** Two independent
+  literature searches disagreed on whether one exists at all. What is citable is an aggregate
+  mean absolute error, and the *spread* remains a DW1000 number from a paper this repository
+  read in full. That mixed joint is F-28, and it is the weakest thing in the model.
+- **The model is measurably optimistic.** Against the one independent measurement of the part
+  — mean absolute error 5.7 cm in line of sight and 46.7 cm obstructed, 90th percentiles
+  13.7 cm and 129.5 cm — this model at its defaults gives 4.0/34.2 cm and 8.2/70.3 cm. The
+  body is within a factor of two; the tail is out by 1.8×, because a Gaussian tail is not a
+  UWB tail. The `outlier_probability` term exists to fix exactly that and is switched off for
+  want of a published rate. F-30 records it and a test pins it, so it cannot drift quietly.
+- **Antenna-delay calibration is a per-unit constant this model has no term for.** ±15 cm
+  uncalibrated against ±6 cm calibrated, and a DWM3000 ships uncalibrated while a DWM3001C
+  ships factory-calibrated — so which module is bought moves the error by more than A-9 does.
+  F-31.
+
+**Consequence for anyone quoting a result.** "Given a DW3000" is now a meaningful clause, and
+it is narrower than it sounds: the geometry is the part's, the line-of-sight noise is
+bracketed by two measurements of it, and the through-wall behaviour is still half inherited
+from a different radio. Nothing here has been measured on the team's own hardware in the
+competition hall, which is what A-9 through A-13 exist to ask for.
+

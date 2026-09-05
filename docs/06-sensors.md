@@ -193,15 +193,28 @@ A-5 (camera FOV, 1.0 rad) is derived from the QVGA intrinsics rather than measur
 real camera is pitched 45° nose-down while ours is modelled horizontal (F-6) — so it sees the
 floor ahead rather than the horizon, and ground markers enter view differently.
 
-## The UWB ranging tag — not flown
+## The UWB ranging tag — a DW3000, not flown
 
-**The airframe does not carry one.** The rules permit ultra-wideband by name (booklet §6.3)
-and say where an anchor may stand (§3.3.1 r.14–17), and the team may buy a module; this is
-what a policy would be written against if it did, and what a future `PoseSource` would
-consume. It is a model of the literature on DW1000/DW3000-class hobby modules, not of any
-device on the bench, and every number in it is an assumption with an ID.
-[ADR-0006](adr/0006-uwb-ranging-sensor.md) has the decisions; `sensors/uwb.py` is the source
-of truth for the model. Opt in with `RunConfig(sensors=flown_sensors() + (UWBConfig(),))` and
+**The part is the Qorvo DW3000; the airframe does not carry one yet.** The chip is chosen,
+nothing has been measured on it, and every number below is an assumption with an ID that says
+whether its source used a DW3000 or the older DW1000 most UWB papers are written about.
+[ADR-0006](adr/0006-uwb-ranging-sensor.md) has the decisions and its addendum has the part
+choice; `sensors/uwb.py` is the source of truth for the model.
+
+> **The part number matters, the same way it does for the ranging ring.** The DW3000 is not a
+> faster DW1000. Per-frame airtime is essentially identical, so ranging costs the same time;
+> it is *shorter*-ranged, having dropped the DW1000's 110 kb/s long-range mode; and it is
+> over-the-air compatible with a DW1000 only on channel 5. Its real gains are power, about
+> half, and 802.15.4z secure ranging. The module forms differ too: a **DWM3000** ships with
+> no antenna-delay calibration, a **DWM3001C** ships factory-calibrated, and that difference
+> is worth ±15 cm against ±6 cm (F-31).
+
+**It cannot break the RF rule.** §6.3 bans transmission in 5.7–5.9 GHz outright and permits
+ultra-wideband in the same sentence. The DW3000 has exactly two channels — 5 at 6489.6 MHz
+and 9 at 7987.2 MHz, each 499.2 MHz wide — so the nearest edge, 6240.0 MHz, sits 340 MHz
+clear of the banned band, and no configuration reaches it. (It does not offer channel 7,
+which would have come within 50 MHz.) The constants carry the frequencies and a test asserts
+the arithmetic. Opt in with `RunConfig(sensors=flown_sensors() + (UWBConfig(),))` and
 put anchors in the arena as landmarks of kind `"uwb_anchor"`.
 
 ```python
@@ -227,15 +240,23 @@ positions are the team's own configuration — the same `ArenaConfig` that place
 | Range | Three-dimensional distance from the drone's true position to the anchor at `anchor_height_m` — a 2.0 m anchor 3 m away reads 3.35 m | `anchor_height_m` 2.0 m, a tripod |
 | Reach | Beyond `max_range_m`: `inf` | **A-10**, 20 m. Datasheets say 60 m; hobby firmware delivers 12–20 m indoors |
 | Obstruction | The line-of-sight test the mission uses, against **walls and pillars only**, at the drone's altitude. A marker is a cardboard box and a teammate a 30 cm airframe: radio goes through both | — |
-| Clear | true range + N(0, `los_noise_std_m`) | **A-9**, 0.05 m. DW1000 timestamp noise is 3–4.5 cm; testbeds report 2–8 cm |
-| Obstructed | dropped (`inf`) with probability `nlos_drop_probability`, otherwise true range + `nlos_bias_m` + N(0, `nlos_noise_std_m`) | **A-12**, 0.10; **A-11**, +0.15 m and 0.40 m: 0.49 ns and 1.39 ns (0.42 m, rounded) through one wall or obstacle on a DW1000 in a concrete-panel flat |
+| Clear | true range + N(0, `los_noise_std_m`) | **A-9**, 0.05 m. Between the DW3000 datasheet's 1.5 cm (calibrated, at −85 dBm) and two independent measurements of the part at 5.7–6 cm |
+| Obstructed | dropped (`inf`) with probability `nlos_drop_probability`, otherwise true range + `nlos_bias_m` + N(0, `nlos_noise_std_m`) | **A-12**, 0.10, a guess. **A-11**, +0.15 m and 0.40 m — and the spread is still a DW1000 number, because no DW3000 study publishes one (F-28) |
 | Outlier | with probability `outlier_probability`, a further positive error uniform on [0, `outlier_max_m`] | **A-13**, 0 (off) and 1.5 m — the tail is documented, its rate is not |
 | Floor | a reported range is never negative | — |
 
-Every anchor is measured in the same tick, at 10 Hz (`rate_hz`); the real tag sweeps them
-one at a time in 3–4 ms slots, so the first-to-last skew is under 40 ms for ten anchors and
-under 2 cm at cruise speed. PANS itself returns four ranges per 100 ms frame; a ten-anchor
-sweep at 10 Hz assumes MaUWB-class firmware (F-23). Every draw comes
+Every anchor is measured in the same tick, which the radio makes reasonable: a double-sided
+exchange is three frames of about 170 µs, so a whole sweep fits inside one tag's slot and the
+skew is under 2 cm at cruise speed (F-23).
+
+**The rate is not fixed in reality — it falls with the size of the swarm.** TDMA slots belong
+to *tags*, and every anchor is ranged inside one, so ten drones get 10 Hz each and
+twenty-five get 4 Hz on the same radio and the same anchors. `sweep_rate_hz(n_drones)`
+computes it and you pass the answer to `rate_hz`; nothing does it for you, because a sensor
+config knows nothing about the fleet (F-28). Fleets that are a multiple of five give a rate
+that divides the 20 Hz tick; others do not, and the runner refuses rather than rounding.
+
+Every draw comes
 from the sensor's own generator, four per anchor per sweep whatever the geometry, so the
 noise stream depends on the seed alone.
 
@@ -244,11 +265,18 @@ noise stream depends on the seed alone.
 - **Wall count and material** (F-24). One wall's numbers apply behind three, where the source
   measured four times the bias — through concrete panels that still ranged; metal is where a
   link dies. Nobody has measured the venue's walls.
-- **Reach** (A-10). At 20 m the whole field is within reach of three Start Area anchors, only
-  just; at the 12 m hobby-firmware floor the far third hears none of them. Even in reach, six
-  anchors in a 5 m-deep strip give poor along-field geometry beyond about 14 m and the room's
-  walls obstruct — which is why the Known Search Area's ten aids matter, and why the example
-  puts four there.
+- **Reach, which is a firmware setting** (A-10, F-29). At 20 m — a stock 6.8 Mb/s
+  configuration — the whole field is just within reach of three Start Area anchors; at 12 m
+  the far third hears none. Moving to 850 kb/s with a long preamble has been measured past
+  90 m indoors on this part, so the configuration is worth more than the hardware. Even in
+  reach, six anchors in a 5 m-deep strip give poor along-field geometry beyond about 14 m and
+  the room's walls obstruct — which is why the Known Search Area's ten aids matter, and why
+  the example puts four there.
+- **How wrong it is, measured** (F-30). Against the one independent measurement of a DW3000 —
+  mean absolute error 5.7 cm in line of sight and 46.7 cm obstructed, 90th percentiles 13.7 cm
+  and 129.5 cm — this model gives 4.0/34.2 cm and 8.2/70.3 cm. It is optimistic everywhere and
+  worst in the tail, because a Gaussian tail is not a UWB tail. Set `outlier_probability` to
+  fatten it and `los_noise_std_m=0.07` to match the measured line of sight.
 - **Calibration** (F-26). An uncalibrated antenna delay adds 10–30 cm per anchor pair; the
   model assumes the team calibrates.
 - **Anchors above 2.0 m** (F-25): the obstruction test is made at the drone's altitude, exact
