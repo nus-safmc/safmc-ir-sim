@@ -58,6 +58,7 @@ from ..api import Command, Observation, Policy, Velocity, register_policy
 from ..errors import ConfigError
 from ..frames import wrap_pi
 from ..toolbox import body_to_world, climb, ring_quadrants
+from .mission_wrapper import MissionWrapper
 
 __all__ = ["SDLW"]
 
@@ -116,6 +117,12 @@ class SDLW(Policy):
         self.target_distance = 0.0
         self.travelled = 0.0
         self._last_xy: np.ndarray | None = None
+        self.mission = MissionWrapper(
+            land_range_m=float(c.get("land_range_m", 0.75)),
+            approach_speed_ms=float(c.get("approach_speed_ms", 0.25)),
+            yaw_p_gain=float(c.get("mission_yaw_p_gain", 3.0)),
+            max_yaw_rate=float(c.get("mission_max_yaw_rate", 1.5)),
+        ) if bool(c.get("mission_wrapper", False)) else None
 
     def reset(self) -> None:
         self.state = _ROTATE
@@ -171,6 +178,10 @@ class SDLW(Policy):
         rising = climb(obs, self.cruise_alt_m)
         if rising is not None:
             return rising
+        if self.mission is not None:
+            mission = self.mission.command(obs)
+            if mission is not None:
+                return mission
 
         psi = obs.pose.theta
         xy = obs.pose.xy
