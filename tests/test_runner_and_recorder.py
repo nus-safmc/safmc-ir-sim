@@ -183,6 +183,18 @@ def test_terminal_drones_are_removed_from_collision_and_sensing():
         runner._teardown()
 
 
+def test_crashed_drone_is_removed_from_collision_geometry():
+    runner = Runner(RunConfig(seed=0, n_drones=10, duration_s=1.0, policy="sdlw", record=False))
+    runner.build()
+    try:
+        crashed = runner.agents[0]
+        runner._crash(crashed, tick=0, sim_time=0.0, reason="test")
+        assert crashed.lifecycle == "CRASHED"
+        assert crashed.robot.unobstructed is True
+    finally:
+        runner._teardown()
+
+
 def test_landing_is_irreversible():
     """R-DRONE-10: a landed drone stays landed AND stops moving, for the rest of the run.
 
