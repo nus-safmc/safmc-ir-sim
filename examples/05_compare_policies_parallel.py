@@ -15,14 +15,14 @@ from safmc_sim.metrics import compute_metrics, summarise
 from safmc_sim.recorder import Recorder
 from safmc_sim.runner import RunConfig, run
 
-SEEDS = range(5)
+DEFAULT_SEEDS = 5
 POLICIES = (
     "sdlw",
     "wasp_v5_uniform_levy",
     "wasp_v5_circular_resultant",
     "wasp_v5_pca_heading",
 )
-COLLISION_MODES = ("unobstructed", "stop")
+COLLISION_MODE = "stop"
 MAX_WORKERS = 8
 
 
@@ -54,24 +54,31 @@ def parse_args() -> argparse.Namespace:
         default=MAX_WORKERS,
         help=f"concurrent run processes (default: {MAX_WORKERS})",
     )
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        default=DEFAULT_SEEDS,
+        help=f"number of seeds from 0 (default: {DEFAULT_SEEDS})",
+    )
     args = parser.parse_args()
     if args.workers < 1:
         parser.error("--workers must be at least 1")
+    if args.seeds < 1:
+        parser.error("--seeds must be at least 1")
     return args
 
 
 def main() -> None:
     args = parse_args()
-    jobs = list(product(POLICIES, COLLISION_MODES, SEEDS))
+    jobs = list(product(POLICIES, (COLLISION_MODE,), range(args.seeds)))
     results = []
     print(f"Running {len(jobs)} comparisons with {args.workers} workers.")
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
         for result in executor.map(run_job, jobs):
             results.append(result)
-    for mode in COLLISION_MODES:
-        metrics = [metric for _, result_mode, _, metric in results if result_mode == mode]
-        print(f"\n=== collision_behaviour = {mode} ===")
-        print(summarise(metrics))
+    metrics = [metric for _, result_mode, _, metric in results if result_mode == COLLISION_MODE]
+    print(f"\n=== collision_behaviour = {COLLISION_MODE} ===")
+    print(summarise(metrics))
 
 
 if __name__ == "__main__":
