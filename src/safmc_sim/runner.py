@@ -578,7 +578,9 @@ class Runner:
         2d, ... A drone that became terminal -- this tick or earlier -- is not sampled: its
         last reading is held, and ``sample_tick`` in the log says so.
         """
-        self.world_scene.refresh_drones(self.env.robot_list, tick)
+        self.world_scene.refresh_drones(
+            [agent.robot for agent in self.agents if agent.lifecycle == Lifecycle.ACTIVE], tick
+        )
         for agent in self.agents:
             if agent.terminal:
                 continue
@@ -649,6 +651,7 @@ class Runner:
                 self._crash(agent, tick, sim_time, f"struck landmark {struck.id} while landing")
                 return
         self._freeze(agent)
+        agent.robot.unobstructed = True
         agent.robot._state[3, 0] = 0.0
         agent.lifecycle = Lifecycle.LANDED
         self._emit(
@@ -697,6 +700,7 @@ class Runner:
     def _crash(self, agent: AgentView, tick: int, sim_time: float, reason: str) -> None:
         """Make a drone CRASHED here, permanently, and say why."""
         self._freeze(agent)
+        agent.robot.unobstructed = True
         agent.lifecycle = Lifecycle.CRASHED
         agent.crash_reason = reason
         self._emit(
