@@ -11,6 +11,7 @@ dependencies = [
     # PINNED. ir-sim 2.9.0 and 2.10.2 differ materially (register_kinematics,
     # fog map, planners). See docs/03-irsim.md "Version pin".
     "ir-sim==2.10.2",
+    "scipy",
     "numpy>=2.0",
     "shapely>=2.1.2",
     "pyyaml>=6.0",
