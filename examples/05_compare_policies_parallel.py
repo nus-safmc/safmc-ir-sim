@@ -22,7 +22,7 @@ POLICIES = (
     "wasp_v5_circular_resultant",
     "wasp_v5_pca_heading",
 )
-COLLISION_MODE = "stop"
+DEFAULT_COLLISION_MODES = ("unobstructed", "stop")
 MAX_WORKERS = 8
 
 
@@ -60,25 +60,34 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SEEDS,
         help=f"number of seeds from 0 (default: {DEFAULT_SEEDS})",
     )
+    parser.add_argument(
+        "--collision-modes",
+        nargs="+",
+        choices=DEFAULT_COLLISION_MODES,
+        default=DEFAULT_COLLISION_MODES,
+        help="collision modes to evaluate (default: unobstructed stop)",
+    )
     args = parser.parse_args()
     if args.workers < 1:
         parser.error("--workers must be at least 1")
     if args.seeds < 1:
         parser.error("--seeds must be at least 1")
+    args.collision_modes = tuple(args.collision_modes)
     return args
 
 
 def main() -> None:
     args = parse_args()
-    jobs = list(product(POLICIES, (COLLISION_MODE,), range(args.seeds)))
+    jobs = list(product(POLICIES, args.collision_modes, range(args.seeds)))
     results = []
     print(f"Running {len(jobs)} comparisons with {args.workers} workers.")
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
         for result in executor.map(run_job, jobs):
             results.append(result)
-    metrics = [metric for _, result_mode, _, metric in results if result_mode == COLLISION_MODE]
-    print(f"\n=== collision_behaviour = {COLLISION_MODE} ===")
-    print(summarise(metrics))
+    for mode in args.collision_modes:
+        metrics = [metric for _, result_mode, _, metric in results if result_mode == mode]
+        print(f"\n=== collision_behaviour = {mode} ===")
+        print(summarise(metrics))
 
 
 if __name__ == "__main__":
