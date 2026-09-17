@@ -75,6 +75,39 @@ def test_relays_needed_is_the_spacing_arithmetic():
     assert ex.horizontal(0.3, 0.5) == 0.0, "never imaginary"
 
 
+def test_the_network_links_an_anchor_to_crumbs_anywhere_inside_its_reach():
+    """The auditor's reproduction: a trail beginning 0.70-0.87 m from the anchor was 'infeasible'
+    because the anchor edge was searched with a 0.6 m cell hash. Every crumb within 0.9 m links."""
+    ex = example()
+    anchors = np.array([[1.75, 5.0]])
+    for x0 in (2.35, 2.45, 2.55, 2.62):
+        head = [(x0, y, 0.8) for y in np.arange(5.0, 7.0, 0.25)]
+        routed = ex.CrumbNetwork(anchors).route({"h": head}, "h")
+        assert routed is not None, x0
+        # Dijkstra takes the longest anchor hop it may (the farthest crumb inside 0.9 m), so the
+        # route is shorter than "across, then north" and no shorter than the straight line.
+        straight = np.hypot(x0 - 1.75, 1.75)
+        assert straight <= routed[0].length <= abs(x0 - 1.75) + 1.75 + 1e-9
+    beyond = [(2.70, y, 0.8) for y in np.arange(5.0, 7.0, 0.25)]           # 0.95 m: out of reach
+    assert ex.CrumbNetwork(anchors).route({"h": beyond}, "h") is None
+
+
+def test_an_anchor_with_structure_in_its_disc_is_dropped_for_that_seed():
+    """22 of 200 generated arenas have an inner wall reaching below the start line, and the
+    network treats the 0.9 m disc around an anchor as free. Seeds 16 and 144 put a row anchor
+    within 0.35 m of such a wall; those anchors are left out. The first anchor never is."""
+    ex = example()
+    from safmc_sim.world.arena import generate_arena
+    for seed, missing in ((16, "start_anchor_8"), (144, "start_anchor_1")):
+        row = ex.anchor_row(10, generate_arena(seed))
+        ids = {lm.id for lm in row}
+        assert missing not in ids and "start_anchor_0" in ids and len(row) == 9
+    assert len(ex.anchor_row(10)) == 10, "without an arena nothing is dropped"
+    cfg = ex.make_config(seed=16, n_anchors=10)
+    assert len(cfg.arena_config.landmarks) == 9
+    assert cfg.sensors[-1].rate_hz == pytest.approx(ex.peer_sweep_rate_hz(10, 9))
+
+
 def test_the_network_routes_through_another_searcher_s_crumbs():
     """A head that wandered east before landing; a second searcher crossed the strip straight
     north. The route uses the second trail and is far shorter than the head's own."""
@@ -127,12 +160,15 @@ def test_the_trial_forms_a_relay_on_a_planted_bonus_victim_and_grades_from_the_l
     assert report["time_to_relay_s"] < 120.0
     assert result.score.total == 2 * K.POINTS_BONUS_VICTIM
 
-    # T-2
+    # T-2. The chain comes from the mission's own rule, so "links <= 1.0 and clear" cannot fail
+    # once T-1 holds (an auditor pointed that out); what can fail is whether the relays that
+    # landed are all *in* it -- nobody landed uselessly -- and how tight the band left it.
     assert report["chain"][0] == "drone_00", "the lead, on the bonus victim, is the head"
     assert len(report["chain"]) == 3, "a ~2.3 m trail needs two relays; the third stays home"
-    assert all(d <= K.RELAY_SPACING_M for d in report["links_m"]), report["links_m"]
-    assert all(report["links_clear"])
-    assert report["tail_in_start_area"]
+    landed_relays = {a for a, life in result.lifecycles.items() if life == "LANDED" and a >= "drone_07"}
+    assert landed_relays == set(report["chain"][1:]), "every relay that landed is a link"
+    assert np.mean(report["links_m"]) <= ex.MAX_LINK_M, report["links_m"]
+    assert all(report["links_clear"]) and report["tail_in_start_area"]
 
     # T-3
     gate = report["gate"]
@@ -148,6 +184,32 @@ def test_the_trial_forms_a_relay_on_a_planted_bonus_victim_and_grades_from_the_l
     # And the third relay never left the ground.
     assert result.lifecycles["drone_09"] == "ACTIVE"
     assert not any(e["agent_id"] == "drone_09" for e in log["events"] if e["kind"] == "departed")
+
+
+def test_too_few_relays_for_the_trail_never_land_because_the_gate_does_not_pass():
+    """T-3 the other way round, and the test a mutant gate cannot pass: one relay on the same
+    ~2.3 m trail. In train mode it joins (there is room at d*) and the band parks it at the
+    middle, 1.15 m from each end -- outside MAX_LINK_M -- so it must hover to the end of the
+    run. A gate that ignored the ranges would land it and score a 1.15 m 'relay' the mission
+    rejects. In dispatch the same trail is infeasible for one relay and it never launches."""
+    ex = example()
+    cfg = ex.make_config(seed=0, n_drones=10, n_relay=1, mode="train", duration_s=90.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        result = run(cfg, recorder=Recorder(tmp, record_sensors=False), arena=planted_arena(cfg))
+        log = load_run(tmp)
+    assert not result.score.relay_formed
+    assert result.lifecycles["drone_09"] == "ACTIVE", "airborne to the end: the gate never passed"
+    assert any(e["agent_id"] == "drone_09" for e in log["events"] if e["kind"] == "departed"), "it did join"
+    z = log["states"]["pose"][-1, 9, 2]
+    assert z > 0.3, "and it is hovering, not parked"
+
+    cfg = ex.make_config(seed=0, n_drones=10, n_relay=1, mode="dispatch", duration_s=60.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        result = run(cfg, recorder=Recorder(tmp, record_sensors=False), arena=planted_arena(cfg))
+        log = load_run(tmp)
+    assert not result.score.relay_formed
+    assert not any(e["agent_id"] == "drone_09" for e in log["events"] if e["kind"] == "departed"), \
+        "infeasible: it never launched"
 
 
 def test_the_trial_refuses_to_run_without_peer_ranging_or_without_an_anchor():

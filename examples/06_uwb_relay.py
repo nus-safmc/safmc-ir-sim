@@ -29,10 +29,13 @@ What it shows, in order:
    cannot (ADR-0007). The two-dimensional command tracks the trail point at ``s``.
 4. **The landing gate is UWB alone.** A relay is *in place* when both neighbour ranges, reduced
    to the horizontal, have measured at most 0.9 m for three consecutive fresh sweeps -- both
-   ends of every link check it, so every relay in place means every link inside the rule. The
-   tail's predecessor is the anchor, and with the anchor at ``y = 5.0`` a 0.9 m horizontal
-   range puts it inside the Start Area **by measurement**. When every relay on the trail is in
-   place in the same blackboard snapshot, every relay lands on the same tick.
+   ends of every link check it, so every relay in place means every link inside the rule's
+   *distance*. A range cannot certify the rule's floor-level line of sight; that comes from
+   the trail's construction (flown segments and ring-evidenced chords) and is checked by the
+   grader, not measured by the gate. The tail's predecessor is the anchor, and with the
+   anchor at ``y = 5.0`` a 0.9 m horizontal range puts it inside the Start Area **by
+   measurement**. When every relay on the trail is in place in the same blackboard snapshot,
+   every relay lands on the same tick.
 5. **Two deployments, one controller.** ``mode="dispatch"``: relays wait on the ground until a head
    has landed, pick the cheapest feasible head, and launch in single file. ``mode="train"``: relays
    follow the lead's growing trail from take-off at equal spacing between the anchor and the lead,
@@ -41,11 +44,14 @@ What it shows, in order:
    by the mission's own rule from ``states.npz``, and every landed relay's last fresh peer ranges
    checked against the gate from ``uwb.npz``.
 
-**Read this before quoting a number.** Trail following and role assignment run on ground-truth
-pose; crumbs, head announcements and the landing consensus run on the perfect blackboard
-(ADR-0003). The two decisions that survive those caveats are the ones the trial exists to test:
-spacing gated on measured peer ranges, and the tail certified by one anchor range. Every UWB
-number is A-14..A-19 and none is measured on the team's kit. F-36.
+**Read this before quoting a number.** Trail following, the carrot, the approach, the
+crumbs themselves and the ``start``/``xy`` publications that pace launches all run on
+ground-truth pose, and every horizontal correction uses the relay's own true altitude; crumbs,
+head announcements, chain order and the landing consensus run on the perfect blackboard
+(ADR-0003). Roles come from the tag's roster, not from pose. The two decisions that survive
+those caveats are the ones the trial exists to test: the band's direction and the landing
+gate on measured peer ranges, and the tail certified by one anchor range. Every UWB number is
+A-14..A-19 and none is measured on the team's kit. F-36.
 
 Run:  python examples/06_uwb_relay.py                       # one dispatch run, seed 0, graded
       python examples/06_uwb_relay.py --mode train --n-relay 6 --seed 3
@@ -105,27 +111,61 @@ never more than 0.95 m from an anchor, so the chain's Start-Area leg costs at mo
 Rule 3.3.1 r.16 allows any number of navigation aids in the Start Area."""
 
 
-def anchor_row(n_anchors: int) -> tuple[Landmark, ...]:
+ANCHOR_CLEARANCE_M = 1.2
+"""An anchor must stand this far from any inner wall or pillar. The Start Area is supposed to
+be empty, but the generator on ``main`` lets an inner wall reach below the line -- 22 of 200
+seeds, as low as ``y = 4.8`` -- and the network treats the disc within 0.9 m of an anchor as
+free space. An anchor with structure inside that disc is dropped for that seed."""
+
+
+def anchor_row(n_anchors: int, arena=None) -> tuple[Landmark, ...]:
     """``n_anchors`` anchors along ``y = ANCHOR_Y`` from the lead's column eastwards.
 
     One is the brief this trial was given, and the default. One certification point means the
     chain must come back to it: a head that landed 12 m east of it, a metre north of the line,
     needed sixteen relays on the first full run. A row makes the certificate available along
-    the whole line, and the sweep prices the difference.
+    the whole line, and the sweep prices the difference. With ``arena`` given, an anchor that
+    has structure within :data:`ANCHOR_CLEARANCE_M` is left out (see the constant); the first
+    anchor, on the lead's column, is never dropped and never has been.
     """
     if n_anchors < 1:
         raise ValueError("at least one anchor")
     xs = [ANCHOR_X0 + k * ANCHOR_SPACING_M for k in range(n_anchors)]
     if xs[-1] > 19.5:
         raise ValueError(f"{n_anchors} anchors at {ANCHOR_SPACING_M} m run off the field")
-    return tuple(Landmark(f"start_anchor_{k}", "uwb_anchor", x, ANCHOR_Y) for k, x in enumerate(xs))
+    row = []
+    for k, x in enumerate(xs):
+        if arena is not None and k > 0 and structure_within(arena, x, ANCHOR_Y, ANCHOR_CLEARANCE_M):
+            continue
+        row.append(Landmark(f"start_anchor_{k}", "uwb_anchor", x, ANCHOR_Y))
+    return tuple(row)
+
+
+def structure_within(arena, x: float, y: float, radius_m: float) -> bool:
+    """Is any inner wall or pillar within ``radius_m`` of ``(x, y)``? Perimeter walls excluded."""
+    p = np.array([x, y])
+    for w in arena.walls:
+        if w.kind in ("perimeter_wall", "net"):
+            continue
+        a, b = np.array([w.x1, w.y1]), np.array([w.x2, w.y2])
+        ab = b - a
+        t = float(np.clip(np.dot(p - a, ab) / max(float(np.dot(ab, ab)), 1e-9), 0.0, 1.0))
+        if float(np.linalg.norm(p - (a + t * ab))) < radius_m + w.thickness_m / 2:
+            return True
+    for pil in arena.pillars:
+        if float(np.hypot(pil.x - x, pil.y - y)) < radius_m + max(pil.radius_m, 0.25):
+            return True
+    return False
 
 D_STAR_M = 0.8
 """Rest spacing of the band: the 1.0 m rule less four A-14 standard deviations."""
 
 MAX_LINK_M = 0.9
-"""What a link may *measure* and still be landed on. The margin against 1.0 m is two A-14
-sigmas plus the through-body and calibration terms the model does not carry (F-34)."""
+"""What a link may *measure* and still be landed on. The 0.1 m margin against the rule covers
+A-14 -- two sigmas, and three consecutive sweeps make a true 1.0 m link's chance of passing
+about 1e-5 -- and nothing else. It does **not** cover the per-unit antenna-delay offsets the
+model has no term for: 12 cm between two calibrated DWM3001Cs, up to 30 cm between two
+DWM3000s out of the box (F-31, F-34). On hardware, lower this by the offset you measure."""
 
 ANCHOR_HEIGHT_M = 0.5
 """The anchor's antenna stands at cruise altitude, not on the 2.0 m tripod the anchor model
@@ -156,11 +196,34 @@ CUT_M = 0.6
 """A new crumb this close to an earlier one is a candidate loop cut."""
 
 CUT_CLEARANCE_CAP_M = 0.8
-"""Ring clearance is trusted only up to this: beyond it a 5.6-degree ray can slip past a
-0.10 m wall end-on, and a cut on that evidence could route the chain through a wall."""
+"""Ring clearance is trusted only up to this. The eight rangers sit at the airframe's rim,
+not at its centre, so at the boundary bearing between two rangers a 0.10 m wall end-on falls
+between the last ray of one and the first of the next from about 0.79 m out (ranger-origin
+parallax, not zone width -- measured in the audit). A chord the cutter accepts is at most
+``0.8 - 0.18`` = 0.62 m, inside the range where every wall is seen."""
 
 LINE_CLEAR_M = 0.4
 """How far past the start line a searcher's north leg runs before it starts walking."""
+
+LEG_STAGGER_S = 1.5
+"""Neighbouring columns start their north leg this far apart in time (three bands). Every
+searcher starts from the same row at the same speed, so without this they all reached the
+room's face together, all handed over to wasp_v5 with the same wall ahead, and neighbours
+1.25 m apart turned into each other -- two head-on losses at t = 14 s on seed 2 that the
+plain wasp_v5 baseline, which never lines up, does not show. A stagger in *height* did not
+help, because the handover fires at a fixed distance from the wall whatever the band."""
+
+BLOCKED_M = 0.9
+"""A ring return this close in the direction of travel counts as blocked, and a drone flying
+to a point slides along the obstacle instead of pushing on it."""
+
+HANDOVER_M = 1.4
+"""A searcher on its north leg hands over to wasp_v5 -- which knows how to walk along a wall
+-- when the ring sees anything this far ahead. The room's south face can stand as little as
+0.05 m north of the start line (``y0`` is drawn from [6.05, 7.95]), so a column that meets
+the face rather than its doorway meets it before the leg's nominal end. At 0.9 m the handover
+left wasp_v5 two seconds at cruise to turn a drone away from a corner, and its 0.4 m
+repulsion did not; at 1.4 m it has three, and the same seeds no longer crash."""
 
 APPROACH_GAIN = 2.0
 """Proportional gain from position error to commanded speed, saturated at cruise."""
@@ -329,12 +392,21 @@ class CrumbNetwork:
         clear = np.concatenate(clear_list)
         n_nodes = len(xy)
 
-        # Cross-links by a cell hash: candidates within CUT_M are in the same or adjacent cell.
-        cell = np.floor(xy / CUT_M).astype(int)
+        xl, yl, wl = [], [], []
+        # Anchor to crumb: any crumb within the certificate's reach, computed directly -- the
+        # reach (0.9 m) is wider than the cell hash below (0.6 m), and an auditor found the
+        # hashed version dropped every anchor edge between 0.6 and 0.9 m.
+        crumbs_xy = xy[n_anchor:]
+        for a in range(n_anchor):
+            chord = np.linalg.norm(crumbs_xy - xy[a], axis=1)
+            ok = np.flatnonzero(chord <= MAX_LINK_M)
+            if len(ok):
+                xl.append(np.full(len(ok), a)); yl.append(ok + n_anchor); wl.append(chord[ok])
+        # Crumb to crumb by a cell hash: candidates within CUT_M are in the same or an adjacent cell.
+        cell = np.floor(crumbs_xy / CUT_M).astype(int)
         buckets: dict[tuple[int, int], list[int]] = {}
         for i, (cx, cy) in enumerate(map(tuple, cell)):
-            buckets.setdefault((cx, cy), []).append(i)
-        xl, yl, wl = [], [], []
+            buckets.setdefault((cx, cy), []).append(i + n_anchor)
         for (cx, cy), members in buckets.items():
             neigh = []
             for dx in (-1, 0, 1):
@@ -346,12 +418,8 @@ class CrumbNetwork:
                 if not len(js):
                     continue
                 chord = np.linalg.norm(xy[js] - xy[i], axis=1)
-                if i < n_anchor:
-                    # Anchor to crumb: Start Area free space within the certificate's reach.
-                    ok = (js >= n_anchor) & (chord <= MAX_LINK_M)
-                else:
-                    free = np.maximum(clear[js], clear[i])
-                    ok = (js >= n_anchor) & (chord <= CUT_M) & (chord + DRONE_RADIUS_M <= free)
+                free = np.maximum(clear[js], clear[i])
+                ok = (chord <= CUT_M) & (chord + DRONE_RADIUS_M <= free)
                 if ok.any():
                     xl.append(np.full(int(ok.sum()), i)); yl.append(js[ok]); wl.append(chord[ok])
         if xl:
@@ -419,12 +487,43 @@ def ring_clearance(obs: Observation) -> float:
     return float(finite.min()) if len(finite) else 3.0
 
 
+def blocked_ahead(obs: Observation, direction_xy: np.ndarray, within_m: float = BLOCKED_M,
+                  half_angle_rad: float = 0.6) -> float:
+    """The nearest ring return inside ``half_angle_rad`` of a world-frame direction, or inf."""
+    ranges = obs.tof.ranges_m.reshape(-1)
+    bearings = obs.tof.zone_bearings_rad.reshape(-1) + obs.pose.theta          # to world frame
+    heading = float(np.arctan2(direction_xy[1], direction_xy[0]))
+    off = np.abs(np.arctan2(np.sin(bearings - heading), np.cos(bearings - heading)))
+    sector = ranges[off <= half_angle_rad]
+    nearest = float(sector.min()) if len(sector) else math.inf
+    return nearest if nearest < within_m else math.inf
+
+
 def toward(obs: Observation, goal_xy: np.ndarray, speed: float = CRUISE_SPEED_MS,
            avoid_range_m: float = AVOID_RANGE_M) -> Velocity:
-    """A saturated proportional velocity toward ``goal_xy`` at cruise altitude, plus repulsion."""
+    """A saturated proportional velocity toward ``goal_xy`` at cruise altitude, plus repulsion,
+    plus a slide along whatever blocks the way.
+
+    Pure attraction-plus-repulsion has no tangential term, so a drone driven at a wall face
+    pushes on it forever: an auditor found searchers parked against the room's south face at
+    ``y = 5.5`` for a whole run. With something inside :data:`BLOCKED_M` in the goal's
+    direction the drone instead moves perpendicular to it, toward whichever side the ring
+    reports freer, and resumes the goal once the way is clear.
+    """
     delta = goal_xy - obs.pose.xy
     distance = float(np.linalg.norm(delta))
     v = delta * min(APPROACH_GAIN, speed / distance) if distance > 1e-6 else np.zeros(2)
+    if distance > 0.3 and math.isfinite(blocked_ahead(obs, delta)):
+        d = delta / distance
+        left = np.array([-d[1], d[0]])
+        ranges = obs.tof.ranges_m.reshape(-1)
+        bearings = obs.tof.zone_bearings_rad.reshape(-1) + obs.pose.theta
+        heading = float(np.arctan2(d[1], d[0]))
+        rel = np.arctan2(np.sin(bearings - heading), np.cos(bearings - heading))
+        side = lambda sign: ranges[(sign * rel > 0.6) & (sign * rel < 2.2)]      # the flank, 35-125 deg
+        free_left = float(np.min(side(+1))) if len(side(+1)) else math.inf
+        free_right = float(np.min(side(-1))) if len(side(-1)) else math.inf
+        v = (left if free_left >= free_right else -left) * speed * 0.7
     v = v + ring_repulsion(obs, range_m=avoid_range_m)
     norm = float(np.linalg.norm(v))
     if norm > speed:
@@ -492,6 +591,8 @@ class RelaySearcher(WaspV5Policy):
         self._crossed = False
         self._crumb_k = -1
         self._last_crumb: np.ndarray | None = None
+        self._leg_end_y = START_AREA_DEPTH_M + LINE_CLEAR_M
+        self._leg_start_s = LEG_STAGGER_S * (int(agent_id[-2:]) % 3)
 
     def _drop_crumb(self, obs: Observation, force: bool = False) -> None:
         here = obs.pose.xy
@@ -508,11 +609,19 @@ class RelaySearcher(WaspV5Policy):
         if obs.pose.z < self.cruise_alt_m - 0.02:
             return Velocity(vz=self.climb_rate_ms)
         if not self._crossed:
-            if obs.pose.y > START_AREA_DEPTH_M + LINE_CLEAR_M:
+            if obs.sim_time_s < self._leg_start_s:
+                return Velocity()                       # my band's turn has not come
+            north = np.array([0.0, 1.0])
+            past_the_line = obs.pose.y > self._leg_end_y
+            # Past the anchor row and something ahead: the room's south face, a wall foot
+            # (22 of 200 seeds have an inner wall reaching below the line) or a pillar. Hand
+            # over to wasp_v5 rather than push on it -- an auditor found a quarter of seeds
+            # with two to four searchers parked against the face for the whole run.
+            wall_ahead = obs.pose.y > ANCHOR_Y and math.isfinite(blocked_ahead(obs, north, HANDOVER_M))
+            if past_the_line or wall_ahead:
                 self._crossed = True
             else:
-                goal = np.array([obs.pose.x, START_AREA_DEPTH_M + LINE_CLEAR_M + 1.0])
-                return toward(obs, goal)
+                return toward(obs, np.array([obs.pose.x, self._leg_end_y + 1.0]))
         command = super().step(obs)
         if isinstance(command, Land):
             self._drop_crumb(obs, force=True)
@@ -875,6 +984,10 @@ def make_config(seed: int = 0, n_drones: int = 10, n_relay: int = 4, mode: str =
     twenty-five; with ten anchors 3.33 Hz and 0.8 Hz. Not every combination divides the
     20 Hz tick, and the runner refuses the ones that do not rather than rounding.
     """
+    # Survey the generated arena, then place: a point landmark does not change the layout, so
+    # the runner's regeneration from the same seed and config draws the same arena.
+    from safmc_sim.world.arena import generate_arena
+    row = anchor_row(n_anchors, generate_arena(seed))
     return RunConfig(
         seed=seed,
         n_drones=n_drones,
@@ -882,10 +995,10 @@ def make_config(seed: int = 0, n_drones: int = 10, n_relay: int = 4, mode: str =
         policy_config={"n_relay": n_relay, "mode": mode},
         duration_s=duration_s,
         collision_behaviour=collision_behaviour,
-        arena_config=ArenaConfig(landmarks=anchor_row(n_anchors)),
+        arena_config=ArenaConfig(landmarks=row),
         sensors=flown_sensors() + (
             UWBConfig(peers=True, anchor_height_m=ANCHOR_HEIGHT_M,
-                      rate_hz=peer_sweep_rate_hz(n_drones, n_anchors)),
+                      rate_hz=peer_sweep_rate_hz(n_drones, len(row))),
         ),
     )
 
@@ -957,7 +1070,8 @@ def grade(directory: str | Path) -> dict[str, Any]:
         entry = {"agent": agent, "t_land": t_land, "t_sweep": t_sweep}
         for label, other in (("succ", chain[j - 1]), ("pred", chain[j + 1] if j + 1 < len(chain) else None)):
             if other is None:
-                # The tail's predecessor is whichever anchor it is nearest to on the floor.
+                # The tail's predecessor is whichever anchor it is nearest to on the floor --
+                # the one it certified against, unless two anchors are equidistant.
                 a_idx = int(np.argmin(np.linalg.norm(uwb["anchor_xyz_m"][:, :2] - xy[-1], axis=1)))
                 a = float(uwb["ranges_m"][r, i, a_idx])
                 anchor_z = float(uwb["anchor_xyz_m"][a_idx, 2])

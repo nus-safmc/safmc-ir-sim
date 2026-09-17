@@ -117,12 +117,13 @@ deviations), `s_i` node `i`'s arclength along the **trail**.
 
 **The trail.** Every searcher publishes a breadcrumb — its pose and its ring's minimum range
 — each time it has moved 0.25 m. A relay accumulates every searcher's crumbs from tick 0 and
-**cuts loops**: when a new crumb comes within 0.5 m of an earlier crumb, and the chord is
-shorter than the ring clearance recorded at *both* crumbs, the trail between them is dropped.
-The chord then lies inside a disc the head's own ring saw empty, so it is flyable and in line
-of sight without a map. The trail a relay follows for head `h` is: the anchor, then along
-`y = y_anchor` to below `h`'s start-line crossing, then `h`'s loop-cut crumbs north of the
-line. Its length `L` decides the cost, `n_needed = ceil(L / 0.9)`.
+**cuts loops**: when a new crumb comes within 0.6 m of an earlier crumb, and the chord plus a
+body radius fits inside the ring clearance recorded at *either* crumb (capped at 0.8 m), the
+trail between them is dropped. The chord then lies inside a disc a ring saw empty, so it is
+flyable and in line of sight without a map. The trail a relay follows for head `h` begins at
+an anchor and ends at `h`'s landing crumb (how it is chosen is amendment 5 below). Its length
+`L` decides the cost: the anchor and the head are the fixed ends, so
+`n_needed = ceil(L / 0.9) − 1`.
 
 **The potential.** Each relay descends a one-dimensional potential on measured ranges,
 
@@ -136,7 +137,8 @@ cruise otherwise). Both ends are fixed, so the chain converges to **equal spacin
 `exp(−k π² t / (n+1)²)` — and the trail parametrisation removes the joint angles a
 range-only chain cannot otherwise fix (a path graph is not rigid in the plane). The
 two-dimensional command is the trail point at `s_i`, tracked with a proportional velocity
-saturated at cruise, plus the wasp_v5 linear-falloff repulsion from the ring below 0.5 m.
+saturated at cruise, plus the wasp_v5 linear-falloff repulsion from the ring — below 0.6 m in
+transit, below 0.3 m once on the trail (amendment 1).
 
 **Two deployments, one controller.** *Dispatch*: relays wait on the ground at their grid
 positions until a head has landed and its trail is known, choose the head whose trail costs
@@ -147,22 +149,28 @@ spacing between the anchor and the lead, entering the chain one at a time as `L`
 bonus victim; the other searchers are unmodified `wasp_v5` with the mission wrapper.
 
 **The landing gate is UWB alone.** A relay declares itself in place when both neighbour
-ranges are within 0.10 m of the horizontal-corrected target for three consecutive fresh
-sweeps; relay 1 additionally requires its horizontal anchor range to be at most 0.9 m, which
-with the anchor at `y = 5.0` puts it at `y ≤ 5.9` — **inside the Start Area by
-measurement**, not by pose. When every relay's `in_place` is true in the same blackboard
-snapshot, every relay lands on the same tick.
+ranges, reduced to the horizontal, have measured at most 0.9 m for three consecutive fresh
+sweeps (amendment 2); relay 1's predecessor is the anchor, so its anchor range at most 0.9 m
+horizontal with the anchor at `y = 5.0` puts it at `y ≤ 5.9` — **inside the Start Area by
+measurement**, not by pose. A range certifies the rule's distance; its floor-level line of
+sight comes from the trail's construction and is checked by the grader, not measured. When
+every relay's `in_place` is true in the same blackboard snapshot, every relay lands on the
+same tick.
 
 **What the trial must show (falsifiable, audited in C15).**
 
 - **T-1** With one bonus victim placed 3 m north of the anchor column in the Known Search
   Area and no other targets, the dispatch trial forms a scoring relay on the seed under test
   (`relay_formed` true, `time_to_relay_s` finite).
-- **T-2** Every adjacent pair in the recorded chain is at most 1.0 m apart at floor level and
-  the tail is in the Start Area — checked offline from `states.npz` by the mission's rule, not
-  by the example's own bookkeeping.
+- **T-2** The chain at the moment it formed is graded offline from `states.npz` — every link's
+  floor distance and line of sight, the tail's zone — and every relay that landed by then is
+  a link of it. (An auditor noted the first half is tautological once T-1 holds, because the
+  chain comes from the mission's own rule; the second half is not.)
 - **T-3** Every relay that landed did so with its last fresh `peer_ranges_m` to both chain
-  neighbours finite and within the gate — the log, not the policy, says the gate held.
+  neighbours finite and within the gate — the log, not the policy, says the gate held — **and
+  a relay whose links cannot be brought inside the gate never lands**: one relay on a trail
+  that needs two hovers to the end of the run. That second clause is what a gate that ignored
+  the ranges would fail.
 - **T-4** With `peers=False` the example refuses to run: the controller must not fall back to
   pose for spacing silently.
 - **T-5** The sweep over seeds and `n_relay` reports, per cell, `P(relay)`, mean score with
@@ -269,10 +277,33 @@ of this record. The controller's shape did not change.
    a ring saw empty. Train mode still follows the lead's own trail, which is one of the
    things the sweep now compares.
 
+6. **The crumb network dropped every anchor edge between 0.6 and 0.9 m.** Its cell hash was
+   0.6 m wide and the anchor's reach 0.9 m, so a head whose trail began 0.7–0.87 m from the
+   anchor was declared infeasible. Found by the audit with a four-line reproduction; anchor
+   edges are now computed directly. Every dispatch result before the fix was biased toward
+   "infeasible", and the sweep was rerun.
+7. **The north leg hands over early, staggered, and slides.** Driving a searcher at a wall
+   face with attraction and repulsion alone parked it there — the room's south face can stand
+   0.05 m north of the line — so the leg now hands over to wasp_v5 when the ring sees anything
+   1.4 m ahead past the anchor row (at 0.9 m wasp had two seconds and lost drones at corners),
+   columns start the leg 0, 1.5 and 3 s apart so neighbours do not reach the face together and
+   turn into each other, and `toward()` slides along an obstacle instead of pushing on it. The
+   audit's comparison stands as a caveat: the trial's searchers reach the room sooner than the
+   plain wasp_v5 baseline and meet its walls sooner; the sweep reports crashes per cell.
+8. **An anchor with structure inside its disc is left out for that seed.** The generator on
+   `main` lets an inner wall reach below the start line — 22 of 200 seeds, as low as
+   `y = 4.8` — which the docs say cannot happen and which the network's "an anchor's 0.9 m
+   disc is free" assumption relied on. `anchor_row` now surveys the generated arena and drops
+   a row anchor within 1.2 m of structure; the first anchor, on the lead's column, has never
+   been near one.
+
 Also found: recomposing a trail from scratch each tick was quadratic in the crumb count and
 a 600 s run took six minutes of wall time; trails are built incrementally and routes are
-computed once per head. And two claims in the sensor's own spec were wrong before this
-section was written — see C13.
+computed once per head. The 0.1 m gate margin covers A-14 and **not** the per-unit
+antenna-delay offsets F-34 documents (12–30 cm between two tags), which on hardware must
+come off `MAX_LINK_M`. A relay that crashes mid-chain keeps its last blackboard tuple for
+ever, so the chain either lands around the wreck or hovers to the end — open. And two claims
+in the sensor's own spec were wrong before this section was written — see C13.
 
 ## Rejected alternatives
 
