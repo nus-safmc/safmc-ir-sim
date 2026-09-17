@@ -28,6 +28,9 @@ One tick, in order, and the order is load-bearing:
 7. **Sense.** Every due sensor on every still-active drone samples the post-motion world, so
    no agent is measured against a staler picture than another. The runner drives every
    sensor through one contract (``sensors/base.py``); it does not know what any of them are.
+   Before sampling it rebuilds the scene's two per-tick views from the same state: the
+   *bodies* (active drones only -- what a ray can hit) and the *fleet* (every drone, every
+   lifecycle -- what a radio can range to).
 8. **Record, then commit the blackboard** so publications become visible next tick.
 """
 
@@ -580,6 +583,11 @@ class Runner:
         """
         self.world_scene.refresh_drones(
             [agent.robot for agent in self.agents if agent.lifecycle == Lifecycle.ACTIVE], tick
+        )
+        # The fleet is every drone, whatever its lifecycle: a landed drone is no longer a body
+        # a ray can hit or a drone can strike, but the tag on it still answers (ADR-0007).
+        self.world_scene.refresh_fleet(
+            [(agent.agent_id, agent.robot.id, agent.state) for agent in self.agents], tick
         )
         for agent in self.agents:
             if agent.terminal:

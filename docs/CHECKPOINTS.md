@@ -774,3 +774,28 @@ T-1..T-5 in the ADR, written to be falsified in C15.
 
 **Open at this point.** All code: C12 the fleet query, C13 peer ranging, C14 the metric,
 C15 the example and its sweep, then the audit.
+
+---
+
+## C12 — `WorldScene.fleet`: every drone, every lifecycle, as a sensor's view
+
+**Built.** `sensors/scene.py`: a frozen `Fleet(agent_ids, object_ids, xyz)` with `index_of`,
+`WorldScene.fleet`, and `refresh_fleet(entries, cache_key)` — cached by tick and independent
+of `refresh_drones`, because the two are built from different subsets: bodies from active
+drones (what a ray can hit, what a drone can strike), the fleet from all of them (what a
+radio can range to). `runner._sense` feeds every agent's `(agent_id, robot.id, state)` from
+the same post-step state as the bodies. `Fleet` joins the R-POL-4 banned types and the
+smuggle list. `docs/10` and `sensors/base.py` say what the fleet is for and what it is not.
+
+**Verified — TESTED.** 396 tests (+9 in `tests/test_fleet.py`). The fleet is run-ordered,
+read-only through `.base` and the writeable flag, rebuilt once per key, refused on a repeated
+or empty id, and empty in a hand-built scene. On the runner path: land half of ten drones at
+tick 5 and the bodies a sensor sees fall from nine to four while the fleet stays at ten;
+every sensor's `index_of(truth.object_id)` is its run index; drone_00's fleet `z` equals its
+own pose each tick and hits `0.0` the tick after it lands. R-POL-4: a `Fleet` inside a
+reading is caught by the walk.
+
+**Behaviour that changed.** None visible to a policy or a log: no existing sensor reads the
+fleet. One more per-tick pass over the agent list in `_sense`.
+
+**Open.** No sensor consumes it yet — that is C13.

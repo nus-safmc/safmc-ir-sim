@@ -38,7 +38,9 @@ Three parts, one file. ``examples/03_custom_sensor.py`` is a complete, runnable 
 
 3. **The sensor** -- a :class:`Sensor` subclass implementing :meth:`Sensor.sample`. Read the
    world through ``world.sensing_scene(exclude_object_id=truth.object_id)`` for anything a
-   ray can hit and ``world.landmarks_of(kind)`` for things placed in the arena. Draw noise
+   ray can hit, ``world.landmarks_of(kind)`` for things placed in the arena, and
+   ``world.fleet`` for the other drones' true positions -- to measure against, never to
+   report (ADR-0007). Draw noise
    from ``self.rng``, never from ``numpy.random`` (R-SENS-9). Keep the geometry in a pure
    module-level function and let ``sample`` be the adapter; the pure function is what you
    will unit-test.
