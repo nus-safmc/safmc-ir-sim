@@ -94,7 +94,11 @@ the API or the recorder knows the sensor exists. A surveyed AprilTag is a `Landm
 **[docs/10-adding-sensors-and-landmarks.md](docs/10-adding-sensors-and-landmarks.md)**;
 runnable template: [examples/03_custom_sensor.py](examples/03_custom_sensor.py); a finished
 sensor written the same way, with the physics cited and the rulebook's anchor-placement
-rules checked: `sensors/uwb.py` and [examples/04_uwb_ranging.py](examples/04_uwb_ranging.py).
+rules checked: `sensors/uwb.py` and [examples/04_uwb_ranging.py](examples/04_uwb_ranging.py);
+and a policy built on it that forms the scoring relay — an elastic band of drones along a
+teammate's trail, spaced and landed on peer ranges alone —
+[examples/06_uwb_relay.py](examples/06_uwb_relay.py), with its conditions stated
+([ADR-0007](docs/adr/0007-tag-to-tag-ranging-and-the-relay.md)).
 
 ## What is modelled
 

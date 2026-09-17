@@ -217,6 +217,58 @@ snapshot, every relay lands on the same tick.
   reports the wave count rather than choreographing an abreast crossing; that is a second
   trial.
 
+## Amendments from the build, 2026-09-17
+
+The trial as specified above was implemented and driven against a planted scenario and a
+full run before any sweep. Five things changed, each because a trace falsified a sentence
+of this record. The controller's shape did not change.
+
+1. **The band steps only while the relay is on its carrot.** As written, the potential moved
+   the arclength on every fresh sweep. The airframe answers through a 0.35 s lag (A-2) and
+   sweeps come every 0.2 s at ten drones, so the band pushed again before the drone had
+   answered the last push, and one relay's arclength slammed between 0 and 2.3 m every few
+   sweeps. A step is now commanded only when the relay is within 0.12 m of its carrot, and
+   steps under 0.02 m — A-14 through `K` — are not commanded at all.
+2. **The gate is per link, not balanced.** "Within 0.10 m of each other" was a proxy for
+   convergence that the noise defeated: each horizontal range carries A-14, so their
+   difference has a 7 cm standard deviation and the three-consecutive rule rarely passed.
+   The rule needs each link inside 1.0 m, not equal links, and both ends of every link
+   check it — so every relay in place still means every link inside the rule. Equal spacing
+   remains the band's equilibrium; it is no longer a landing condition.
+3. **The anchor stands at tag height, 0.5 m, not on the 2.0 m tripod.** A range is
+   three-dimensional and the tail reduces its anchor range to the horizontal by the height
+   gap; at 0.77 m across and 1.5 m up that multiplies A-14 by `r / h` = 2.2 and the tail's
+   certificate flickered. Geometric dilution, not noise. `anchor_height_m` was already a
+   deployment choice; the trial sets it. **The anchor's *row* stays at `y = 5.0`**, which is
+   the certificate.
+4. **Chain order is the order relays reach the trail, and the relay nearest the anchor
+   launches first.** Launching the farthest first made two approach paths cross — the second
+   overtook the first and took its slot, so the chain's neighbours were not its spatial
+   neighbours and the band never settled. With the nearest launching first each later joiner
+   flies north on a column east of every earlier one and west behind them; and the chain
+   reads seniority from the tick each relay reached the trail, so an overtake could not
+   misorder it in any case.
+5. **One certification point is expensive, and the trail is routed, not copied.** On the
+   first full run a head landed on a bonus victim at `x = 14.3`, a metre north of the line;
+   the chain had to come 12.5 m west along the Start Area to the single anchor to be
+   certified — sixteen relays for a victim one relay from the line — and even with an anchor
+   nearby, the head's *own* trail had wandered six metres east before landing. Two changes:
+   the trial gains an `anchors` knob, a row along `y = 5.0` at 1.9 m spacing so a crossing
+   point is never more than 0.95 m from an anchor (rule 3.3.1 r.16 allows any number in the
+   Start Area; **one remains the default and the brief**, and the sweep prices the row); and
+   in dispatch the trail is the **shortest route through every searcher's crumbs** to the
+   nearest anchor — consecutive crumbs of one searcher (a flown segment), cross-links where
+   two crumbs' ring-clearance discs cover the chord with room for a body (the loop cutter's
+   test between trails), and an anchor to any crumb within 0.9 m (Start Area free space) —
+   by Dijkstra, once per head. Still no map: every edge is a segment a drone flew or a chord
+   a ring saw empty. Train mode still follows the lead's own trail, which is one of the
+   things the sweep now compares.
+
+Also found: recomposing a trail from scratch each tick was quadratic in the crumb count and
+a 600 s run took six minutes of wall time; trails are built incrementally and routes are
+computed once per head. And two claims in the sensor's own spec were wrong before this
+section was written — see C13.
+
 ## Rejected alternatives
 
 | Option | Why not |
