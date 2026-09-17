@@ -842,3 +842,32 @@ new fields default empty, `record()` is unchanged when off, and the parent gener
 touched.
 
 **Open.** No metric says *when* a relay forms (C14); no policy reads the peer ranges (C15).
+
+---
+
+## C14 — the relay as a moment: `relay_timeline`, `time_to_relay_s`, `relay_chain_drones`
+
+**Built.** `metrics.py`: `RelayMoment` and `relay_timeline(run)`, which replays a fresh
+`Mission` built from the recorded arena over `states.npz` at every tick on which the landed
+count grew — the mission's own latched `update` and `_find_relay`, not a second
+implementation of the rule. `RunMetrics` gains `time_to_relay_s` (first moment with a
+chain, or `None`) and `relay_chain_drones` (length of the footer's final chain). `docs/07`
+says so.
+
+**Verified — TESTED.** 411 tests (+3 in `tests/test_relay_metric.py`). A bonus victim
+planted at `(1.0, 7.6)` — the Known Area's west corridor, clear of the room on every seed
+— and three scripted drones landing at 0.8 m steps from `y = 6.9` to `y = 5.3`: the online
+score, the offline re-score and the timeline agree on the chain `drone_00 → drone_01 →
+drone_02`; the timeline has one moment per landing, empty chains for the first two and the
+chain on the third, at exactly the tick the log's lifecycle array shows the third drone
+LANDED; `time_to_relay_s` is that moment; the score is `2 × 15`. Pull the middle drone
+1.1 m south and no replay finds a relay, `time_to_relay_s` is `None`, the rescue still
+scores 15 unmultiplied. A run with no landings has an empty timeline.
+
+**This is also the first recorded run in which the relay fired**, scripted rather than
+searched, in a test. REVIEW.md's "has never fired in any recorded run" is now false in the
+narrow sense; the open question it was pointing at — can a *policy* reach it — is C15.
+
+**Behaviour that changed.** `RunMetrics` has two more fields; nothing else.
+
+**Open.** The example and its sweep.
