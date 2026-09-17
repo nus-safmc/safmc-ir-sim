@@ -233,8 +233,9 @@ same tick.
 ## Amendments from the build, 2026-09-17
 
 The trial as specified above was implemented and driven against a planted scenario and a
-full run before any sweep. Five things changed, each because a trace falsified a sentence
-of this record. The controller's shape did not change.
+full run before any sweep, then audited twice and sent to a skeptic. Nine things changed,
+each because a trace, an auditor or the skeptic falsified a sentence of this record. The
+controller's shape did not change.
 
 1. **The band steps only while the relay is on its carrot.** As written, the potential moved
    the arclength on every fresh sweep. The airframe answers through a 0.35 s lag (A-2) and
@@ -267,8 +268,10 @@ of this record. The controller's shape did not change.
    certified — sixteen relays for a victim one relay from the line — and even with an anchor
    nearby, the head's *own* trail had wandered six metres east before landing. Two changes:
    the trial gains an `anchors` knob, a row along `y = 5.0` at 1.9 m spacing so a crossing
-   point is never more than 0.95 m from an anchor (rule 3.3.1 r.16 allows any number in the
-   Start Area; **one remains the default and the brief**, and the sweep prices the row); and
+   point is never more than 0.95 m from an anchor while the row is whole — amendment 8 thins
+   it on the seeds where a wall reaches into the row (rule 3.3.1 r.16 allows any number in
+   the Start Area; **one remains the default and the brief**, and the sweep prices the
+   row); and
    in dispatch the trail is the **shortest route through every searcher's crumbs** to the
    nearest anchor — consecutive crumbs of one searcher (a flown segment), cross-links where
    two crumbs' ring-clearance discs cover the chord with room for a body (the loop cutter's
@@ -286,16 +289,27 @@ of this record. The controller's shape did not change.
    face with attraction and repulsion alone parked it there — the room's south face can stand
    0.05 m north of the line — so the leg now hands over to wasp_v5 when the ring sees anything
    1.4 m ahead past the anchor row (at 0.9 m wasp had two seconds and lost drones at corners),
-   columns start the leg 0, 1.5 and 3 s apart so neighbours do not reach the face together and
-   turn into each other, and `toward()` slides along an obstacle instead of pushing on it. The
+   drones start the leg 0, 1.5 and 3 s apart by index mod 3 so neighbours do not reach the
+   face together and turn into each other, and `toward()` slides along an obstacle instead of
+   pushing on it. The
    audit's comparison stands as a caveat: the trial's searchers reach the room sooner than the
    plain wasp_v5 baseline and meet its walls sooner; the sweep reports crashes per cell.
 8. **An anchor with structure inside its disc is left out for that seed.** The generator on
    `main` lets an inner wall reach below the start line — 22 of 200 seeds, as low as
    `y = 4.8` — which the docs say cannot happen and which the network's "an anchor's 0.9 m
-   disc is free" assumption relied on. `anchor_row` now surveys the generated arena and drops
-   a row anchor within 1.2 m of structure; the first anchor, on the lead's column, has never
-   been near one.
+   disc is free" assumption relied on. `anchor_row` surveys the generated arena and drops an
+   anchor with structure within 0.95 m (the disc plus half a wall), the first included unless
+   it is the only one — on 3 of 200 seeds an inner wall stands 0.78–0.92 m from the lead's
+   column. A first version used 1.2 m and exempted the first anchor; the skeptic showed that
+   also caught the room's *legal* south face (1.05 m from the row at its nearest) and thinned
+   the row on 46 seeds, two of them in the sweep, silently.
+9. **A relay joins the trail at its nearest point, and slides only past obstacles nearer than
+   its goal.** The skeptic found three sweep runs in which the second relay hovered 130–420 s
+   before landing: aiming at the anchor *point*, its approach read the first relay — hovering
+   0.9 m from the anchor, in the ±34° cone — as a wall and slid for ever, and the write-up had
+   called the delay flight time. A relay now enters at the projection onto the trail's first
+   1.5 m, and `toward()` slides only when the obstacle is nearer than the goal. The same three
+   runs form the relay at 36, 49 and 63 s.
 
 Also found: recomposing a trail from scratch each tick was quadratic in the crumb count and
 a 600 s run took six minutes of wall time; trails are built incrementally and routes are
