@@ -95,7 +95,9 @@ def test_the_network_links_an_anchor_to_crumbs_anywhere_inside_its_reach():
 def test_an_anchor_with_structure_in_its_disc_is_dropped_for_that_seed():
     """22 of 200 generated arenas have an inner wall reaching below the start line, and the
     network treats the 0.9 m disc around an anchor as free. Seeds 16 and 144 put a row anchor
-    within 0.35 m of such a wall; those anchors are left out. The first anchor never is."""
+    within 0.35 m of such a wall; those anchors are left out. The room's legal south face,
+    never nearer than 1.05 m, drops nothing (a 1.2 m version dropped anchors on 46 seeds).
+    The first anchor is subject to the same test, and kept only when it is the only one."""
     ex = example()
     from safmc_sim.world.arena import generate_arena
     for seed, missing in ((16, "start_anchor_8"), (144, "start_anchor_1")):
@@ -106,6 +108,34 @@ def test_an_anchor_with_structure_in_its_disc_is_dropped_for_that_seed():
     cfg = ex.make_config(seed=16, n_anchors=10)
     assert len(cfg.arena_config.landmarks) == 9
     assert cfg.sensors[-1].rate_hz == pytest.approx(ex.peer_sweep_rate_hz(10, 9))
+    # The legal face alone never thins the row: over seeds 0-59 only inner-wall seeds lose anchors.
+    thinned = {seed for seed in range(60) if len(ex.anchor_row(10, generate_arena(seed))) < 10}
+    low_walls = {seed for seed in range(60)
+                 if any(min(w.y1, w.y2) < ex.ANCHOR_Y + ex.ANCHOR_CLEARANCE_M + 0.05
+                        for w in generate_arena(seed).walls if w.kind == "inner_wall")}
+    assert thinned <= low_walls, thinned - low_walls
+    assert 0 not in thinned and 2 not in thinned, "the sweep's seeds 0 and 2 ran with the full row"
+    # Seed 99 has an inner wall 0.78 m from the lead's column: the first anchor goes with a row,
+    # and stays when it is the only anchor.
+    row99 = ex.anchor_row(10, generate_arena(99))
+    assert "start_anchor_0" not in {lm.id for lm in row99}
+    assert [lm.id for lm in ex.anchor_row(1, generate_arena(99))] == ["start_anchor_0"]
+
+
+def test_a_relay_enters_the_trail_at_the_nearest_point_of_its_first_metres():
+    """The deadlock the skeptic found: a relay already on the trail hovers 0.9 m from the
+    anchor, in the cone the next relay's approach reads as blocked, so aiming at the anchor
+    point never ends. The trail is entered at the projection onto its first 1.5 m instead."""
+    ex = example()
+    t = ex.Trail()
+    for y in np.arange(5.0, 8.0, 0.25):
+        t.append(1.75, y, 0.8)
+    s, gap = t.project(np.array([1.9, 5.6]), ex.TRAIL_ENTRY_M)
+    assert s == pytest.approx(0.6) and gap == pytest.approx(0.15)
+    s, gap = t.project(np.array([1.75, 2.9]), ex.TRAIL_ENTRY_M)       # far past the window
+    assert s == pytest.approx(0.0) and gap == pytest.approx(2.1)
+    s, gap = t.project(np.array([1.75, 7.0]), ex.TRAIL_ENTRY_M)       # beyond the window: clamped
+    assert s <= ex.TRAIL_ENTRY_M
 
 
 def test_the_network_routes_through_another_searcher_s_crumbs():
@@ -203,8 +233,13 @@ def test_too_few_relays_for_the_trail_never_land_because_the_gate_does_not_pass(
     assert not result.score.relay_formed
     assert result.lifecycles["drone_09"] == "ACTIVE", "airborne to the end: the gate never passed"
     assert any(e["agent_id"] == "drone_09" for e in log["events"] if e["kind"] == "departed"), "it did join"
-    z = log["states"]["pose"][-1, 9, 2]
-    assert z > 0.3, "and it is hovering, not parked"
+    pose = log["states"]["pose"]
+    assert pose[-1, 9, 2] > 0.3, "and it is hovering, not parked"
+    # Parked by the band at the middle of a ~2.3 m trail: about 1.1-1.2 m from the head on the
+    # floor and from the anchor, both outside MAX_LINK_M, which is why the gate never passed.
+    head_floor = float(np.linalg.norm(pose[-1, 9, :2] - pose[-1, 0, :2]))
+    anchor_floor = float(np.linalg.norm(pose[-1, 9, :2] - np.array([ex.ANCHOR_X0, ex.ANCHOR_Y])))
+    assert ex.MAX_LINK_M < head_floor < 1.35 and ex.MAX_LINK_M < anchor_floor < 1.35, (head_floor, anchor_floor)
 
     cfg = ex.make_config(seed=0, n_drones=10, n_relay=1, mode="dispatch", duration_s=60.0)
     with tempfile.TemporaryDirectory() as tmp:

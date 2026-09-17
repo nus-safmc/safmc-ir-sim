@@ -112,11 +112,16 @@ never more than 0.95 m from an anchor, so the chain's Start-Area leg costs at mo
 Rule 3.3.1 r.16 allows any number of navigation aids in the Start Area."""
 
 
-ANCHOR_CLEARANCE_M = 1.2
-"""An anchor must stand this far from any inner wall or pillar. The Start Area is supposed to
-be empty, but the generator on ``main`` lets an inner wall reach below the line -- 22 of 200
-seeds, as low as ``y = 4.8`` -- and the network treats the disc within 0.9 m of an anchor as
-free space. An anchor with structure inside that disc is dropped for that seed."""
+ANCHOR_CLEARANCE_M = 0.95
+"""An anchor must have no inner wall or pillar within this: the 0.9 m disc the network treats
+as free space (``MAX_LINK_M``), plus half a wall's thickness. The Start Area is supposed to be empty, but the
+generator on ``main`` lets an inner wall reach below the line -- 22 of 200 seeds, as low as
+``y = 4.8`` -- so an anchor with structure inside its disc is dropped for that seed. A first
+version used 1.2 m, which also caught the room's *legal* south face (``y0`` as low as 6.05,
+1.05 m from the row) and silently thinned the row on 46 of 200 seeds, two of them in the
+sweep; the skeptic found it. At 0.95 m only the walls that really reach into the row drop
+anchors. With a single anchor there is nothing to fall back to, so it is kept regardless and
+the run's report says so."""
 
 
 def anchor_row(n_anchors: int, arena=None) -> tuple[Landmark, ...]:
@@ -126,8 +131,8 @@ def anchor_row(n_anchors: int, arena=None) -> tuple[Landmark, ...]:
     chain must come back to it: a head that landed 12 m east of it, a metre north of the line,
     needed sixteen relays on the first full run. A row makes the certificate available along
     the whole line, and the sweep prices the difference. With ``arena`` given, an anchor that
-    has structure within :data:`ANCHOR_CLEARANCE_M` is left out (see the constant); the first
-    anchor, on the lead's column, is never dropped and never has been.
+    has structure within :data:`ANCHOR_CLEARANCE_M` is left out (see the constant), the first
+    included -- unless it is the only one.
     """
     if n_anchors < 1:
         raise ValueError("at least one anchor")
@@ -136,9 +141,13 @@ def anchor_row(n_anchors: int, arena=None) -> tuple[Landmark, ...]:
         raise ValueError(f"{n_anchors} anchors at {ANCHOR_SPACING_M} m run off the field")
     row = []
     for k, x in enumerate(xs):
-        if arena is not None and k > 0 and structure_within(arena, x, ANCHOR_Y, ANCHOR_CLEARANCE_M):
+        if arena is not None and structure_within(arena, x, ANCHOR_Y, ANCHOR_CLEARANCE_M):
             continue
         row.append(Landmark(f"start_anchor_{k}", "uwb_anchor", x, ANCHOR_Y))
+    if not row:
+        # Every anchor has structure inside its disc (3 of 200 seeds for the lead's column
+        # alone). One anchor is still needed for the tail's certificate; keep the first.
+        row.append(Landmark("start_anchor_0", "uwb_anchor", xs[0], ANCHOR_Y))
     return tuple(row)
 
 
@@ -178,6 +187,10 @@ A deployment choice the team makes with a shorter stand."""
 BAND_DEADBAND_M = 0.02
 """A band step smaller than this is noise (A-14 through ``K``) and is not commanded."""
 
+TRAIL_ENTRY_M = 1.5
+"""A relay may join the trail anywhere on its first this-many metres, at the arclength of the
+nearest trail point, instead of only at the anchor. See :meth:`RelayNode._approach`."""
+
 ON_CARROT_M = 0.12
 """The band moves a relay's carrot only while the relay is this close to it. The airframe
 answers a velocity through a 0.35 s lag (A-2); a band that stepped every 0.2 s sweep while
@@ -207,7 +220,8 @@ LINE_CLEAR_M = 0.4
 """How far past the start line a searcher's north leg runs before it starts walking."""
 
 LEG_STAGGER_S = 1.5
-"""Neighbouring columns start their north leg this far apart in time (three bands). Every
+"""Drones start their north leg this far apart in time, in three bands by drone index mod 3
+(column mod 3 in the first row; the second row is offset by one band). Every
 searcher starts from the same row at the same speed, so without this they all reached the
 room's face together, all handed over to wasp_v5 with the same wall ahead, and neighbours
 1.25 m apart turned into each other -- two head-on losses at t = 14 s on seed 2 that the
@@ -291,6 +305,22 @@ class Trail:
         self.xy.append(p)
         self.clear.append(float(clearance))
         self.cum.append(self.cum[-1] + float(np.linalg.norm(p - self.xy[-2])) if len(self.xy) > 1 else 0.0)
+
+    def project(self, xy: np.ndarray, s_max: float) -> tuple[float, float]:
+        """``(s, distance)`` of the closest point to ``xy`` on the trail's first ``s_max`` metres."""
+        p = np.asarray(xy, dtype=float)
+        best_s, best_d = 0.0, float(np.linalg.norm(p - self.xy[0]))
+        for j in range(1, len(self.xy)):
+            if self.cum[j - 1] > s_max:
+                break
+            a, b = self.xy[j - 1], self.xy[j]
+            ab = b - a
+            span = float(np.dot(ab, ab))
+            t = float(np.clip(np.dot(p - a, ab) / span, 0.0, 1.0)) if span > 0 else 0.0
+            d = float(np.linalg.norm(p - (a + t * ab)))
+            if d < best_d:
+                best_d, best_s = d, self.cum[j - 1] + t * (self.cum[j] - self.cum[j - 1])
+        return min(best_s, s_max), best_d
 
     def point_at(self, s: float) -> np.ndarray:
         """The point at arclength ``s``, clamped to the trail's ends."""
@@ -514,7 +544,11 @@ def toward(obs: Observation, goal_xy: np.ndarray, speed: float = CRUISE_SPEED_MS
     delta = goal_xy - obs.pose.xy
     distance = float(np.linalg.norm(delta))
     v = delta * min(APPROACH_GAIN, speed / distance) if distance > 1e-6 else np.zeros(2)
-    if distance > 0.3 and math.isfinite(blocked_ahead(obs, delta)):
+    nearest = blocked_ahead(obs, delta) if distance > 0.3 else math.inf
+    # Slide only when the obstacle is nearer than the goal. A teammate hovering just beyond
+    # the goal point is in the cone too, and sliding away from it held a relay 0.6 m from its
+    # carrot for the rest of a run.
+    if math.isfinite(nearest) and nearest < distance - 0.1:
         d = delta / distance
         left = np.array([-d[1], d[0]])
         ranges = obs.tof.ranges_m.reshape(-1)
@@ -838,17 +872,28 @@ class RelayNode(Policy):
         return self.anchors_xy[self.anchor_index if self.anchor_index is not None else 0]
 
     def _approach(self, obs: Observation) -> Command:
-        """North along my own column to the anchor row, then along it to my chain's anchor."""
+        """North along my own column to the anchor row, then along it to the trail's start.
+
+        The trail is entered anywhere on its first :data:`TRAIL_ENTRY_M`, at the arclength
+        of the nearest point, not at the anchor itself. A relay already on the trail hovers
+        about 0.9 m from the anchor, in exactly the cone the next relay's approach reads as
+        blocked; aiming at the anchor point deadlocked the second relay for minutes on three
+        sweep runs (the skeptic found 130-420 s of hovering written up as flight time).
+        """
         if obs.pose.z < CRUISE_ALT_M - 0.05:
             return Velocity(vz=0.4)
         row_y = float(self.anchor_xy[1])
         if abs(obs.pose.y - row_y) > 0.3 and abs(obs.pose.x - self.anchor_xy[0]) > 0.5:
             return toward(obs, np.array([obs.pose.x, row_y]))
-        if float(np.linalg.norm(obs.pose.xy - self.anchor_xy)) > 0.3:
+        if self.trail is not None and len(self.trail) >= 2:
+            s_entry, gap = self.trail.project(obs.pose.xy, TRAIL_ENTRY_M)
+        else:
+            s_entry, gap = 0.0, float(np.linalg.norm(obs.pose.xy - self.anchor_xy))
+        if gap > 0.3 and float(np.linalg.norm(obs.pose.xy - self.anchor_xy)) > 0.3:
             return toward(obs, self.anchor_xy)
         self.state = FOLLOW
         self.entered_tick = obs.tick
-        self.s = 0.0
+        self.s = s_entry
         return Velocity()
 
     def _target_s(self, obs: Observation) -> float:
