@@ -80,7 +80,7 @@ from safmc_sim.constants import (
     START_AREA_DEPTH_M,
 )
 from safmc_sim.errors import PolicyError
-from safmc_sim.metrics import compute_metrics, relay_timeline
+from safmc_sim.metrics import relay_timeline
 from safmc_sim.mission import takeoff_waves
 from safmc_sim.policies.mission_wrapper import MissionWrapper
 from safmc_sim.policies.wasp_v5 import WaspV5Policy
@@ -1038,20 +1038,21 @@ def grade(directory: str | Path) -> dict[str, Any]:
     header, footer, states = log["header"], log["footer"], log["states"]
     agents = header["agents"]
     arena = arena_from_log(header)
-    metrics = compute_metrics(directory)
     # The chain graded is the one that existed the moment a relay first formed -- the one the
     # relays built -- not the footer's, which is the shortest of all chains at the end of the
     # run and can start from a different bonus rescuer that landed beside the tail later.
+    # (relay_timeline directly, not compute_metrics: the coverage raycast is most of a
+    # minute on a 25-drone log and none of it is needed here.)
     first = next((m for m in relay_timeline(log) if m.chain), None)
     chain = list(first.chain) if first is not None else []
     report: dict[str, Any] = {
         "relay_formed": bool(footer["score"]["relay_formed"]),
-        "time_to_relay_s": metrics.time_to_relay_s,
+        "time_to_relay_s": None if first is None else first.sim_time_s,
         "chain": chain,
         "final_chain": list(footer["score"].get("relay_chain", [])),
         "score": footer["score"]["total"],
         "raw": footer["score"]["raw_total"],
-        "crashed": metrics.crashed_agents,
+        "crashed": sum(1 for v in footer["lifecycles"].values() if v == "CRASHED"),
         "waves": len(takeoff_waves([e["sim_time_s"] for e in log["events"] if e["kind"] == "departed"])),
         "links_m": [],
         "links_clear": [],
