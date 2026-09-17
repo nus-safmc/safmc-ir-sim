@@ -799,3 +799,46 @@ reading is caught by the walk.
 fleet. One more per-tick pass over the agent list in `_sense`.
 
 **Open.** No sensor consumes it yet — that is C13.
+
+---
+
+## C13 — the tag ranges to its peers
+
+**Built.** `sensors/uwb.py`: `UWBConfig(peers=True)`; `UWBRanges.peer_ids` /
+`peer_ranges_m` / `peers_heard`; `peer_line_of_sight` (the structural segment test at the
+lower of the two altitudes, grouped by altitude so a fleet costs one cast per distinct `z`);
+`peer_sweep_rate_hz(n_tags, n_anchors)` under the A-19 slot budget; `record()` adds
+`peer_ranges_m` only when peers are on. Peer noise is drawn from a **child generator spawned
+from the tag's own at build**. `docs/06` gains a peers section; `tests/test_audit_regressions`
+whitelists the dimensionless `peers` field.
+
+**Verified — TESTED.** 408 tests (+12 in `tests/test_uwb.py`). Self is `inf` and in the
+list; a peer range is the 3-D distance (0.8 m across and 0.5 m down reads 0.94 m); a wall
+biases a peer link and a teammate's body does not; line of sight is at the lower altitude
+(a 1.0 m wall blocks a 1.2 m drone from a landed one and not from another at 1.2 m); a peer
+beyond reach or dropped is `inf`; the anchor noise is identical with peers on and off for
+five consecutive sweeps **and the parent generator's next draw is identical**; the child
+consumes exactly four draws per fleet member per sweep whatever the reach or lifecycle;
+`peer_sweep_rate_hz` gives 5 Hz / 1 Hz / 1.67 Hz for 10 / 25 / 20 drones with one anchor,
+collapses to `sweep_rate_hz` when everything fits one slot, and twelve drones are refused by
+the runner while ten, fifteen, twenty and twenty-five are accepted; end to end, a landed
+teammate is still ranged and the range grows by exactly the height gap; the log holds
+`peer_ranges_m` square in the header's agent order with an `inf` diagonal and grades within
+6σ against `states.npz`; a peers-off log has exactly the old keys and the same anchor
+ranges as a peers-on one.
+
+**Found while building — two of the spec's claims were wrong and the tests caught both.**
+(1) R-SENS-18 first said the peer draws come "after the anchor draws, so that the anchor
+stream does not depend on `peers`". That holds within a sweep and fails by the next one:
+the parent generator has advanced by the peer draws. Fixed by spawning a child generator
+for peers at build, which also makes the byte-identity claim for peers-off true by
+construction; the spec, the ADR and the code now say so. (2) `peer_sweep_rate_hz`'s
+docstring said fifteen drones with one anchor give a rate the runner refuses. They do not:
+the decimation is `0.2 × n_tags × slots` = 6. Twelve is the fleet that does not divide.
+The same trap C10's audit found in `sweep_rate_hz`.
+
+**Behaviour that changed.** None for any existing run: `peers` defaults off, the reading's
+new fields default empty, `record()` is unchanged when off, and the parent generator is not
+touched.
+
+**Open.** No metric says *when* a relay forms (C14); no policy reads the peer ranges (C15).

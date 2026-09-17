@@ -60,8 +60,10 @@ and to peers at another on hardware that cannot. With `peers` on, the same `UWBR
 gains two fields: `peer_ids`, every agent id in the run in run order, fixed for the run, the
 tag's own id included; and `peer_ranges_m`, one reported range per peer, `inf` for the tag
 itself and wherever nothing was heard. With `peers` off both are empty and **every existing
-run reproduces byte for byte**, because the peer draws come after the anchor draws in the
-tag's generator and there are none of them.
+run reproduces byte for byte**; with `peers` on the anchor noise is still the same run,
+because the peer draws come from a child generator spawned from the tag's own at build. (The
+first design drew peers from the parent after the anchors; that held within a sweep and
+failed by the next one, which a test caught before this record was committed.)
 
 **3. The physics is the ADR-0006 model applied to a second tag.** The true range is the
 three-dimensional distance between the two drones' true positions — a hovering drone 0.8 m

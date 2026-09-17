@@ -102,7 +102,7 @@ rules checked: `sensors/uwb.py` and [examples/04_uwb_ranging.py](examples/04_uwb
 |---|---|
 | **Arena** | Seeded generation from the 2026 rulebook — 20×20 m, a walled 10×10 m unknown room, pillars, randomised per seed, self-validating |
 | **Drone** | 2.5D `[x, y, θ, z, vx, vy]`, first-order velocity lag, 1.4 m ceiling, `ACTIVE` / `LANDED` / `CRASHED` |
-| **Sensing** | 8 × VL53L5CX ring, 8 zones each, reproducing the flown geometry and gating; a geometric AprilTag camera. Height-gated occlusion. Both on one sensor contract, so a sensor of your own is one file. A UWB ranging tag the airframe does not carry is on the same contract, opt-in, with a cited noise model and every number an assumption with an ID |
+| **Sensing** | 8 × VL53L5CX ring, 8 zones each, reproducing the flown geometry and gating; a geometric AprilTag camera. Height-gated occlusion. Both on one sensor contract, so a sensor of your own is one file. A UWB ranging tag the airframe does not carry is on the same contract, opt-in, with a cited noise model and every number an assumption with an ID; it ranges to surveyed anchors and, opt-in, to every other drone's tag |
 | **Landmarks** | Things placed for sensors to find — mission markers, and any nav tag, start mark or anchor you add. Solid ones occlude and can be hit; points do neither |
 | **Mission** | Victims, bonus victims, fires, the fire-suppression coupling, and the relay's 2× multiplier |
 | **Observability** | Structured log, offline re-scoring, metrics, a self-contained HTML replay |

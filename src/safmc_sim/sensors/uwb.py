@@ -41,6 +41,21 @@ policy's job (or a ``PoseSource``'s), and the anchor positions are here because 
 team's own survey -- the same ``ArenaConfig`` that placed the anchors -- not a leaked world
 position (R-POL-3, as amended).
 
+**Peers, opt-in.** ``UWBConfig(peers=True)`` makes the same tag range to every other drone's
+tag as well (R-SENS-18, ADR-0007). The reading then also carries:
+
+    obs.sensors["uwb"].peer_ids        # every agent id in the run, in run order, self included
+    obs.sensors["uwb"].peer_ranges_m   # (P,) reported range, inf for self and where unheard
+    obs.sensors["uwb"].peers_heard     # (P,) isfinite(peer_ranges_m)
+
+and **nothing about the peer**: not its altitude, not whether it is flying, parked or wrecked.
+A tag is a radio, not a rotor, so a landed teammate's tag answers exactly as a flying one's
+does -- which is the whole reason the relay of R-MISS-4, a chain of *landed* drones one
+metre apart, can be spaced by this sensor. The roster ``peer_ids`` is what a real tag is
+configured with; it does hand every policy the fleet size, which nothing else in
+``Observation`` does. With ``peers`` off both fields are empty and the reading, the draws
+and the log are exactly what they were before the option existed.
+
 The model
 ---------
 
@@ -83,6 +98,20 @@ Per anchor, from the drone's **true** position ``(x, y, z)`` and the anchor at
 Every draw comes from the sensor's own generator, and the same number of draws is made per
 sample whatever the geometry, so the noise stream is a function of the seed alone (R-DET-2).
 
+**A peer range is the same model applied to a second tag.** The true range is the
+three-dimensional distance between the two drones' true positions -- a hovering drone 0.8 m
+from a landed one reads 0.94 m, and a policy that spaces a chain must know that. Line of
+sight is the same structural segment test at the **lower** of the two altitudes: every wall
+and pillar an interior path can cross is 2.0 m, so below the ceiling the choice changes no
+answer, and the lower one is the pessimistic direction if it ever does (F-34). Airframes
+and markers are transparent, as they are to the anchor link. The peer draws come from a
+**child generator spawned from the tag's own at build** (the R-DET-3 discipline), so the
+anchor noise is the same whether ``peers`` is on or off -- not merely within a sweep but for
+the whole run -- and there are four draws per peer per sweep whether or not that peer is in
+reach, flying, or the tag itself (whose slot is always ``inf``). Nothing in any source this
+repository has read measures a tag-to-tag link differently from a tag-to-anchor one, so
+nothing here does either.
+
 Every anchor is measured in the same tick, which the radio makes reasonable: a DS-TWR
 exchange is three frames of about 170 us, so the whole sweep lives inside one tag's TDMA
 slot and the first-to-last skew is under 2 cm at cruise speed (F-23). **What the fixed rate
@@ -90,7 +119,11 @@ does not carry is the fleet.** Slots are per tag, so the sweep rate is
 ``1 / (n_tags * slot)`` -- ten drones get 10 Hz each and twenty-five get 4 Hz, on the same
 radio. :func:`sweep_rate_hz` computes it and the caller passes the answer to ``rate_hz``;
 nothing does it automatically, because a sensor config knows nothing about the fleet
-(F-32).
+(F-32). **With peers on, the slot itself grows**: a tag now makes ``anchors + tags - 1``
+exchanges in its own slot, and a shipping firmware fits eight per 10 ms (A-19), so
+:func:`peer_sweep_rate_hz` gives 5 Hz at ten drones and one anchor and **1 Hz at
+twenty-five** -- an order of magnitude under what a broadcast swarm-ranging protocol has
+measured on a DW1000 (F-33). Pessimistic on purpose; measure it.
 
 What is not modelled, and matters
 ---------------------------------
@@ -111,6 +144,11 @@ What is not modelled, and matters
 - **Anchors above 2.0 m.** The line-of-sight test is made at the drone's altitude, exact
   while anchors stand no taller than the inner walls and over-reporting obstruction above
   that (F-25).
+- **Peer ranging's protocol.** The rate model is the naive schedule -- every tag initiates
+  to every other, eight exchanges per slot -- and the body between two tags is transparent;
+  two uncalibrated tags carry two antenna-delay offsets this model has no term for (F-33,
+  F-34). A parked teammate is ranged exactly but is invisible to the ring and cannot be
+  collided with (F-35), which a relay built on this sensor rests on.
 - **The consumer.** A range-only sensor is half a feature until a ``PoseSource`` fuses it
   (ADR-0003). This is the sensor; that is the next piece of work.
 
@@ -135,13 +173,15 @@ than scenery. Name the kinds and call
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from typing import Sequence
 
 import numpy as np
 
 from ..constants import (
     UWB_ANCHOR_HEIGHT_M,
+    UWB_PEER_EXCHANGES_PER_SLOT,
     UWB_SLOT_S,
     UWB_LOS_NOISE_STD_M,
     UWB_MAX_RANGE_M,
@@ -157,7 +197,7 @@ from ..world.arena import TARGET_KINDS
 from ..world.landmark import Landmark
 from .base import Sensor, SensorConfig, TrueState, read_only
 from .raycast import RayScene, segment_clear
-from .scene import WorldScene
+from .scene import Fleet, WorldScene
 
 __all__ = [
     "UWBConfig",
@@ -166,8 +206,10 @@ __all__ = [
     "anchor_positions",
     "true_ranges",
     "line_of_sight",
+    "peer_line_of_sight",
     "measure",
     "sweep_rate_hz",
+    "peer_sweep_rate_hz",
     "validate_uwb_config",
 ]
 
@@ -206,6 +248,50 @@ def sweep_rate_hz(n_tags: int, slot_s: float = UWB_SLOT_S) -> float:
     return 1.0 / (n_tags * slot_s)
 
 
+def peer_sweep_rate_hz(
+    n_tags: int,
+    n_anchors: int,
+    exchanges_per_slot: int = UWB_PEER_EXCHANGES_PER_SLOT,
+    slot_s: float = UWB_SLOT_S,
+) -> float:
+    """How often one tag sweeps its anchors **and every other tag**, in a fleet of ``n_tags``.
+
+    With peers on, a tag makes ``n_anchors + n_tags - 1`` double-sided exchanges inside its
+    own slot. A shipping firmware completes eight per 10 ms slot (A-19), so the tag needs
+    ``ceil(exchanges / 8)`` slots and the superframe is ``n_tags`` of them:
+
+        10 drones, 1 anchor  ->  10 exchanges  ->  2 slots  ->  1 / (10 * 0.020) = 5 Hz
+        25 drones, 1 anchor  ->  25 exchanges  ->  4 slots  ->  1 / (25 * 0.040) = 1 Hz
+
+    Both halves of that are assumptions, and both are pessimistic: every tag initiates to
+    every other, so each pair is ranged twice per superframe (a symmetric schedule halves
+    it), and the exchange budget is the AT firmware's 1.25 ms rather than the ~0.5 ms of
+    airtime. A broadcast swarm-ranging protocol measured 16 Hz per pair at 13-14 drones on a
+    DW1000 -- ten times this default at that fleet size (F-33). The pessimistic figure is the
+    default because it is the firmware the team would fly first.
+
+    Like :func:`sweep_rate_hz`, this is a helper for choosing :attr:`UWBConfig.rate_hz`, not
+    something the runner applies, and the answer must still divide the tick rate (R-TIME-3).
+    On the 20 Hz loop the decimation is ``0.2 * n_tags * slots``, so ten, fifteen, twenty and
+    twenty-five drones with one anchor all divide (4, 6, 12 and 20 ticks) while twelve do not
+    (4.8) -- pick the next rate down that divides, and say in the write-up that you did.
+    """
+    if not isinstance(n_tags, int) or isinstance(n_tags, bool) or n_tags < 1:
+        raise ConfigError(f"n_tags must be an integer >= 1, got {n_tags!r}")
+    if not isinstance(n_anchors, int) or isinstance(n_anchors, bool) or n_anchors < 0:
+        raise ConfigError(f"n_anchors must be an integer >= 0, got {n_anchors!r}")
+    if not isinstance(exchanges_per_slot, int) or isinstance(exchanges_per_slot, bool) \
+            or exchanges_per_slot < 1:
+        raise ConfigError(
+            f"exchanges_per_slot must be an integer >= 1, got {exchanges_per_slot!r}"
+        )
+    if not _finite(slot_s) or slot_s <= 0.0:
+        raise ConfigError(f"slot_s must be a finite number > 0, got {slot_s!r}")
+    exchanges = n_anchors + n_tags - 1
+    slots = max(1, math.ceil(exchanges / exchanges_per_slot))
+    return 1.0 / (n_tags * slots * slot_s)
+
+
 # ------------------------------------------------------------------------------------------
 # The config
 # ------------------------------------------------------------------------------------------
@@ -236,6 +322,13 @@ class UWBConfig(SensorConfig):
     nlos_drop_probability: float = UWB_NLOS_DROP_PROBABILITY  # A-17
     outlier_probability: float = UWB_OUTLIER_PROBABILITY      # A-18, off by default
     outlier_max_m: float = UWB_OUTLIER_MAX_M                  # A-18
+
+    peers: bool = False
+    """Also range to every other drone's tag (R-SENS-18). Off by default: the reading,
+    the draws and the log are then exactly what they were before the option existed. On,
+    the same noise model applies to each peer link from a child generator of the tag's own,
+    so the anchor noise is unchanged, and the slot budget grows -- pass
+    ``rate_hz=peer_sweep_rate_hz(n_drones, n_anchors)`` (A-19, F-33)."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -287,6 +380,10 @@ def validate_uwb_config(cfg: UWBConfig) -> None:
             raise ConfigError(
                 f"{field_name} must be a probability in [0, 1], got {value!r}"
             )
+    if not isinstance(cfg.peers, (bool, np.bool_)):
+        # A truthy non-bool -- peers=1, peers="yes" -- would switch peer ranging on and log
+        # a config that does not say so plainly.
+        raise ConfigError(f"peers must be a bool, got {cfg.peers!r}")
 
 
 def _finite(value: object) -> bool:
@@ -318,10 +415,24 @@ class UWBRanges:
     out of reach, or dropped behind a wall. A finite value may be biased and the reading does
     not say which."""
 
+    peer_ids: tuple[str, ...] = ()
+    """Every drone in the run, in run order, this tag's own drone included. Fixed for the
+    run. Empty unless ``UWBConfig(peers=True)``."""
+
+    peer_ranges_m: np.ndarray = field(default_factory=lambda: read_only(np.zeros(0)))
+    """``(P,)`` reported range to each peer's tag, ``inf`` for this tag's own slot and
+    wherever nothing was heard. Three-dimensional: a hovering drone 0.8 m from a landed one
+    reads 0.94 m. Says nothing about the peer -- not its altitude, not its lifecycle."""
+
     @property
     def heard(self) -> np.ndarray:
         """``(N,)`` bool, True where a range was reported this sweep."""
         return np.isfinite(self.ranges_m)
+
+    @property
+    def peers_heard(self) -> np.ndarray:
+        """``(P,)`` bool, True where a peer range was reported this sweep. Never at self."""
+        return np.isfinite(self.peer_ranges_m)
 
 
 # ------------------------------------------------------------------------------------------
@@ -356,6 +467,29 @@ def line_of_sight(scene: RayScene, tag_xy: np.ndarray, anchor_xyz: np.ndarray, z
         return np.zeros(0, dtype=bool)
     origin = np.asarray(tag_xy, dtype=float).reshape(2)
     return segment_clear(scene, np.tile(origin, (len(anchors), 1)), anchors[:, :2], z)
+
+
+def peer_line_of_sight(scene: RayScene, tag_xyz: np.ndarray, peer_xyz: np.ndarray) -> np.ndarray:
+    """``(P,)`` bool: is the straight path from the tag to each peer's tag clear of ``scene``?
+
+    Tested at the **lower** of the two altitudes, pair by pair (R-SENS-18). Below the ceiling
+    every crossable structure is taller than either tag, so in a generated arena the choice
+    changes nothing; where it could, the lower altitude over-reports obstruction, which is the
+    safe direction (F-34). Pairs are grouped by their test altitude so a fleet costs one
+    segment cast per distinct altitude rather than one per peer.
+    """
+    tag = np.asarray(tag_xyz, dtype=float).reshape(3)
+    peers = np.asarray(peer_xyz, dtype=float).reshape(-1, 3)
+    if not len(peers):
+        return np.zeros(0, dtype=bool)
+    z_test = np.minimum(peers[:, 2], tag[2])
+    clear = np.zeros(len(peers), dtype=bool)
+    for z in np.unique(z_test):
+        rows = np.flatnonzero(z_test == z)
+        clear[rows] = segment_clear(
+            scene, np.tile(tag[:2], (len(rows), 1)), peers[rows, :2], float(z)
+        )
+    return clear
 
 
 def measure(
@@ -405,6 +539,14 @@ class UWBTag(Sensor):
         self._anchor_ids: tuple[str, ...] | None = None
         self._anchor_xyz: np.ndarray | None = None
         self._anchor_xyz_ro: np.ndarray | None = None
+        # Peer noise comes from a child of the tag's generator, spawned here and never from
+        # the parent's stream: with peers off the parent is untouched and an old log
+        # reproduces byte for byte; with peers on the anchor noise is still the same run.
+        # Drawing peers from the parent *after* the anchors was the first design, and it
+        # only held within a sweep -- by the next sweep the parent had advanced (R-DET-3).
+        self._peer_rng: np.random.Generator | None = (
+            rng.spawn(1)[0] if config.peers else None
+        )
 
     def _anchors(self, world: WorldScene) -> tuple[tuple[str, ...], np.ndarray, np.ndarray]:
         if self._anchor_xyz is None:
@@ -416,23 +558,54 @@ class UWBTag(Sensor):
 
     def sample(self, truth: TrueState, world: WorldScene, tick: int) -> UWBRanges:
         ids, xyz, xyz_ro = self._anchors(world)
-        distance = true_ranges(np.array([truth.x, truth.y, truth.z]), xyz)
+        tag_xyz = np.array([truth.x, truth.y, truth.z])
+        distance = true_ranges(tag_xyz, xyz)
         los = line_of_sight(world.structural_scene, truth.xy, xyz, truth.z)
         # The same four draws per anchor every sweep, whether or not they are used: the noise
         # stream then depends on the seed alone, not on which walls happened to be in the way.
-        n = len(ids)
-        gauss = self.rng.normal(0.0, 1.0, n)
-        u_drop = self.rng.random(n)
-        u_outlier = self.rng.random(n)
-        u_size = self.rng.random(n)
-        ranges = measure(distance, los, self.config, gauss, u_drop, u_outlier, u_size)
-        return UWBRanges(anchor_ids=ids, anchor_xyz_m=xyz_ro, ranges_m=read_only(ranges))
+        ranges = measure(distance, los, self.config, *self._draws(len(ids)))
+        if not self.config.peers:
+            return UWBRanges(anchor_ids=ids, anchor_xyz_m=xyz_ro, ranges_m=read_only(ranges))
+
+        # Peers draw from their own child generator, so the anchor noise above is the same
+        # run with or without them; and there are four draws per peer whatever its lifecycle
+        # or reach, including the tag's own slot, which is then overwritten with inf.
+        fleet: Fleet = world.fleet
+        peer_distance = true_ranges(tag_xyz, fleet.xyz)
+        peer_los = peer_line_of_sight(world.structural_scene, tag_xyz, fleet.xyz)
+        peer_ranges = measure(
+            peer_distance, peer_los, self.config, *self._draws(len(fleet), self._peer_rng)
+        )
+        me = fleet.index_of(truth.object_id)
+        if me >= 0:
+            peer_ranges[me] = np.inf
+        return UWBRanges(
+            anchor_ids=ids, anchor_xyz_m=xyz_ro, ranges_m=read_only(ranges),
+            peer_ids=fleet.agent_ids, peer_ranges_m=read_only(peer_ranges),
+        )
+
+    def _draws(self, n: int, rng: np.random.Generator | None = None):
+        """Four arrays of ``n`` draws in the order :func:`measure` takes them."""
+        rng = self.rng if rng is None else rng
+        return (
+            rng.normal(0.0, 1.0, n),
+            rng.random(n),
+            rng.random(n),
+            rng.random(n),
+        )
 
     # -- the log -------------------------------------------------------------------------------
 
     def record(self, reading: UWBRanges):
-        """One row per sweep: the reported ranges, ``inf`` where nothing was heard."""
-        return {"ranges_m": reading.ranges_m}
+        """One row per sweep: the reported ranges, ``inf`` where nothing was heard.
+
+        With peers on, ``peer_ranges_m`` too, stacked to ``(ticks, agents, agents)``: column
+        ``j`` is the ``j``-th entry of the header's ``agents`` list (R-SENS-18). With peers
+        off the row is exactly what it was, so an old log and a new one are the same file.
+        """
+        if not self.config.peers:
+            return {"ranges_m": reading.ranges_m}
+        return {"ranges_m": reading.ranges_m, "peer_ranges_m": reading.peer_ranges_m}
 
     def record_static(self):
         """The anchor positions, so ``uwb.npz`` can be graded without the simulator (R-OBS-3).

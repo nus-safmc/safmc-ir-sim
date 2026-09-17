@@ -394,12 +394,13 @@ MUST be the three-dimensional distance between the two drones' true positions, w
 either drone's lifecycle. Obstruction MUST be decided as in R-SENS-17 at the **lower** of the
 two altitudes; airframes and solid landmarks MUST NOT obstruct. The noise model, its
 parameters and its draw discipline MUST be those of R-SENS-17, with four draws per peer per
-sweep drawn **after** the anchor draws, so that the anchor stream does not depend on `peers`
-and the peer stream does not depend on the geometry or on any drone's lifecycle. The package
-MUST provide `peer_sweep_rate_hz(n_tags, n_anchors)` computing the sweep rate under the
-slot budget of A-19; the runner MUST NOT apply it. The sensor MUST record `peer_ranges_m`
-shaped `(ticks, agents, agents)` where column `j` is the `j`-th entry of the header's
-`agents` list (R-OBS-3).
+sweep from a **child generator spawned from the tag's own at build** (the R-DET-3
+discipline), so that the anchor stream is identical for the whole run whether `peers` is on
+or off, and the peer stream does not depend on the geometry or on any drone's lifecycle. The
+package MUST provide `peer_sweep_rate_hz(n_tags, n_anchors)` computing the sweep rate under
+the slot budget of A-19; the runner MUST NOT apply it. The sensor MUST record
+`peer_ranges_m` shaped `(ticks, agents, agents)` where column `j` is the `j`-th entry of the
+header's `agents` list (R-OBS-3).
 
 ---
 

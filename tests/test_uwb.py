@@ -17,7 +17,7 @@ import pytest
 
 from safmc_sim import constants as K
 from safmc_sim import policies  # noqa: F401 -- registers sdlw
-from safmc_sim.api import Policy, Velocity, register_policy
+from safmc_sim.api import Land, Policy, Velocity, register_policy
 from safmc_sim.errors import ConfigError
 from safmc_sim.recorder import Recorder, arena_from_log, load_run
 from safmc_sim.runner import RunConfig, Runner, flown_sensors, run
@@ -33,6 +33,8 @@ from safmc_sim.sensors.uwb import (
     anchor_positions,
     line_of_sight,
     measure,
+    peer_line_of_sight,
+    peer_sweep_rate_hz,
     sweep_rate_hz,
     true_ranges,
 )
@@ -591,6 +593,233 @@ def test_recording_the_tag_does_not_change_the_run():
 def test_record_static_before_the_first_sample_is_a_contract_violation():
     with pytest.raises(ConfigError, match="before the first sample"):
         make_tag().record_static()
+
+
+# -- peers: the same tag, ranging to the fleet (R-SENS-18) ---------------------------------------
+
+
+def _fleet(world, *drones, key=0):
+    """``drones`` are ``(agent_id, object_id, x, y, z)``; fills the scene's fleet."""
+    world.refresh_fleet(
+        [(a, oid, np.array([[x], [y], [0.0], [z], [0.0], [0.0]])) for a, oid, x, y, z in drones],
+        cache_key=key,
+    )
+    return world
+
+
+def test_peers_are_off_by_default_and_the_reading_is_then_what_it_was():
+    cfg = UWBConfig()
+    assert cfg.peers is False
+    reading = make_tag(**EXACT).sample(truth_at(10.0, 10.0), _fleet(box_scene(), ("drone_00", -1, 10, 10, 0.5)), 0)
+    assert reading.peer_ids == () and reading.peer_ranges_m.shape == (0,)
+    assert reading.peers_heard.shape == (0,)
+    # The positional constructor the R-POL-4 walk uses still works: the new fields default.
+    UWBRanges(("a",), read_only_xyz := np.zeros((1, 3)), np.zeros(1))
+    assert read_only_xyz.shape == (1, 3)
+
+
+def test_peers_must_be_a_bool():
+    for bad in (1, "yes", None):
+        with pytest.raises(ConfigError, match="peers must be a bool"):
+            UWBConfig(peers=bad)
+    UWBConfig(peers=np.bool_(True))
+
+
+def test_a_peer_range_is_three_dimensional_between_the_two_tags_and_self_is_inf():
+    world = _fleet(box_scene(),
+                   ("drone_00", 1, 10.0, 10.0, 0.5),      # me
+                   ("drone_01", 2, 10.8, 10.0, 0.0),      # a landed teammate 0.8 m away
+                   ("drone_02", 3, 10.0, 13.0, 0.5))      # a flying one 3 m away
+    tag = make_tag(peers=True, **EXACT)
+    reading = tag.sample(TrueState("drone_00", 1, 10.0, 10.0, 0.5, 0.0, 0.0, 0.0), world, 0)
+    assert reading.peer_ids == ("drone_00", "drone_01", "drone_02"), "run order, self included"
+    assert np.isinf(reading.peer_ranges_m[0]) and not reading.peers_heard[0], "a tag cannot range to itself"
+    assert reading.peer_ranges_m[1] == pytest.approx(np.hypot(0.8, 0.5)), "0.8 m across, 0.5 m down: 0.94 m"
+    assert reading.peer_ranges_m[2] == pytest.approx(3.0)
+    assert reading.peers_heard.tolist() == [False, True, True]
+    check_reading_is_immutable("uwb", reading)
+    with pytest.raises(ValueError, match="read-only"):
+        reading.peer_ranges_m[:] = 0.0
+
+
+def test_a_tag_the_fleet_has_never_heard_of_has_no_self_slot():
+    """A hand-built scene whose fleet omits the sampling drone: every slot is a real peer."""
+    world = _fleet(box_scene(), ("drone_07", 7, 12.0, 10.0, 0.5))
+    reading = make_tag(peers=True, **EXACT).sample(truth_at(10.0, 10.0), world, 0)   # object_id -1
+    assert reading.peer_ids == ("drone_07",) and reading.peer_ranges_m[0] == pytest.approx(2.0)
+
+
+def test_a_wall_obstructs_a_peer_and_an_airframe_does_not():
+    behind = ("drone_01", 2, 14.0, 10.0, 0.5)
+    beyond_a_body = ("drone_02", 3, 10.0, 14.0, 0.5)
+    body = ("drone_03", 4, 10.0, 12.0, 0.5)                      # right on the line to drone_02
+    world = _fleet(box_scene(walls=[(12.0, 5.0, 12.0, 15.0)]), ("drone_00", 1, 10, 10, 0.5),
+                   behind, beyond_a_body, body)
+    world.refresh_drones([_FakeRobot(4, 10.0, 12.0)], cache_key=0)  # and it is a ring body too
+    tag = make_tag(peers=True, nlos_bias_m=0.5, los_noise_std_m=0.0, nlos_noise_std_m=0.0,
+                   nlos_drop_probability=0.0)
+    reading = tag.sample(TrueState("drone_00", 1, 10.0, 10.0, 0.5, 0.0, 0.0, 0.0), world, 0)
+    assert reading.peer_ranges_m[1] == pytest.approx(4.0 + 0.5), "behind the wall: biased"
+    assert reading.peer_ranges_m[2] == pytest.approx(4.0), "behind a teammate's body: clean"
+    assert reading.peer_ranges_m[3] == pytest.approx(2.0)
+
+
+def test_peer_line_of_sight_is_tested_at_the_lower_of_the_two_altitudes():
+    """A 1.0 m wall between a drone at 1.2 m and one on the floor: obstructed, because the
+    landed tag is below the wall's top. Between two drones at 1.2 m: clear. F-34."""
+    scene = box_scene(walls=[(12.0, 5.0, 12.0, 15.0)]).structural_scene
+    heights = scene.segment_heights.copy()
+    heights[-1] = 1.0
+    low = RayScene(segments=scene.segments, segment_heights=heights)
+    me_high = np.array([10.0, 10.0, 1.2])
+    peers = np.array([[14.0, 10.0, 0.0], [14.0, 10.0, 1.2], [14.0, 10.0, 0.5]])
+    assert peer_line_of_sight(low, me_high, peers).tolist() == [False, True, False]
+    me_low = np.array([10.0, 10.0, 0.0])
+    assert peer_line_of_sight(low, me_low, peers).tolist() == [False, False, False]
+    assert peer_line_of_sight(low, me_low, np.zeros((0, 3))).shape == (0,)
+
+
+def test_a_peer_beyond_reach_is_inf_and_a_dropped_one_is_inf():
+    world = _fleet(box_scene(), ("drone_00", 1, 1.0, 1.0, 0.5), ("drone_01", 2, 19.0, 19.0, 0.5))
+    reading = make_tag(peers=True, max_range_m=5.0, **EXACT).sample(
+        TrueState("drone_00", 1, 1.0, 1.0, 0.5, 0.0, 0.0, 0.0), world, 0)
+    assert np.isinf(reading.peer_ranges_m).all()
+    walled = _fleet(box_scene(walls=[(12.0, 5.0, 12.0, 15.0)]),
+                    ("drone_00", 1, 10, 10, 0.5), ("drone_01", 2, 14, 10, 0.5))
+    always_drops = make_tag(peers=True, nlos_drop_probability=1.0, los_noise_std_m=0.0)
+    reading = always_drops.sample(TrueState("drone_00", 1, 10.0, 10.0, 0.5, 0.0, 0.0, 0.0), walled, 0)
+    assert np.isinf(reading.peer_ranges_m[1])
+
+
+def test_switching_peers_on_leaves_the_anchor_stream_untouched_and_draws_four_per_peer():
+    """R-SENS-18: peers draw from a child generator spawned at build, so the anchor noise is
+    the same run with peers on or off -- for every sweep, not just the first -- and there are
+    four draws per peer per sweep whatever the peer's reach, lifecycle or identity."""
+    anchors = (Landmark("a", "uwb_anchor", 14.0, 10.0),)
+    off = _fleet(box_scene(landmarks=anchors), ("drone_00", 1, 10, 10, 0.5), ("drone_01", 2, 11, 10, 0.5))
+    on = _fleet(box_scene(landmarks=anchors), ("drone_00", 1, 10, 10, 0.5), ("drone_01", 2, 11, 10, 0.5))
+    me = TrueState("drone_00", 1, 10.0, 10.0, 0.5, 0.0, 0.0, 0.0)
+    tag_off, tag_on = make_tag(seed=4), make_tag(seed=4, peers=True)
+    for tick in range(5):
+        a = tag_off.sample(me, off, tick)
+        b = tag_on.sample(me, on, tick)
+        assert a.ranges_m.tolist() == b.ranges_m.tolist(), "anchor noise does not depend on peers"
+    assert tag_off.rng.random() == tag_on.rng.random(), "the parent stream is untouched by peers"
+    # Exactly four draws per fleet member per sweep from the child: a fresh child of the
+    # same parent, advanced by 5 sweeps * 4 draws * 2 drones, is in lockstep.
+    child = np.random.default_rng(4).spawn(1)[0]
+    child.random(5 * 4 * 2)
+    assert child.random() == tag_on._peer_rng.random()
+
+    # And the count does not depend on geometry or lifecycle: one peer in reach and flying,
+    # the other out of reach and on the floor, same number of draws.
+    near = _fleet(box_scene(), ("drone_00", 1, 10, 10, 0.5), ("drone_01", 2, 11, 10, 0.5), ("drone_02", 3, 12, 10, 0.5))
+    far = _fleet(box_scene(), ("drone_00", 1, 10, 10, 0.5), ("drone_01", 2, 19, 19, 0.0), ("drone_02", 3, 0.5, 19, 0.0))
+    t_near, t_far = make_tag(seed=8, peers=True, max_range_m=5.0), make_tag(seed=8, peers=True, max_range_m=5.0)
+    for tick in range(3):
+        assert t_near.sample(me, near, tick).peers_heard.sum() == 2
+        assert t_far.sample(me, far, tick).peers_heard.sum() == 0
+    assert t_near.rng.random() == t_far.rng.random()
+
+
+def test_the_peer_sweep_rate_grows_the_slot_with_the_fleet_and_the_anchors():
+    """A-19: eight exchanges per 10 ms slot, every tag initiating to every anchor and every
+    other tag. Ten drones and one anchor need two slots; twenty-five need four."""
+    assert peer_sweep_rate_hz(10, 1) == pytest.approx(5.0)
+    assert peer_sweep_rate_hz(25, 1) == pytest.approx(1.0)
+    assert peer_sweep_rate_hz(20, 1) == pytest.approx(1.0 / (20 * 0.030))
+    assert peer_sweep_rate_hz(10, 0) == pytest.approx(1.0 / (10 * 0.020))          # 9 peers: 2 slots
+    assert peer_sweep_rate_hz(8, 1) == pytest.approx(sweep_rate_hz(8)), "eight exchanges fit one slot"
+    assert peer_sweep_rate_hz(1, 3) == pytest.approx(sweep_rate_hz(1)), "alone, it is the anchor rate"
+    # A better protocol is one argument away, and so is a slower radio.
+    assert peer_sweep_rate_hz(25, 1, exchanges_per_slot=25) == pytest.approx(4.0)
+    assert peer_sweep_rate_hz(10, 1, slot_s=0.015) == pytest.approx(1.0 / (10 * 0.030))
+    # On the 20 Hz loop the decimation is 0.2 * n_tags * slots: ten, fifteen, twenty and
+    # twenty-five drones with one anchor divide; twelve (4.8) do not, and the runner refuses
+    # rather than rounds. (A first draft of the docstring said fifteen do not. They do.)
+    for n in (10, 15, 20, 25):
+        RunConfig(n_drones=n, sensors=(UWBConfig(peers=True, rate_hz=peer_sweep_rate_hz(n, 1)),))
+    with pytest.raises(ConfigError, match="does not divide"):
+        RunConfig(n_drones=12, sensors=(UWBConfig(peers=True, rate_hz=peer_sweep_rate_hz(12, 1)),))
+    for bad in ((0, 1), (10, -1), (2.5, 1), (True, 1)):
+        with pytest.raises(ConfigError):
+            peer_sweep_rate_hz(*bad)
+    with pytest.raises(ConfigError, match="exchanges_per_slot"):
+        peer_sweep_rate_hz(10, 1, exchanges_per_slot=0)
+
+
+def test_peer_ranges_reach_the_policy_and_see_a_landed_teammate_at_floor_level():
+    """End to end: drone_00 lands at tick 10; every other tag then ranges to it at z = 0 and
+    the range shrinks by the altitude difference, not to inf."""
+    seen: dict[int, list] = {}
+
+    @register_policy("_ranges_to_peers")
+    class RangesToPeers(Policy):
+        def step(self, obs):
+            r = obs.sensors["uwb"]
+            assert r.peer_ids == tuple(f"drone_{i:02d}" for i in range(10))
+            assert np.isinf(r.peer_ranges_m[int(obs.agent_id[-2:])]), "self is inf"
+            if obs.agent_id == "drone_01" and obs.stale_ticks["uwb"] == 0:
+                seen[obs.tick] = (obs.pose.z, float(r.peer_ranges_m[0]))
+            if obs.agent_id == "drone_00" and obs.tick == 10:
+                return Land()
+            return Velocity(vz=0.4)
+
+    run(RunConfig(seed=0, policy="_ranges_to_peers", arena_config=ArenaConfig(landmarks=START_ANCHORS),
+                  sensors=(ToFConfig(), UWBConfig(peers=True, los_noise_std_m=0.0)), **SHORT))
+    # drone_00 and drone_01 are grid neighbours 1.25 m apart, both climbing in step, so the
+    # range between them is 1.25 m until drone_00 lands; then it grows by the height gap.
+    before = [r for t, (z, r) in seen.items() if t <= 10]
+    after = [(z, r) for t, (z, r) in seen.items() if t >= 14]
+    assert before and after
+    assert all(r == pytest.approx(K.START_SPACING_M, abs=1e-6) for r in before)
+    for z, r in after:
+        assert np.isfinite(r), "a landed teammate's tag still answers"
+        assert r == pytest.approx(np.hypot(K.START_SPACING_M, z), abs=1e-6)
+
+
+def test_the_log_holds_peer_ranges_square_in_the_header_s_agent_order():
+    cfg = RunConfig(seed=1, policy="sdlw", n_drones=10, duration_s=3.0,
+                    arena_config=ArenaConfig(landmarks=START_ANCHORS),
+                    sensors=flown_sensors() + (UWBConfig(peers=True),))
+    with tempfile.TemporaryDirectory() as tmp:
+        result = run(cfg, recorder=Recorder(tmp))
+        log = load_run(tmp)
+    uwb = log["sensors"]["uwb"]
+    assert uwb["ranges_m"].shape == (result.ticks, 10, 3)
+    assert uwb["peer_ranges_m"].shape == (result.ticks, 10, 10)
+    assert log["header"]["agents"] == [f"drone_{i:02d}" for i in range(10)]
+    # The diagonal is self and is always inf; the rest is graded against the true geometry.
+    diag = np.einsum("tii->ti", uwb["peer_ranges_m"])
+    assert np.isinf(diag).all()
+    fresh = uwb["sample_tick"] == uwb["ticks"][:, None]
+    pose = log["states"]["pose"][:, :, :3]                                   # (T, N, 3)
+    d = np.linalg.norm(pose[:, :, None, :] - pose[:, None, :, :], axis=-1)   # (T, N, N)
+    err = uwb["peer_ranges_m"] - d
+    t_idx, n_idx = np.nonzero(fresh)
+    rows = err[t_idx, n_idx]                                                 # (K, N)
+    heard = np.isfinite(uwb["peer_ranges_m"][t_idx, n_idx])
+    # At take-off nothing stands between grid neighbours, so every heard range is a LOS one.
+    assert heard.sum() > 500
+    assert np.abs(rows[heard]).max() < 6 * K.UWB_LOS_NOISE_STD_M
+    assert abs(rows[heard].mean()) < 0.02
+
+
+def test_a_run_without_peers_writes_the_log_it_always_did():
+    """R-SENS-18: with peers off, byte-for-byte what a run before the option produced. The
+    file cannot be compared against history here, so this pins the schema and the draws:
+    the same anchor ranges, and no peer array."""
+    def log_of(peers):
+        cfg = RunConfig(seed=2, policy="sdlw", n_drones=10, duration_s=2.0,
+                        arena_config=ArenaConfig(landmarks=START_ANCHORS),
+                        sensors=flown_sensors() + (UWBConfig(peers=peers),))
+        with tempfile.TemporaryDirectory() as tmp:
+            run(cfg, recorder=Recorder(tmp))
+            return load_run(tmp)["sensors"]["uwb"]
+    off, on = log_of(False), log_of(True)
+    assert set(off) == {"ticks", "sample_tick", "ranges_m", "anchor_xyz_m"}
+    assert "peer_ranges_m" in on
+    assert np.array_equal(off["ranges_m"], on["ranges_m"]), "anchor noise does not depend on peers"
 
 
 # -- the example and the rulebook ----------------------------------------------------------------
