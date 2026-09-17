@@ -170,13 +170,16 @@ def test_the_trial_forms_a_relay_on_a_planted_bonus_victim_and_grades_from_the_l
     assert np.mean(report["links_m"]) <= ex.MAX_LINK_M, report["links_m"]
     assert all(report["links_clear"]) and report["tail_in_start_area"]
 
-    # T-3
+    # T-3: every landed relay measured two links inside the gate on its last sweep, and one of
+    # them certified against the anchor.
     gate = report["gate"]
     assert len(gate) == 2
     for entry in gate:
         assert entry["ok"], entry
-        assert entry["succ"] <= ex.MAX_LINK_M and entry["pred"] <= ex.MAX_LINK_M
+        assert len(entry["inside"]) >= 2 and all(v <= ex.MAX_LINK_M for v in entry["inside"].values())
         assert entry["t_sweep"] < entry["t_land"]
+    assert report["tail_certified"]
+    assert any("anchor_0" in entry["inside"] for entry in gate)
 
     # The relays landed on the same tick: same predicate, same snapshot (R-POL-8).
     landed = [e for e in log["events"] if e["kind"] == "landed" and e["agent_id"] in report["chain"][1:]]
@@ -252,6 +255,23 @@ def test_the_anchor_row_is_legal_and_the_rates_divide_the_tick():
         ex.anchor_row(12)
     for n_drones, n_anchors in ((10, 1), (10, 10), (25, 1), (25, 10), (15, 1)):
         ex.make_config(n_drones=n_drones, n_anchors=n_anchors)
+
+
+def test_relays_come_from_the_southern_row_and_launch_north_row_first():
+    """Twenty-five drones fill two rows of thirteen. Eight relays must all be in the southern
+    row (never north of a searcher's north leg); fifteen spill into the northern row, which
+    launches first; and the lead is never a relay."""
+    ex = example()
+    fleet = tuple(f"drone_{i:02d}" for i in range(25))
+    eight = ex.relay_roles(fleet, 8, 20.0)
+    assert set(eight) == {f"drone_{i:02d}" for i in range(5, 13)}, "row 0, highest columns"
+    assert eight == tuple(f"drone_{i:02d}" for i in range(5, 13)), "nearest the anchor launches first"
+    fifteen = ex.relay_roles(fleet, 15, 20.0)
+    assert set(fifteen) == {f"drone_{i:02d}" for i in range(1, 13)} | {"drone_22", "drone_23", "drone_24"}
+    assert fifteen[:3] == ("drone_22", "drone_23", "drone_24"), "the northern row clears out first"
+    assert "drone_00" not in fifteen
+    ten = tuple(f"drone_{i:02d}" for i in range(10))
+    assert ex.relay_roles(ten, 3, 20.0) == ("drone_07", "drone_08", "drone_09")
 
 
 def test_the_sweep_summary_reports_per_cell():

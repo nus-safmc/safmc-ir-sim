@@ -9,8 +9,9 @@ the relay drones onto a chain and lands them on a UWB measurement alone.
 What it shows, in order:
 
 1. **Roles.** ``drone_00`` is the *lead* -- a wasp_v5 searcher that lands only on a bonus victim.
-   The last ``n_relay`` drones are *relays*. Everyone else is an unmodified wasp_v5 searcher with
-   the mission wrapper. Every searcher first flies straight north out of the Start Area along
+   ``n_relay`` drones are *relays*, taken from the southern take-off row first so that no parked
+   relay sits north of a searcher (:func:`relay_roles`). Everyone else is an unmodified wasp_v5
+   searcher with the mission wrapper. Every searcher first flies straight north out of the Start Area along
    its own column, then walks; every searcher publishes a **breadcrumb** each 0.25 m of travel,
    with its ring's clearance, and announces itself as a **head** when it lands on a bonus victim.
 2. **The trail.** A relay assembles a head's trail from the anchor northwards and **cuts loops**
@@ -923,6 +924,32 @@ class RelayNode(Policy):
 # ------------------------------------------------------------------------------------------
 
 
+def relay_roles(fleet: tuple[str, ...], n_relay: int, width_m: float) -> tuple[str, ...]:
+    """Which drones are relays, in launch order.
+
+    The take-off grid fills rows from the south, ``per_row`` per row (the runner's own
+    arithmetic: field width less two wall margins, over the grid spacing). A relay waits on
+    the ground while the searchers fly north, so a grounded relay must never sit in a row
+    *north* of a searcher: relays are taken from the southern row first, highest column
+    first, and only then from the row above. With twenty-five drones the first version took
+    "the last eight ids", which is the northern row -- and ten searchers behind a wall of
+    parked relays found one target in ten minutes where ten alone find three.
+
+    Launch order is northern-row relays first (they clear out of the southern ones' way), and
+    within a row the relay nearest the anchor first, so each later joiner flies north on a
+    column east of every earlier one and then west behind them, and no two approach paths
+    cross. (Launching the farthest first made them cross.)
+    """
+    from safmc_sim.constants import START_SPACING_M, START_WALL_MARGIN_M
+
+    per_row = max(1, int((width_m - 2.0 * START_WALL_MARGIN_M) // START_SPACING_M))
+    candidates = list(range(1, len(fleet)))                         # drone_00 is the lead
+    by_row_south_first = sorted(candidates, key=lambda i: (i // per_row, -(i % per_row)))
+    chosen = by_row_south_first[:n_relay]
+    launch_order = sorted(chosen, key=lambda i: (-(i // per_row), i % per_row))
+    return tuple(fleet[i] for i in launch_order)
+
+
 @register_policy("uwb_relay")
 class UWBRelayTrial(Policy):
     """Per-drone role dispatch: lead, searcher or relay, decided from the fleet roster.
@@ -947,10 +974,7 @@ class UWBRelayTrial(Policy):
         if self.n_relay >= len(fleet):
             raise PolicyError(f"n_relay={self.n_relay} leaves no searcher in a fleet of {len(fleet)}")
         lead = fleet[0]
-        # Rank order is grid order: the relay nearest the anchor launches first, so each later
-        # joiner flies north on a column east of every earlier one and then west behind them,
-        # and no two approach paths cross. (Launching the farthest first made them cross.)
-        relays = tuple(fleet[len(fleet) - self.n_relay:]) if self.n_relay else ()
+        relays = relay_roles(fleet, self.n_relay, self.arena.width_m)
         searchers = tuple(a for a in fleet if a not in relays)
         cfg = {k: v for k, v in self.config.items() if k not in ("n_relay", "mode")}
         if self.agent_id in relays:
@@ -1046,20 +1070,25 @@ def grade(directory: str | Path) -> dict[str, Any]:
     report["links_clear"] = [bool(v) for v in segment_clear(arena.structural_scene(), xy[:-1], xy[1:], 0.0)]
     report["tail_in_start_area"] = bool(arena.in_start_area(float(xy[-1, 0]), float(xy[-1, 1])))
 
-    # T-3: for every relay in the chain, the last fresh peer sweep before it landed had both
-    # chain neighbours finite and within the gate, horizontal-corrected for who was down.
+    # T-3: for every relay down at formation, the last fresh sweep before it landed measured at
+    # least two links inside the gate -- to the head, to other landed drones, or to an anchor
+    # -- and at least one relay's anchor link was inside it: the tail's certificate. Graded
+    # over every landed relay rather than the scored chain, because the mission's BFS returns
+    # the *shortest* chain and can skip the anchor-certified tail when another relay happens
+    # to have landed a centimetre inside the Start Area.
     uwb = log["sensors"].get("uwb")
     if uwb is None or "peer_ranges_m" not in uwb:
         report["gate"] = ["no uwb.npz with peer ranges recorded"]
         return report
     landed_code = int([c for c, n in header["codebook"]["lifecycle"].items() if n == "LANDED"][0])
     lifecycle = states["lifecycle"]
-    for j, agent in enumerate(chain[1:], start=1):          # chain[0] is the head
+    down = [agents[i] for i in np.flatnonzero(lifecycle[first.tick] == landed_code)]
+    rescuers = {a for v in footer["mission_summary"].values() for a in v["serviced_by"]}
+    relays = [a for a in down if a not in rescuers]
+    report["tail_certified"] = False
+    for agent in relays:
         i = idx[agent]
-        down = np.flatnonzero(lifecycle[:, i] == landed_code)
-        if not len(down):
-            continue
-        t_land = int(down[0])
+        t_land = int(np.flatnonzero(lifecycle[:, i] == landed_code)[0])
         rows = np.flatnonzero((uwb["sample_tick"][:, i] <= t_land - 1) & (uwb["sample_tick"][:, i] >= 0))
         if not len(rows):
             report["gate"].append({"agent": agent, "ok": False, "why": "no sweep before landing"})
@@ -1067,22 +1096,23 @@ def grade(directory: str | Path) -> dict[str, Any]:
         r = int(rows[-1])
         t_sweep = int(uwb["sample_tick"][r, i])
         z_me = float(states["pose"][t_sweep, i, 2])
-        entry = {"agent": agent, "t_land": t_land, "t_sweep": t_sweep}
-        for label, other in (("succ", chain[j - 1]), ("pred", chain[j + 1] if j + 1 < len(chain) else None)):
-            if other is None:
-                # The tail's predecessor is whichever anchor it is nearest to on the floor --
-                # the one it certified against, unless two anchors are equidistant.
-                a_idx = int(np.argmin(np.linalg.norm(uwb["anchor_xyz_m"][:, :2] - xy[-1], axis=1)))
-                a = float(uwb["ranges_m"][r, i, a_idx])
-                anchor_z = float(uwb["anchor_xyz_m"][a_idx, 2])
-                entry[label] = horizontal(a, anchor_z - z_me) if np.isfinite(a) else math.inf
-            else:
-                k = idx[other]
-                rr = float(uwb["peer_ranges_m"][r, i, k])
-                z_other = float(states["pose"][t_sweep, k, 2])
-                entry[label] = horizontal(rr, z_me - z_other) if np.isfinite(rr) else math.inf
-        entry["ok"] = bool(entry["succ"] <= MAX_LINK_M and entry["pred"] <= MAX_LINK_M)
-        report["gate"].append(entry)
+        links: dict[str, float] = {}
+        for other in down:
+            if other == agent:
+                continue
+            k = idx[other]
+            rr = float(uwb["peer_ranges_m"][r, i, k])
+            links[other] = horizontal(rr, z_me - float(states["pose"][t_sweep, k, 2])) if np.isfinite(rr) else math.inf
+        for a_idx in range(uwb["anchor_xyz_m"].shape[0]):
+            a = float(uwb["ranges_m"][r, i, a_idx])
+            anchor_z = float(uwb["anchor_xyz_m"][a_idx, 2])
+            links[f"anchor_{a_idx}"] = horizontal(a, anchor_z - z_me) if np.isfinite(a) else math.inf
+        inside = {name: d for name, d in links.items() if d <= MAX_LINK_M}
+        if any(name.startswith("anchor_") for name in inside):
+            report["tail_certified"] = True
+        report["gate"].append({"agent": agent, "t_land": t_land, "t_sweep": t_sweep,
+                               "inside": {k: round(v, 2) for k, v in inside.items()},
+                               "ok": len(inside) >= 2})
     return report
 
 
@@ -1095,10 +1125,11 @@ def print_report(report: Mapping[str, Any]) -> None:
         print("chain (head first): " + " -> ".join(report["chain"]))
         links = ", ".join(f"{d:.2f}{'' if ok else '!'}" for d, ok in zip(report["links_m"], report["links_clear"]))
         print(f"links (m, ! = no line of sight): {links}   tail in Start Area: {report['tail_in_start_area']}")
+        print(f"tail certified by an anchor range: {report.get('tail_certified')}")
         for g in report["gate"]:
-            if isinstance(g, dict) and "succ" in g:
-                print(f"  {g['agent']}: last sweep t={g['t_sweep']} succ {g['succ']:.2f} m pred {g['pred']:.2f} m"
-                      f" -> {'ok' if g['ok'] else 'OUTSIDE THE GATE'}")
+            if isinstance(g, dict) and "inside" in g:
+                print(f"  {g['agent']}: last sweep t={g['t_sweep']} links inside the gate {g['inside']}"
+                      f" -> {'ok' if g['ok'] else 'FEWER THAN TWO'}")
             else:
                 print(f"  {g}")
 
