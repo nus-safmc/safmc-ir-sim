@@ -730,3 +730,47 @@ found nine defects, all now fixed:
 
 **379 tests.**
 
+
+---
+
+## C11 — the spec for tag-to-tag ranging and a relay trial
+
+The team's brief, 2026-09-17: *use UWB to form a relay, with tags on the drones and one
+anchor at the start line, via a potential-based method that converges towards a relay.*
+Research first, then a spec, then code — this checkpoint is the spec.
+
+**Built.** `docs/adr/0007-tag-to-tag-ranging-and-the-relay.md`; SPEC R-SENS-15 amended,
+**R-SENS-18** added, **A-19** registered; FIDELITY A-19 mirror and **F-33..F-36**;
+`constants.UWB_PEER_EXCHANGES_PER_SLOT` with its source line. No code behaviour changed.
+
+**Found while researching, and it reframes the brief.** In this rulebook a *relay* is the
+scoring chain of R-MISS-4 — landed drones ≤ 1.0 m apart with floor-level line of sight from
+a bonus-victim rescuer into the Start Area, worth ×2 — not a communications link. The docs
+say the real fleet has no drone-to-drone radio at all (`docs/02-hardware.md`). The team
+confirmed the scoring relay is the goal. It has never fired in any recorded run.
+
+**Found while auditing the platform for readiness.** Three blockers, none of them in the
+tag itself: `WorldScene` gives a sensor no sanctioned view of another drone's position
+(anonymous circles, `x, y` only, private arrays); `Runner._sense` drops every non-`ACTIVE`
+drone from the scene, and a relay is made of landed drones; and identity, draw-count and
+TDMA conventions all need restating for a reading whose targets are the fleet.
+`WorldScene.fleet` is the answer to the first two and is deliberately a second query
+beside the bodies, because a radio and a ray disagree about a parked airframe.
+
+**Found in the literature** (three threads, ~60 sources; the ADR's rejected-alternatives
+table is the digest). Range-only formation control almost always means *position* vectors
+with distance targets; a truly scalar-range chain is not rigid in the plane and the published
+fixes — dither, stop-and-go trilateration, extremum seeking — are slow and fragile under
+dropout. The design that survives is a one-dimensional spring chain along a *trail* a
+teammate flew, which fixes the geometry the ranges cannot, converges to equal spacing with
+both ends fixed, and needs the anchor for exactly one thing: certifying the tail is in the
+Start Area from a range rather than a pose. The closest validated system is Varadharajan et
+al.'s *Swarm Relays* (ICRA 2020, six Crazyflies and seven Kheperas), which is the same idea
+with spacing zones instead of a potential.
+
+**Verified.** Nothing executable yet. ASSERTED: A-19's arithmetic (5 Hz at ten drones and
+one anchor, 1 Hz at twenty-five) — a test pins it in C13. The trial's own requirements are
+T-1..T-5 in the ADR, written to be falsified in C15.
+
+**Open at this point.** All code: C12 the fleet query, C13 peer ranging, C14 the metric,
+C15 the example and its sweep, then the audit.

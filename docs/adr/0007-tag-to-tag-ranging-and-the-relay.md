@@ -1,0 +1,231 @@
+# ADR-0007: Tag-to-tag ranging, and a relay trial built on it
+
+**Status:** Accepted · **Date:** 2026-09-17
+
+## Context
+
+ADR-0006 gave the simulator a UWB tag that ranges to **anchors** — landmarks the team placed
+and surveyed. Nothing ranges drone to drone. The team now wants to use UWB to **form a
+relay**, with tags on the drones and one anchor at the start line.
+
+Three facts decide what that means here.
+
+**The relay is a scoring rule, not a radio link.** Booklet 3.3.7, implemented as R-MISS-4 and
+`mission.py:_find_relay`: a chain of **landed** drones from the drone that rescued a bonus
+victim to a drone inside the Start Area, every adjacent pair at most **1.0 m** apart with
+mutual floor-level line of sight, doubles the whole score. It has never fired in any recorded
+run, and no shipped policy can reach it (`REVIEW.md`). The docs are equally clear that the
+real fleet has no drone-to-drone radio at all — every drone is a WiFi station on one laptop
+(`docs/02-hardware.md`, `blackboard.py`) — so a UWB *communications* relay would be a new
+hardware claim with no requirement behind it. This record is about the scoring relay.
+
+**UWB is the right sensor for it, for one specific reason.** The flown firmware carries no
+estimator — a tag sighting hard-overwrites the frame offset (ADR-0003) — so "we landed 0.8 m
+apart" from two dead-reckoned poses is unverifiable in the room, where no navigation aid may
+stand. A DW3000 tag-to-tag double-sided exchange measures the scored quantity itself, at a
+line-of-sight standard deviation of about 5 cm (A-14), and two drones 0.8 m apart in a 2.4 m
+corridor are almost always in line of sight. The spacing target is 0.8 m, not the 5–10 m of a
+communications chain, which is why the through-wall terms (A-16, A-17) barely enter.
+
+**The platform does not let a sensor see another drone's tag.** Three things stand in the
+way, found by audit before this change:
+
+1. `WorldScene` exposes teammates only as anonymous ray-hittable circles — `x, y` only,
+   keyed by ir-sim id, with no altitude and no agent id — and its arrays are private
+   (`scene.py`). Reaching in violates R-SENS-15.
+2. `Runner._sense` feeds only `ACTIVE` robots to `refresh_drones` (`runner.py`). A relay is
+   made of **landed** drones, so a tag built on the current scene would go blind to exactly
+   the nodes it needs.
+3. Identity, determinism and timing conventions — string ids that the log refuses, a fixed
+   draw count per sweep (R-DET-2), a TDMA budget that grows with the fleet (F-32) — all need
+   restating for a reading whose targets are the fleet rather than the arena.
+
+## Decision
+
+**1. `WorldScene` gains one query, `fleet`, and the runner fills it every tick.** A frozen
+`Fleet(agent_ids, object_ids, xyz)` naming **every drone in the run, whatever its lifecycle**,
+in run order, with its true `(x, y, z)`. `refresh_fleet(entries, cache_key)` is called by the
+runner once per tick beside `refresh_drones`, from the same post-step state. It is a second
+method rather than a widening of `refresh_drones` because the two answer different questions:
+`refresh_drones` builds *bodies* under the rule "what can kill you is what you can see", and a
+landed drone is not a body (the runner makes it `unobstructed`); a radio does not care whether
+the airframe under it is flying, parked or wrecked. The `Fleet` type is banned from
+`Observation` by the R-POL-4 walk, as `Landmark` and `WorldScene` are. What a sensor *does*
+with the fleet is R-SENS-11's review obligation: a sensor that returned `fleet.xyz` would be a
+leak the walk cannot see, exactly as an anchor sensor that returned every landmark would.
+
+**2. `UWBTag` ranges to peers when asked: `UWBConfig(peers=True)`, off by default.** One radio,
+one config, one TDMA budget — a second sensor would let a run range to anchors at one rate
+and to peers at another on hardware that cannot. With `peers` on, the same `UWBRanges` reading
+gains two fields: `peer_ids`, every agent id in the run in run order, fixed for the run, the
+tag's own id included; and `peer_ranges_m`, one reported range per peer, `inf` for the tag
+itself and wherever nothing was heard. With `peers` off both are empty and **every existing
+run reproduces byte for byte**, because the peer draws come after the anchor draws in the
+tag's generator and there are none of them.
+
+**3. The physics is the ADR-0006 model applied to a second tag.** The true range is the
+three-dimensional distance between the two drones' true positions — a hovering drone 0.8 m
+from a landed one reads 0.94 m, and a policy must know that. Line of sight is the structural
+segment test at the **lower** of the two altitudes; every wall and pillar an interior path
+can cross is 2.0 m, so below the 1.4 m ceiling the answer does not depend on which altitude
+is chosen, and the lower one is the pessimistic direction if it ever does (F-34). Airframes
+and markers are transparent, as R-SENS-17 already says for anchors. Noise, bias, dropout and
+outliers are A-14..A-18 unchanged; nothing about a peer link is measured differently from an
+anchor link in any source this repository has, and inventing a difference would dress a guess
+in precision.
+
+**4. The sweep rate now has a peer term, and it is pessimistic on purpose.**
+`peer_sweep_rate_hz(n_tags, n_anchors)`: a tag with `A` anchors and `P − 1` peers makes
+`A + P − 1` exchanges in its own slot; a shipping firmware ranges to eight per 10 ms slot
+(`UWB_MAX_ANCHORS_FIRMWARE`, `UWB_SLOT_S`), so it needs `ceil((A + P − 1) / 8)` slots and the
+superframe is `n_tags` of them. Ten drones and one anchor: 5 Hz. Twenty-five and one: **1 Hz**.
+That is A-19, and its two halves are both assumptions: that every tag initiates to every
+other (a symmetric protocol needs half the exchanges) and that the exchange budget is the AT
+firmware's 1.25 ms rather than the ~0.5 ms of airtime. A broadcast swarm-ranging protocol
+measured 16 Hz per pair at 13–14 drones on a DW1000 (Shan et al., INFOCOM 2021) — an order of
+magnitude better than the default here. The default is the shipping firmware because that is
+what the team would fly first; F-33 records the gap. Like `sweep_rate_hz`, it is a helper the
+scenario author calls and the runner never applies (F-32).
+
+**5. The log gains `peer_ranges_m` shaped `(ticks, agents, agents)`.** Column `j` is the
+`j`-th entry of the header's `agents` list. Peer ids are not stored, for the reason anchor ids
+are not: the log holds numeric arrays only, and the order is already in the header.
+
+**6. A metric says when the relay formed, not only whether.** `compute_metrics` gains
+`time_to_relay_s` and `relay_chain_drones`, computed from `states.npz` and the header arena by
+the mission's own adjacency rule at every tick a drone landed. Until now `relay_formed` was a
+single bit read from the footer.
+
+**7. The relay controller is an example, not a policy.** `policies/__init__.py` states the
+rule: a strategy written by the people who wrote the simulator is not a baseline. The trial
+lives in `examples/06_uwb_relay.py`, imports what it needs, and is graded from its own log.
+
+## The trial: an elastic band along the head's trail
+
+The design the trial implements, so that it can be audited against this record rather than
+against the code. Notation: node `0` is the anchor, nodes `1..n` are relay drones, node `n+1`
+is the **head** — the drone landed on a bonus victim. `r_{i,j}` is the *measured* UWB range
+between nodes, `d*` the rest spacing (0.8 m: the 1.0 m rule less four A-14 standard
+deviations), `s_i` node `i`'s arclength along the **trail**.
+
+**The trail.** Every searcher publishes a breadcrumb — its pose and its ring's minimum range
+— each time it has moved 0.25 m. A relay accumulates every searcher's crumbs from tick 0 and
+**cuts loops**: when a new crumb comes within 0.5 m of an earlier crumb, and the chord is
+shorter than the ring clearance recorded at *both* crumbs, the trail between them is dropped.
+The chord then lies inside a disc the head's own ring saw empty, so it is flyable and in line
+of sight without a map. The trail a relay follows for head `h` is: the anchor, then along
+`y = y_anchor` to below `h`'s start-line crossing, then `h`'s loop-cut crumbs north of the
+line. Its length `L` decides the cost, `n_needed = ceil(L / 0.9)`.
+
+**The potential.** Each relay descends a one-dimensional potential on measured ranges,
+
+    U_i = ½ k (r_{i,i−1} − d*)² + ½ k (r_{i,i+1} − d*)²
+    ṡ_i = −k (r_{i,i−1} − d*) + k (r_{i,i+1} − d*)
+
+with `r_{1,0}` the anchor range and `r_{n,n+1}` the range to the landed head, each reduced to
+the horizontal using the relay's own altitude and the neighbour's known one (0 m landed,
+cruise otherwise). Both ends are fixed, so the chain converges to **equal spacing
+`L / (n + 1)`** whatever `d*` is — a discrete heat equation whose slowest mode decays as
+`exp(−k π² t / (n+1)²)` — and the trail parametrisation removes the joint angles a
+range-only chain cannot otherwise fix (a path graph is not rigid in the plane). The
+two-dimensional command is the trail point at `s_i`, tracked with a proportional velocity
+saturated at cruise, plus the wasp_v5 linear-falloff repulsion from the ring below 0.5 m.
+
+**Two deployments, one controller.** *Dispatch*: relays wait on the ground at their grid
+positions until a head has landed and its trail is known, choose the head whose trail costs
+fewest drones, launch in single file — highest `s` first — to their equal-spacing targets, and
+let the band trim. *Train*: the relays follow the lead's growing trail from take-off at equal
+spacing between the anchor and the lead, entering the chain one at a time as `L` grows past
+`(m + 1) d*`, and hold when the lead lands as head. The lead in both modes lands only on a
+bonus victim; the other searchers are unmodified `wasp_v5` with the mission wrapper.
+
+**The landing gate is UWB alone.** A relay declares itself in place when both neighbour
+ranges are within 0.10 m of the horizontal-corrected target for three consecutive fresh
+sweeps; relay 1 additionally requires its horizontal anchor range to be at most 0.9 m, which
+with the anchor at `y = 5.0` puts it at `y ≤ 5.9` — **inside the Start Area by
+measurement**, not by pose. When every relay's `in_place` is true in the same blackboard
+snapshot, every relay lands on the same tick.
+
+**What the trial must show (falsifiable, audited in C15).**
+
+- **T-1** With one bonus victim placed 3 m north of the anchor column in the Known Search
+  Area and no other targets, the dispatch trial forms a scoring relay on the seed under test
+  (`relay_formed` true, `time_to_relay_s` finite).
+- **T-2** Every adjacent pair in the recorded chain is at most 1.0 m apart at floor level and
+  the tail is in the Start Area — checked offline from `states.npz` by the mission's rule, not
+  by the example's own bookkeeping.
+- **T-3** Every relay that landed did so with its last fresh `peer_ranges_m` to both chain
+  neighbours finite and within the gate — the log, not the policy, says the gate held.
+- **T-4** With `peers=False` the example refuses to run: the controller must not fall back to
+  pose for spacing silently.
+- **T-5** The sweep over seeds and `n_relay` reports, per cell, `P(relay)`, mean score with
+  and without the relay drones searching instead, crashes, and take-off waves — and the
+  write-up states the conditions (ground-truth pose for trail following, perfect blackboard
+  for crumbs and consensus, A-14..A-19 unmeasured).
+
+## Rationale
+
+1. **Positions of every tag, not bodies of the active ones.** The alternative — extend the
+   drone scene with ids and altitudes and include terminal drones — would put landed drones
+   back into the ring's view and the collision check, undoing PR #8 and the "what can kill
+   you is what you can see" rule. A radio and a ray disagree about a parked airframe, and the
+   two views should be two methods.
+2. **Every lifecycle, including crashed.** A tag is a radio, not a rotor; the electronics on
+   a drone that clipped a wall keep answering. Reporting a range to a crashed drone leaks
+   nothing a policy could not read from its last published pose, and dropping it would model
+   a failure mode nobody has measured.
+3. **Self is `inf`, and self is in the list.** A square `(agents, agents)` array whose column
+   order is the header's agent list is recoverable from the log with no side table; the tag
+   cannot range to itself, and `inf` already means "no measurement".
+4. **One flag on one sensor.** The slot budget is shared between anchors and peers on the real
+   radio (A-19). Two sensors could be configured to contradict that.
+5. **The trail is a searcher's flown path, not a plan.** The room's layout is unknown by rule
+   and no map exists on the drones; a relay that plans needs one. A path a teammate flew is
+   flyable by construction, and cutting loops against the ring's own clearance keeps it that
+   way without a map. The cost is that a Lévy walker's trail is longer than the shortest
+   path, which is what the `n_needed` number reports.
+6. **Equal spacing, not `d*` spacing.** With both ends fixed the spring chain's equilibrium is
+   equal spacing regardless of rest length; `d*` only sets the gate. Reeling out at exactly
+   `d*` would detach the tail from the Start Area whenever `L > n d*`, while equal spacing
+   keeps the relay feasible up to `L = (n+1) × 1.0 m`.
+7. **The anchor certifies the tail.** The one place a pose claim would otherwise decide a
+   scoring predicate — "the tail is in the Start Area" — is the one place a single range can
+   settle it, because 0.9 m of horizontal range from an anchor at `y = 5.0` cannot reach
+   `y = 6.0`. That is the whole reason the anchor is in the trial.
+
+## Consequences
+
+- `sensors/scene.py`: `Fleet`, `WorldScene.fleet`, `refresh_fleet`. `runner.py`: one call.
+  `sensors/uwb.py`: `peers`, `peer_ids`, `peer_ranges_m`, `peer_sweep_rate_hz`,
+  `peer_line_of_sight`. `constants.py`: A-19 (`UWB_PEER_EXCHANGES_PER_SLOT`, the firmware's
+  eight). `metrics.py`: `time_to_relay_s`, `relay_chain_drones`, and `relay_timeline`.
+  `examples/06_uwb_relay.py`. SPEC: R-SENS-15 amended, **R-SENS-18** added, A-19 registered.
+  FIDELITY: F-33..F-36.
+- **Cost:** a `peers=True` run's log grows by `ticks × agents²` float32 — 12 000 × 625 × 4 B =
+  30 MB at 25 drones over 600 s, before compression. `Recorder(sensor_every=...)` thins it.
+- **Cost:** the R-POL-4 walk gains a banned type; a reading that carried a `Fleet` is refused.
+- **Cost:** results on the relay trial are conditional on more than the tag's five numbers.
+  Trail following and role assignment run on ground-truth pose; crumbs and the landing
+  consensus run on the perfect blackboard (ADR-0003). The UWB-gated spacing and the tail's
+  anchor certification are the two decisions that survive those caveats, and the write-up
+  says so (F-36).
+- **Cost:** the two-wave take-off rule (R-MISS-6) binds on any deployment that feeds relays
+  through one trail entry in single file: at 0.8 m and cruise speed a drone crosses the line
+  every 1.8 s, so more than about five relays span more than one 10 s window. The trial
+  reports the wave count rather than choreographing an abreast crossing; that is a second
+  trial.
+
+## Rejected alternatives
+
+| Option | Why not |
+|---|---|
+| Extend `refresh_drones` with ids, altitude and terminal drones | Puts landed drones back in the ring's view and the collision set; a radio's view and a ray's view are different questions |
+| A separate `UWBPeerConfig` sensor | Two rate settings for one radio; the slot budget is shared on hardware (A-19) |
+| Range only to `ACTIVE` peers | The relay is made of landed drones; blind to the nodes it needs |
+| Exclude self from `peer_ids` | Column order would depend on the reader; a square array keyed by the header's agent list needs no side table |
+| A per-peer line-of-sight or quality flag | Tells the policy what no tag can know (ADR-0006 rationale 1) |
+| A comms-range `Blackboard` in the same change | Nothing in the rules or the hardware asks for a comms relay; R-SEAM-2 work stays separate |
+| A free-space range-only potential (dither, stop-and-go, extremum seeking) | A path graph has `n − 2` free joint angles under range-only control; the trail fixes them, and the literature's fixes are slow and jittery under 10 % dropout |
+| Position-based potential on ground-truth pose, UWB as a gate only | Proves nothing about UWB; the straight-line pull stalls on walls |
+| Range-only relative-localisation EKF first | The right long-term seam (a UWB `PoseSource`), but a converged, stationary chain is its unobservable case; second trial |
+| Ship the relay controller in `policies/` | `policies/__init__.py`: an invented strategy is not a baseline |
