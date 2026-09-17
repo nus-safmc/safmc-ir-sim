@@ -262,16 +262,18 @@ something this sensor can space. Three things to know before using it:
 - **The rate falls hard with the fleet.** A tag now makes `anchors + drones − 1` exchanges
   in its own slot, and a shipping firmware fits eight per 10 ms (**A-19**), so
   `peer_sweep_rate_hz(n_drones, n_anchors)` gives **5 Hz at ten drones and one anchor, 1 Hz
-  at twenty-five**. That is the naive every-tag-initiates schedule on stock firmware, an
-  order of magnitude under what a broadcast swarm-ranging protocol has measured on a DW1000
-  (F-33). Pessimistic on purpose; it is a firmware question, and the one to measure first for
-  anything built on peer ranges.
+  at twenty-five**. That is the naive every-tag-initiates schedule on stock firmware, about
+  four times under what a broadcast swarm-ranging protocol measured on a DW1000 at 13–14
+  drones and further under it as the fleet grows (F-33). Pessimistic on purpose; it is a
+  firmware question, and the one to measure first for anything built on peer ranges.
 - **Off is exactly off.** With `peers=False` the reading, the noise stream and the log are
   what they were before the option existed; with it on, the anchor noise is still the same
   run, because the peer draws come from a child generator spawned from the tag's own.
 
 The model below applies unchanged to a peer link, with line of sight tested at the lower of
-the two altitudes (F-34). The log gains `peer_ranges_m` shaped `(ticks, agents, agents)`,
+the two altitudes — which matters only at a pillar's 0.15 m base, and there agrees with the
+scorer's floor-level rule (F-34). The peer stream is a function of the seed *and the fleet
+size*: adding a drone changes every tag's peer noise, the anchor noise stays put. The log gains `peer_ranges_m` shaped `(ticks, agents, agents)`,
 column `j` being the header's `j`-th agent, and the diagonal is always `inf`.
 
 ### The model

@@ -341,8 +341,11 @@ policy.
 > bodies. It exists for a sensor that models a device every airframe carries and every other
 > airframe answers — a ranging radio — and it is a different question from the bodies: a
 > landed drone is not a body to a ray (the runner makes it `unobstructed`) but its tag still
-> answers. `Fleet` MUST be banned from `Observation` by the R-POL-4 walk. What a sensor
-> reports *from* the fleet is R-SENS-11's review obligation, exactly as for the landmark list.
+> answers. A `Fleet` MUST be refused inside a reading by the runner's build-time check
+> (R-SENS-12), as MUST a `WorldScene`, a `Landmark`, a `TrueState` or a `Sensor`, and MUST be
+> banned from `Observation` by the R-POL-4 walk. What a sensor reports *from* the fleet is
+> R-SENS-11's review obligation, exactly as for the landmark list: a copy of its numbers is
+> indistinguishable from a measurement.
 
 **R-SENS-16** *(added with ADR-0005)* A sensor MAY be recorded by returning fixed-shape arrays
 from `record()`. The recorder MUST fix each sensor's row keys and shapes from its first
@@ -397,8 +400,12 @@ parameters and its draw discipline MUST be those of R-SENS-17, with four draws p
 sweep from a **child generator spawned from the tag's own at build** (the R-DET-3
 discipline), so that the anchor stream is identical for the whole run whether `peers` is on
 or off, and the peer stream does not depend on the geometry or on any drone's lifecycle. The
-package MUST provide `peer_sweep_rate_hz(n_tags, n_anchors)` computing the sweep rate under
-the slot budget of A-19; the runner MUST NOT apply it. The sensor MUST record
+peer stream is a function of the seed **and the fleet size**: four draws per fleet member per
+sweep means adding a drone changes every tag's peer noise from the first sweep on, which
+R-DET-3's per-agent derivation does not prevent and which a comparison across fleet sizes
+must not mistake for a behavioural difference. The package MUST provide
+`peer_sweep_rate_hz(n_tags, n_anchors)` computing the sweep rate under the slot budget of
+A-19; the runner MUST NOT apply it. The sensor MUST record
 `peer_ranges_m` shaped `(ticks, agents, agents)` where column `j` is the `j`-th entry of the
 header's `agents` list (R-OBS-3).
 
@@ -557,7 +564,7 @@ place, not a literal scattered through the code.
 | A-16 | DW3000 through-wall bias and spread | +0.15 m, 0.40 m std | No DW3000 study publishes a bias in this form; the aggregate is 46.7 cm mean absolute error (Ember et al. 2024). The spread is still a DW1000 number (TELFOR 2017, Table 1) — the model's weakest joint, F-28. |
 | A-17 | DW3000 through-wall dropout probability | 0.10 | No published rate for either part. Secure 802.15.4z ranging drops far more. |
 | A-18 | DW3000 outlier probability and size | 0 (off), up to 1.5 m | The heavy positive tail is documented, its frequency is not; off until measured, and it is the gap in F-30. |
-| A-19 | DW3000 tag-to-tag ranging budget | 8 exchanges per 10 ms tag slot, every tag initiating to every other | The per-slot count is a shipping AT firmware's anchor cap read as an exchange budget (1.25 ms each, against ~0.5 ms of DS-TWR airtime); the every-tag-initiates protocol is the naive one (a symmetric protocol halves it). Ten drones and one anchor give 5 Hz, twenty-five give 1 Hz. A broadcast swarm-ranging protocol measured 16 Hz per pair at 13–14 drones on a DW1000 (Shan et al., INFOCOM 2021) — an order of magnitude better than this default (F-33). No DW3000 swarm-ranging measurement exists. |
+| A-19 | DW3000 tag-to-tag ranging budget | 8 exchanges per 10 ms tag slot, every tag initiating to every other | The per-slot count is a shipping AT firmware's anchor cap read as an exchange budget (1.25 ms each, against ~0.5 ms of DS-TWR airtime); the every-tag-initiates protocol is the naive one (a symmetric protocol halves it). Ten drones and one anchor give 5 Hz, twenty-five give 1 Hz. A broadcast swarm-ranging protocol measured 16 Hz per pair at 13–14 drones on a DW1000 (Shan et al., INFOCOM 2021), against 3.6–3.9 Hz from this budget at that fleet size — about four times better where it was measured, and the gap grows with the fleet because the naive schedule is quadratic in the fleet and a broadcast is linear (F-33). No DW3000 swarm-ranging measurement exists. |
 | ~~A-6~~ | ~~Known Search Area depth~~ | 14.0 m | **Retired — not an assumption.** The booklet v1 and v2 Play Field Element tables are character-identical and neither contains a Known Search Area row, so the figure was never published and never withdrawn. It is forced by 20 - 6. |
 
 *A-11 to A-13 are unused: they were briefly held by the UWB assumptions on an unmerged branch, which renumbered to A-14..A-18 when PR #5 took A-9 and A-10 first. An id is never reused.*

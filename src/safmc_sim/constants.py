@@ -247,8 +247,9 @@ exchange, against ~0.51 ms of DS-TWR airtime (F-23) -- and the protocol behind i
 naive one: every tag initiates to every other, so each pair is ranged twice per superframe.
 Both halves are assumptions. A symmetric schedule halves the count; a broadcast
 swarm-ranging protocol (Shan et al., INFOCOM 2021) measured 16 Hz per pair at 13-14 drones
-on a DW1000, about ten times what this budget gives at that fleet size. Ten drones and one
-anchor: 5 Hz. Twenty-five and one: 1 Hz. Pessimistic on purpose, because it is the firmware
+on a DW1000, about four times what this budget gives at that fleet size (3.6-3.9 Hz), and
+the gap widens with the fleet because this schedule is quadratic in it and a broadcast is
+linear. Ten drones and one anchor: 5 Hz. Twenty-five and one: 1 Hz. Pessimistic on purpose, because it is the firmware
 the team would fly first, and because over-estimating a ranging rate is the mistake that
 survives to the live run (F-33). See ``uwb.peer_sweep_rate_hz``."""
 

@@ -101,16 +101,20 @@ sample whatever the geometry, so the noise stream is a function of the seed alon
 **A peer range is the same model applied to a second tag.** The true range is the
 three-dimensional distance between the two drones' true positions -- a hovering drone 0.8 m
 from a landed one reads 0.94 m, and a policy that spaces a chain must know that. Line of
-sight is the same structural segment test at the **lower** of the two altitudes: every wall
-and pillar an interior path can cross is 2.0 m, so below the ceiling the choice changes no
-answer, and the lower one is the pessimistic direction if it ever does (F-34). Airframes
-and markers are transparent, as they are to the anchor link. The peer draws come from a
-**child generator spawned from the tag's own at build** (the R-DET-3 discipline), so the
-anchor noise is the same whether ``peers`` is on or off -- not merely within a sweep but for
-the whole run -- and there are four draws per peer per sweep whether or not that peer is in
-reach, flying, or the tag itself (whose slot is always ``inf``). Nothing in any source this
-repository has read measures a tag-to-tag link differently from a tag-to-anchor one, so
-nothing here does either.
+sight is the same structural segment test at the **lower** of the two altitudes. Walls and
+pillar shafts are 2.0 m, so for them the altitude does not matter below the ceiling; a
+pillar's 0.15 m base does -- it obstructs a landed tag's link and not a hovering one's --
+and the scorer's own floor-level line of sight counts that same base, so the lower altitude
+is what makes the tag agree with the rule (F-34). Airframes and markers are transparent, as
+they are to the anchor link. The peer draws come from a **child generator spawned from the
+tag's own at build**, so the anchor noise is the same whether ``peers`` is on or off -- not
+merely within a sweep but for the whole run -- and there are four draws per fleet member per
+sweep whether or not that peer is in reach, flying, or the tag itself (whose slot is always
+``inf``). The other side of that coin: the peer stream is a function of the seed **and the
+fleet size**, so adding a drone changes every tag's peer noise from the first sweep, which
+R-DET-3's per-agent derivation does not prevent. Nothing in any source this repository has
+read measures a tag-to-tag link differently from a tag-to-anchor one, so nothing here does
+either.
 
 Every anchor is measured in the same tick, which the radio makes reasonable: a DS-TWR
 exchange is three frames of about 170 us, so the whole sweep lives inside one tag's TDMA
@@ -122,8 +126,9 @@ nothing does it automatically, because a sensor config knows nothing about the f
 (F-32). **With peers on, the slot itself grows**: a tag now makes ``anchors + tags - 1``
 exchanges in its own slot, and a shipping firmware fits eight per 10 ms (A-19), so
 :func:`peer_sweep_rate_hz` gives 5 Hz at ten drones and one anchor and **1 Hz at
-twenty-five** -- an order of magnitude under what a broadcast swarm-ranging protocol has
-measured on a DW1000 (F-33). Pessimistic on purpose; measure it.
+twenty-five** -- about four times under what a broadcast swarm-ranging protocol measured on
+a DW1000 at 13-14 drones, and further under it as the fleet grows (F-33). Pessimistic on
+purpose; measure it.
 
 What is not modelled, and matters
 ---------------------------------
@@ -267,8 +272,10 @@ def peer_sweep_rate_hz(
     every other, so each pair is ranged twice per superframe (a symmetric schedule halves
     it), and the exchange budget is the AT firmware's 1.25 ms rather than the ~0.5 ms of
     airtime. A broadcast swarm-ranging protocol measured 16 Hz per pair at 13-14 drones on a
-    DW1000 -- ten times this default at that fleet size (F-33). The pessimistic figure is the
-    default because it is the firmware the team would fly first.
+    DW1000, against 3.6-3.9 Hz from this budget at that fleet size -- about four times, and
+    the gap widens with the fleet because this schedule is quadratic in it and a broadcast is
+    linear (F-33). The pessimistic figure is the default because it is the firmware the team
+    would fly first.
 
     Like :func:`sweep_rate_hz`, this is a helper for choosing :attr:`UWBConfig.rate_hz`, not
     something the runner applies, and the answer must still divide the tick rate (R-TIME-3).
@@ -472,11 +479,12 @@ def line_of_sight(scene: RayScene, tag_xy: np.ndarray, anchor_xyz: np.ndarray, z
 def peer_line_of_sight(scene: RayScene, tag_xyz: np.ndarray, peer_xyz: np.ndarray) -> np.ndarray:
     """``(P,)`` bool: is the straight path from the tag to each peer's tag clear of ``scene``?
 
-    Tested at the **lower** of the two altitudes, pair by pair (R-SENS-18). Below the ceiling
-    every crossable structure is taller than either tag, so in a generated arena the choice
-    changes nothing; where it could, the lower altitude over-reports obstruction, which is the
-    safe direction (F-34). Pairs are grouped by their test altitude so a fleet costs one
-    segment cast per distinct altitude rather than one per peer.
+    Tested at the **lower** of the two altitudes, pair by pair (R-SENS-18). Walls and pillar
+    shafts are taller than either tag, so for them the choice changes nothing; a pillar's
+    0.15 m base obstructs a landed tag and not a hovering one, and the scorer's floor-level
+    line of sight counts it too, so the lower altitude is the one that agrees with the rule
+    (F-34). Pairs are grouped by their test altitude so a fleet costs one segment cast per
+    distinct altitude rather than one per peer.
     """
     tag = np.asarray(tag_xyz, dtype=float).reshape(3)
     peers = np.asarray(peer_xyz, dtype=float).reshape(-1, 3)

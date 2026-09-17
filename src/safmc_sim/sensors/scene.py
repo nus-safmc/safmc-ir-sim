@@ -30,8 +30,10 @@ it is flying, parked or wrecked. So :attr:`WorldScene.fleet` names every drone i
 whatever its lifecycle, with its agent id and true position, and is refreshed by the runner
 from the same post-step state as the bodies (R-SENS-15 as amended by ADR-0007). It is a
 view for a sensor to *measure against*, never to report: a sensor that returned ``fleet.xyz``
-would hand a policy every teammate's true position, which R-SENS-11 forbids and the R-POL-4
-walk cannot see. The :class:`Fleet` type itself is banned from an observation.
+would hand a policy every teammate's true position, which R-SENS-11 forbids and no walk can
+tell from a measured one. The :class:`Fleet` object itself is refused inside a reading by the
+runner's build-time check (``check_reading_is_immutable``) and by the R-POL-4 walk; a copy of
+its numbers is not, and that is the review obligation.
 """
 
 from __future__ import annotations
@@ -67,8 +69,8 @@ class Fleet:
 
     This is ground truth about *other* drones, which is exactly what a policy must never
     receive (R-POL-3). It exists so a sensor can compute what a device would measure against
-    the fleet -- a range, a bearing -- and report that. Reporting the array itself is a
-    leak, and the type is banned from an observation so it cannot travel inside a reading.
+    the fleet -- a range, a bearing -- and report that. Reporting the object itself is refused
+    at build; reporting a copy of ``xyz`` would not be, and is the leak review has to catch.
     """
 
     agent_ids: tuple[str, ...] = ()

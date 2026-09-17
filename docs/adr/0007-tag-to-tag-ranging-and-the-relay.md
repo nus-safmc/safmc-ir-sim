@@ -68,9 +68,10 @@ failed by the next one, which a test caught before this record was committed.)
 **3. The physics is the ADR-0006 model applied to a second tag.** The true range is the
 three-dimensional distance between the two drones' true positions — a hovering drone 0.8 m
 from a landed one reads 0.94 m, and a policy must know that. Line of sight is the structural
-segment test at the **lower** of the two altitudes; every wall and pillar an interior path
-can cross is 2.0 m, so below the 1.4 m ceiling the answer does not depend on which altitude
-is chosen, and the lower one is the pessimistic direction if it ever does (F-34). Airframes
+segment test at the **lower** of the two altitudes; walls and pillar shafts are 2.0 m, so for
+them the altitude does not matter below the ceiling, while a pillar's 0.15 m base obstructs a
+landed tag's link and not a hovering one's — and the scorer's own floor-level line of sight
+counts that base, so the lower altitude is what makes the tag agree with the rule (F-34). Airframes
 and markers are transparent, as R-SENS-17 already says for anchors. Noise, bias, dropout and
 outliers are A-14..A-18 unchanged; nothing about a peer link is measured differently from an
 anchor link in any source this repository has, and inventing a difference would dress a guess
@@ -84,9 +85,11 @@ superframe is `n_tags` of them. Ten drones and one anchor: 5 Hz. Twenty-five and
 That is A-19, and its two halves are both assumptions: that every tag initiates to every
 other (a symmetric protocol needs half the exchanges) and that the exchange budget is the AT
 firmware's 1.25 ms rather than the ~0.5 ms of airtime. A broadcast swarm-ranging protocol
-measured 16 Hz per pair at 13–14 drones on a DW1000 (Shan et al., INFOCOM 2021) — an order of
-magnitude better than the default here. The default is the shipping firmware because that is
-what the team would fly first; F-33 records the gap. Like `sweep_rate_hz`, it is a helper the
+measured 16 Hz per pair at 13–14 drones on a DW1000 (Shan et al., INFOCOM 2021), against
+3.6–3.9 Hz from this budget at that fleet size — about four times, and the gap widens with
+the fleet because the naive schedule is quadratic in it and a broadcast is linear. The
+default is the shipping firmware because that is what the team would fly first; F-33 records
+the gap. Like `sweep_rate_hz`, it is a helper the
 scenario author calls and the runner never applies (F-32).
 
 **5. The log gains `peer_ranges_m` shaped `(ticks, agents, agents)`.** Column `j` is the
@@ -94,9 +97,11 @@ scenario author calls and the runner never applies (F-32).
 are not: the log holds numeric arrays only, and the order is already in the header.
 
 **6. A metric says when the relay formed, not only whether.** `compute_metrics` gains
-`time_to_relay_s` and `relay_chain_drones`, computed from `states.npz` and the header arena by
-the mission's own adjacency rule at every tick a drone landed. Until now `relay_formed` was a
-single bit read from the footer.
+`time_to_relay_s` — the first tick at which a chain existed, from `states.npz` and the header
+arena by the mission's own adjacency rule replayed at every tick a drone landed — and
+`relay_chain_drones`, the length of the footer's final chain, which can be a different chain
+from the first one (a later bonus rescuer landing beside the tail shortens it). Until now
+`relay_formed` was a single bit read from the footer.
 
 **7. The relay controller is an example, not a policy.** `policies/__init__.py` states the
 rule: a strategy written by the people who wrote the simulator is not a baseline. The trial

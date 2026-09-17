@@ -719,7 +719,28 @@ def test_switching_peers_on_leaves_the_anchor_stream_untouched_and_draws_four_pe
     for tick in range(3):
         assert t_near.sample(me, near, tick).peers_heard.sum() == 2
         assert t_far.sample(me, far, tick).peers_heard.sum() == 0
+    # The CHILD generators, which is where the peer draws come from: an auditor showed a
+    # mutant drawing extra child values per out-of-reach peer passed a parent comparison.
+    assert t_near._peer_rng.random() == t_far._peer_rng.random()
     assert t_near.rng.random() == t_far.rng.random()
+
+
+def test_the_peer_stream_depends_on_the_fleet_size_and_the_anchor_stream_does_not():
+    """R-SENS-18 says so out loud: four draws per fleet member per sweep, so adding a drone
+    moves every tag's peer noise from the first sweep on. Not a defect -- a fact a comparison
+    across fleet sizes must not mistake for behaviour."""
+    def first_draws(n):
+        runner = Runner(RunConfig(seed=5, policy="sdlw", n_drones=n, duration_s=2.0, record=False,
+                                  arena_config=ArenaConfig(landmarks=START_ANCHORS),
+                                  sensors=(ToFConfig(), UWBConfig(peers=True)))).build()
+        try:
+            tag = runner.agents[0].sensors[1]
+            return tag.rng.random(), tag._peer_rng.random()
+        finally:
+            runner._teardown()
+    ten, eleven = first_draws(10), first_draws(11)
+    assert ten[0] == eleven[0], "the anchor stream of drone_00 is untouched by an eleventh drone"
+    assert ten[1] != eleven[1], "its peer stream is not"
 
 
 def test_the_peer_sweep_rate_grows_the_slot_with_the_fleet_and_the_anchors():

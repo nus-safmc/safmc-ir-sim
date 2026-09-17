@@ -260,6 +260,25 @@ def read_only(array: np.ndarray) -> np.ndarray:
 _IMMUTABLE_SCALARS = (str, bytes, int, float, bool, complex, type(None), np.generic)
 
 
+def _world_object_name(obj: Any) -> str | None:
+    """The name of the world object ``obj`` is, or None if it is not one.
+
+    These are the things a sensor measures *against* and must never hand on: the fleet (every
+    teammate's true position), the scene, a landmark (a true position with an id), the true
+    state, and a sensor. The R-POL-4 walk bans them from a hand-built observation in a test;
+    this bans them from a real reading at build, which an auditor showed was the only place
+    the ban could bite -- a sensor that returned ``world.fleet`` passed the immutability check
+    and gave a policy the whole fleet. Imported lazily because ``scene`` imports this module.
+    """
+    from ..world.landmark import Landmark
+    from .scene import Fleet, WorldScene
+
+    for cls in (Fleet, WorldScene, Landmark, TrueState, Sensor):
+        if isinstance(obj, cls):
+            return cls.__name__
+    return None
+
+
 def check_reading_is_immutable(sensor_name: str, reading: Any, path: str = "reading") -> None:
     """Refuse a reading a policy could write into. Runs once, on a sensor's first sample.
 
@@ -270,6 +289,13 @@ def check_reading_is_immutable(sensor_name: str, reading: Any, path: str = "read
     """
     if isinstance(reading, _IMMUTABLE_SCALARS):
         return
+    leak = _world_object_name(reading)
+    if leak is not None:
+        raise ConfigError(
+            f"sensor {sensor_name!r}: {path} is a {leak}, which is the world itself, not a "
+            f"measurement of it. A reading may carry what the device would report -- a range, "
+            f"a bearing, an id -- never the object it measured against (R-POL-3, R-SENS-11)."
+        )
     if isinstance(reading, np.ndarray):
         if reading.dtype == object:
             raise ConfigError(

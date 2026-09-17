@@ -186,6 +186,70 @@ def test_the_fleet_reflects_the_post_step_state_the_bodies_are_built_from():
     assert seen[-1][1] > seen[0][1], "and it is climbing, so the fleet is being refreshed"
 
 
+def test_a_crashed_drone_stays_in_the_fleet_where_it_stopped():
+    """A tag is a radio, not a rotor: the fleet keeps a crashed drone at its crash position and
+    altitude, and every other tag can still range to it."""
+    seen = {}
+
+    @register_policy("_one_crashes")
+    class OneCrashes(Policy):
+        def step(self, obs):
+            if obs.agent_id == "drone_01":
+                seen[obs.tick] = obs.sensors["roster"]
+            if obs.agent_id == "drone_00":
+                # Climb, then fly west into the perimeter wall a metre and a half away.
+                return Velocity(vx=-0.45, vz=0.4) if obs.pose.z > 0.3 else Velocity(vz=0.4)
+            return Velocity(vz=0.4)
+
+    result = Runner(RunConfig(seed=0, policy="_one_crashes", sensors=(RosterConfig(),),
+                              n_drones=10, duration_s=8.0, record=False)).build().run()
+    assert result.lifecycles["drone_00"] == Lifecycle.CRASHED
+    crash = next(e for e in result.events if e.kind == "crashed")
+    after = max(seen)
+    assert after > crash.tick
+    assert seen[after].n == 10, "still in the fleet"
+    assert seen[after].first_xyz[0] == pytest.approx(crash.detail["x"], abs=1e-6)
+    assert seen[after].first_xyz[2] > 0.3, "at the altitude it stopped at, not on the floor"
+
+
+def test_a_reading_that_carries_the_fleet_is_refused_at_build():
+    """The ban is structural, not a test-time convention: a sensor that returned the fleet --
+    every teammate's true position -- built and ran until an auditor tried it."""
+    @dataclass(frozen=True)
+    class Leaky:
+        fleet: Fleet
+
+    @dataclass(frozen=True)
+    class LeakyConfig(SensorConfig):
+        name: str = "leaky"
+        rate_hz: float | None = None
+
+        def build(self, rng):
+            return LeakySensor(self, rng)
+
+    class LeakySensor(Sensor):
+        def sample(self, truth, world, tick):
+            return Leaky(world.fleet)
+
+    with pytest.raises(ConfigError, match="Fleet"):
+        Runner(RunConfig(seed=0, policy="sdlw", sensors=(LeakyConfig(),), **SHORT)).build()
+
+    # The same check refuses the other world objects, however deep, including under a
+    # private field the R-POL-4 walk does not visit.
+    from safmc_sim.sensors.base import check_reading_is_immutable
+    from safmc_sim.world.landmark import Landmark
+
+    @dataclass(frozen=True)
+    class Hidden:
+        _where: tuple
+
+    for leak, name in ((Fleet(), "Fleet"), (box_scene(), "WorldScene"),
+                       (Landmark("t", "nav_tag", 1.0, 2.0), "Landmark"),
+                       (TrueState("d", 0, 1.0, 2.0, 0.5, 0.0, 0.0, 0.0), "TrueState")):
+        with pytest.raises(ConfigError, match=name):
+            check_reading_is_immutable("x", Hidden((leak,)))
+
+
 def test_a_landed_drone_sits_in_the_fleet_at_floor_level():
     seen = {}
 
