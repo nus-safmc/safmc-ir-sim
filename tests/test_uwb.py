@@ -50,8 +50,8 @@ SHORT = dict(n_drones=10, duration_s=3.0, record=False)
 EXACT = dict(los_noise_std_m=0.0, nlos_noise_std_m=0.0, nlos_bias_m=0.0,
              nlos_drop_probability=0.0, outlier_probability=0.0)
 
-# Anchors in the Start Area, where nothing is ever generated, so a drone at take-off has
-# every one of them in line of sight.
+# Anchors in the Start Area, where nothing is ever generated (R-WORLD-12, and validated), so
+# a drone at take-off has every one of them in line of sight.
 START_ANCHORS = (
     Landmark("a_sw", "uwb_anchor", 0.5, 0.5),
     Landmark("a_se", "uwb_anchor", 19.5, 0.5),

@@ -730,3 +730,94 @@ found nine defects, all now fixed:
 
 **379 tests.**
 
+
+---
+
+## C10b — the Start Area is empty
+
+Out of sequence, on the C5b precedent: C11–C15 belong to the relay branch
+(`claude/uwb-stack-relay-readiness-5b504e`), which is where this defect was first noticed and
+worked around rather than fixed.
+
+**The defect.** `_place_walls` bounded a wall's *centre* to `y >= START_AREA_DEPTH_M + 1.0 = 7.0`
+and its length to 2–5 m, so a 5 m wall on the vertical of the two axis-aligned orientations
+the sampler draws three times in four could reach `y = 4.5`. Over seeds 0..199, **22 arenas had an inner wall inside the
+Start Area** — 0, 16, 17, 30, 57, 65, 69, 75, 90, 92, 96, 99, 101, 102, 103, 118, 127, 144, 151,
+170, 196, 199 — as low as `y = 4.80` on seed 16, and `validate_arena` passed every one. Meanwhile
+`examples/04_uwb_ranging.py` and `tests/test_uwb.py` said in so many words that nothing is ever
+generated there, and `docs/06`, `sensors/uwb.py` and the runner's take-off grid assumed it.
+
+**Decided against the rulebook: the generator was wrong, not the docs.** The §3.2 diagram draws
+the 20 x 6 m Start Area empty — every inner wall and pillar is in the grey Known Search Area —
+and the text says the inner walls "will follow the diagram". Every rule that names the Start Area
+treats it as the team's staging strip: drones are placed in it, test-flown in it during setup
+(3.3.1 r.5), take off from it (r.1) and may be reset on it (r.7). The booklet never says "no
+obstacles in the Start Area" in words; the diagram and the rules together do not need it to.
+**R-WORLD-12** records the reading, with its sources.
+
+**Built.**
+
+- `world/arena.py` — `_place_walls` rejects a sampled wall whose footprint reaches below
+  `START_AREA_DEPTH_M`, in the same rejection loop as the field-bounds and room checks, so the
+  distribution stays uniform over *legal* placements rather than shrinking the centre bounds.
+  New `_validate_start_area_clear`, the sixth check in `validate_arena`: no wall other than
+  the perimeter and the net, and no pillar, has footprint *area* inside the strip — whatever
+  built the `ArenaSpec`. Area rather than contact, because the boundary is a virtual line and a
+  face lying on it is legal; that is the reading the room's `y_lo` already took.
+- `docs/SPEC.md` — R-WORLD-12. `docs/01-competition.md` — the reading, beside the virtual-line
+  note. `docs/06` — the anchor-placement section now says why a Start Area point needs no
+  survey. `examples/04` and `tests/test_uwb.py` — the two "nothing is ever generated in the
+  Start Area" comments now cite the rule that makes them true instead of asserting it.
+
+**Verified — TESTED.** 389 tests (was 387). New in `tests/test_arena.py`:
+`test_no_structure_reaches_into_the_start_area_over_two_hundred_seeds` generates seeds 0..199
+unvalidated and asserts no non-perimeter wall or pillar has area in the strip — two hundred
+rather than the fixture's twelve because a 1-in-9 defect hides comfortably in twelve.
+`test_validation_rejects_a_wall_in_the_start_area` hand-builds a spec on an otherwise empty
+Known Search Area and checks that a wall reaching 1.00 m in and a pillar straddling the line
+are refused, and that a wall whose south face lies exactly on the line is accepted.
+**Mutation-tested**, per the protocol: with the generator's rejection disabled the first fails
+naming all 22 seeds; with the validator call disabled the second fails `DID NOT RAISE`.
+
+**Verified — MEASURED.**
+
+- Every arena over seeds 0..199 serialised before and after the change: **exactly the 22
+  offending seeds differ and the other 178 are byte-identical.** Rejection consumes draws only
+  when it rejects, and the order of checks does not change the count. Within the 22 the room
+  and the maze are untouched (they are drawn before the wall on `layout_seed`, and on
+  `unknown_seed`); the inner wall and the known-area pillars move, and the targets move on 19
+  of them because placement is tested against the structure that moved. The lowest inner-wall
+  face over 200 seeds is now `y = 6.01`.
+- None of the 22 old arenas buried one of `examples/04`'s six point anchors: the nearest wall
+  was over 1 m from any of them. This mattered to check because a point landmark has no
+  footprint, so `_validate_footprints_clear` would not have noticed. Every leaking wall stood
+  in the east or west corridor (x 2.3–4.0 or 14.7–17.6 m), which is where a 4–5 m vertical
+  wall fits 2 m from the room — the leak was a systematic feature of the corridor ring, not a
+  rare tail.
+- The take-off grid was never struck: 25 drones fill two rows at `START_SPACING_M`, the far row
+  sits at `y <= 3.25`, and seed 16's wall face at 4.80 was 1.37 m beyond a body on it. What
+  was wrong was the strip in front of the grid, which every anchor at `y = 5.0`–`5.5` and every
+  policy's first metres of flight assumed open.
+- `examples/04_uwb_ranging.py` at its default seed 0 — one of the 22 — rerun at this commit.
+  On the old generator the C10 figures reproduce exactly; on the new one: 6 000 sweeps, **65.4%
+  of paths in line of sight (was 64.2%)**, 94.2% in reach (unchanged), 90.0% heard behind a wall
+  in reach (was 89.9%), line-of-sight error 0.000 +/- 0.050 m and 0.156 +/- 0.398 m behind a
+  wall (was 0.155 +/- 0.397). Seed 0's wall moved north out of the strip and nothing else did.
+
+**Behaviour that changed.** Twenty-two of every two hundred arenas are different from what the
+same seed gave before, and a number quoted from one of the listed seeds at an earlier commit is a
+number about an arena that no longer exists. The C10 example figures are the one such case in
+this file and are re-measured above. A stored arena file (R-WORLD-10) from one of those seeds
+now fails to load, which is correct: it was invalid when it was written.
+
+**Open.** `examples/06_uwb_relay.py`, on the relay branch, drops anchor-row anchors that have
+structure within `ANCHOR_CLEARANCE_M = 0.95` m of them — a workaround for exactly this defect,
+sized after the skeptic caught a 1.2 m version thinning the row on the room's *legal* south face.
+Once that branch carries this fix, no generated structure can come within 1 m of the row at
+`y = 5.0` (wall faces at `y >= 6.0`, the room's south wall at `y >= 6.05`, pillar faces at
+`y >= 6.85`), so `anchor_row(..., arena)`, `structure_within` and the constant are dead and the
+row can be unconditional; its docstring's "22 of 200 seeds, as low as y = 4.8" then describes
+history. That branch is checked out in another worktree, so the simplification is not in this
+commit.
+
+**389 tests.**

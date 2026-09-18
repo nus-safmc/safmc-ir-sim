@@ -13,10 +13,11 @@ Category Swarm Challenge Booklet:
 
 A policy tuned against one hand-drawn map measures overfitting, so this module produces a
 *distribution* of arenas from a seed and refuses to emit one that violates a published
-constraint (R-WORLD-1, R-WORLD-3, R-WORLD-4).
+constraint (R-WORLD-1, R-WORLD-3, R-WORLD-4, R-WORLD-12).
 
 Published geometry that is *not* randomised, because it is given: the 20 x 20 m field, the
-20 x 6 m Start Area, the 10 x 10 m Unknown Search Area, wall and pillar heights, the minimum
+20 x 6 m Start Area -- which the diagram draws empty and the generator keeps empty
+(R-WORLD-12) -- the 10 x 10 m Unknown Search Area, wall and pillar heights, the minimum
 gaps, and the 1.4 m ceiling. See docs/01-competition.md.
 
 A finding that fell out of building this, and that matters strategically
@@ -839,6 +840,14 @@ def generate_arena(
             bx0, by0, bx1, by1 = poly.bounds
             if bx0 < 0 or by0 < 0 or bx1 > width or by1 > depth:
                 continue
+            # The Start Area is empty (R-WORLD-12): the 3.2 diagram draws nothing in it and
+            # the inner walls "will follow the diagram". `bounds` only constrains the wall's
+            # CENTRE, so a 5 m wall centred 1 m north of the line reached 1.5 m into the
+            # take-off strip -- 22 of 200 seeds, as low as y = 4.8 -- where a drone spawns.
+            # The boundary is a virtual line, not a wall, so no gap applies: a south face on
+            # the line exactly is legal, the same reading the room's y_lo takes.
+            if by0 < START_AREA_DEPTH_M:
+                continue
             if forbid_room and box(*unknown_area).intersects(poly.buffer(cfg.min_gap_wall_m)):
                 continue
             if not _far_enough(poly, structure, cfg.min_gap_wall_m) or _over_a_mark(poly):
@@ -1085,6 +1094,9 @@ def validate_arena(spec: ArenaSpec, drone_radius_m: float = DRONE_RADIUS_M) -> N
        of a spanning tree, so connectivity holds by construction -- but a structural argument
        nothing tests is a comment, and this is the one that would fail silently if the doorway
        snapping in ``_room_walls`` ever regressed.
+    6. No structure reaches into the Start Area (R-WORLD-12). The generator rejects such a
+       wall, but the check is here because the generator is not the only source of an
+       ``ArenaSpec``: one is also loaded from a file (R-WORLD-10) or assembled by hand.
     """
     _validate_landmarks(spec)
     _validate_footprints_clear(spec)
@@ -1092,6 +1104,7 @@ def validate_arena(spec: ArenaSpec, drone_radius_m: float = DRONE_RADIUS_M) -> N
     _validate_reachability(spec, drone_radius_m)
     _validate_gaps(spec)
     _validate_room_connectivity(spec, drone_radius_m)
+    _validate_start_area_clear(spec)
 
 
 def validate_nav_aids(spec: ArenaSpec, kinds: Iterable[str]) -> None:
@@ -1295,6 +1308,44 @@ def _flood_from_start(spec: ArenaSpec, blocked: np.ndarray, res: float) -> np.nd
                 reachable[jx, jy] = True
                 queue.append((jx, jy))
     return reachable
+
+
+def _validate_start_area_clear(spec: ArenaSpec) -> None:
+    """No wall or pillar reaches into the Start Area (R-WORLD-12).
+
+    The rulebook's play-field diagram draws the 20 x 6 m Start Area empty, and 3.2 says the
+    inner walls "will follow the diagram". It is also where every drone stands, test-flies
+    during setup (3.3.1 r.5) and takes off (r.1), and where the runner lays its take-off grid
+    on the assumption that nothing is there. Before this check the generator let a wall
+    centred 1 m north of the line reach 1.5 m into it -- 22 of 200 seeds -- and validation
+    passed.
+
+    The perimeter walls and the net legitimately *bound* the strip, so they are exempt; every
+    other kind is structure the venue would have to have built inside it. Landmarks are not
+    structure: r.16 puts no limit on aids in the Start Area, and that rule is R-WORLD-11's.
+    The boundary itself is a virtual line, not a wall, so a face lying on it is legal and the
+    test is on area, not contact.
+    """
+    start = box(*spec.start_area)
+    for wall in spec.walls:
+        if wall.kind in ("perimeter_wall", "net"):
+            continue
+        overlap = wall.polygon().intersection(start).area
+        if overlap > 1e-9:
+            y_min = float(wall.corners()[:, 1].min())
+            raise ArenaError(
+                f"{wall.kind} from ({wall.x1:.2f}, {wall.y1:.2f}) to ({wall.x2:.2f}, "
+                f"{wall.y2:.2f}) reaches {spec.start_area_depth_m - y_min:.2f} m into the "
+                f"Start Area (y < {spec.start_area_depth_m:g}). Rulebook 3.2 draws the Start "
+                f"Area empty and drones take off from it (R-WORLD-12)."
+            )
+    for pillar in spec.pillars:
+        if pillar.polygon().intersection(start).area > 1e-9:
+            raise ArenaError(
+                f"pillar at ({pillar.x:.2f}, {pillar.y:.2f}) reaches into the Start Area "
+                f"(y < {spec.start_area_depth_m:g}). Rulebook 3.2 draws the Start Area empty "
+                f"and drones take off from it (R-WORLD-12)."
+            )
 
 
 def _validate_gaps(spec: ArenaSpec) -> None:

@@ -83,6 +83,86 @@ def test_no_target_is_in_the_start_area(arenas):
         assert not any(a.in_start_area(t.x, t.y) for t in a.targets)
 
 
+def _structure_in_start_area(a: ArenaSpec) -> list[str]:
+    """Every wall or pillar whose footprint has area inside the Start Area. The perimeter and
+    the net bound the strip and are exempt; a face lying exactly on the line has no area."""
+    start = box(*a.start_area)
+    leaks = [
+        f"{w.kind} to y={min(w.y1, w.y2):.2f}"
+        for w in a.walls
+        if w.kind not in ("perimeter_wall", "net") and w.polygon().intersection(start).area > 1e-9
+    ]
+    leaks += [
+        f"pillar at y={p.y:.2f}"
+        for p in a.pillars if p.polygon().intersection(start).area > 1e-9
+    ]
+    return leaks
+
+
+def test_no_structure_reaches_into_the_start_area_over_two_hundred_seeds():
+    """R-WORLD-12. The 3.2 diagram draws the Start Area empty and the inner walls "will follow
+    the diagram"; it is also where every drone stands and takes off.
+
+    Regression: ``known_bounds`` constrained only a wall's *centre* to y >= 7.0, so a 5 m wall
+    could reach y = 4.5. Over seeds 0..199 that put an inner wall inside the Start Area on 22
+    seeds -- 0, 16, 17, 30, 57, 65, ... -- as low as y = 4.80 on seed 16, while every doc,
+    the UWB example and the take-off grid assumed the strip was clear. Two hundred seeds
+    rather than the fixture's twelve because a 1-in-9 defect is easy to miss in twelve.
+    """
+    leaks = {
+        seed: found
+        for seed in range(200)
+        if (found := _structure_in_start_area(generate_arena(seed, validate=False)))
+    }
+    assert not leaks, f"{len(leaks)} of 200 seeds put structure in the Start Area: {leaks}"
+
+
+def _clear_column_x(a: ArenaSpec) -> float:
+    """An x at which a vertical inner wall keeps the published 2 m from the perimeter, the room
+    and the room's south wall, whichever side of the room has the space."""
+    x0, _, x1, _ = a.unknown_area
+    return 3.0 if x0 >= 5.2 else 17.5
+
+
+def test_validation_rejects_a_wall_in_the_start_area():
+    """R-WORLD-12 is validated, not just generated: an ArenaSpec loaded from a file or built
+    by hand gets the same refusal. No known-area structure and only the two targets 3.3.9 r.2
+    forces into the room, so nothing else can trip an earlier check and mask this one."""
+    a = generate_arena(3, ArenaConfig(
+        n_inner_walls=0, n_pillars_known=0, n_victims=0, n_bonus_victims=1, n_fires=1,
+    ))
+    assert all(a.in_unknown_area(t.x, t.y) for t in a.targets)
+    x = _clear_column_x(a)
+    into_start = Wall(x, 5.0, x, 9.0, K.WALL_THICKNESS_M, K.INNER_WALL_HEIGHT_M, "inner_wall")
+    bad = ArenaSpec(
+        seed=a.seed, width_m=a.width_m, depth_m=a.depth_m, ceiling_m=a.ceiling_m,
+        start_area_depth_m=a.start_area_depth_m, unknown_area=a.unknown_area,
+        walls=a.walls + (into_start,), pillars=a.pillars, targets=a.targets, config=a.config,
+    )
+    with pytest.raises(ArenaError, match=r"reaches 1\.00 m into the Start Area"):
+        validate_arena(bad)
+
+    # A pillar is refused the same way.
+    bad_pillar = ArenaSpec(
+        seed=a.seed, width_m=a.width_m, depth_m=a.depth_m, ceiling_m=a.ceiling_m,
+        start_area_depth_m=a.start_area_depth_m, unknown_area=a.unknown_area,
+        walls=a.walls, pillars=a.pillars + (Pillar(x, 5.95),), targets=a.targets,
+        config=a.config,
+    )
+    with pytest.raises(ArenaError, match="pillar .* reaches into the Start Area"):
+        validate_arena(bad_pillar)
+
+    # The boundary is a virtual line, not a wall: a south face lying exactly on it is legal,
+    # the same reading the room's own placement takes. Contact is not intrusion.
+    on_the_line = Wall(x, 6.0, x, 10.0, K.WALL_THICKNESS_M, K.INNER_WALL_HEIGHT_M, "inner_wall")
+    ok = ArenaSpec(
+        seed=a.seed, width_m=a.width_m, depth_m=a.depth_m, ceiling_m=a.ceiling_m,
+        start_area_depth_m=a.start_area_depth_m, unknown_area=a.unknown_area,
+        walls=a.walls + (on_the_line,), pillars=a.pillars, targets=a.targets, config=a.config,
+    )
+    validate_arena(ok)
+
+
 def test_target_ids_are_unique(arenas):
     for a in arenas:
         ids = [t.id for t in a.targets]

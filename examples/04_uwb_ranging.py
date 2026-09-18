@@ -51,10 +51,10 @@ from safmc_sim.world.landmark import Landmark
 # 1. The anchors -- points in the Start Area, tripods with a base in the Known Search Area
 # ------------------------------------------------------------------------------------------
 
-# Nothing is ever generated in the Start Area, so a point is safe there. A point at fixed
-# coordinates in the Known Search Area could end up inside a generated wall; a 0.25 m base
-# makes it a flat mark the generator draws around, still invisible to the ring and to
-# collision (a mark is not solid).
+# Nothing is ever generated in the Start Area (R-WORLD-12, and validate_arena refuses an
+# arena that breaks it), so a point is safe there. A point at fixed coordinates in the Known
+# Search Area could end up inside a generated wall; a 0.25 m base makes it a flat mark the
+# generator draws around, still invisible to the ring and to collision (a mark is not solid).
 ANCHORS = (
     Landmark("start_w0", "uwb_anchor", 0.5, 0.5),
     Landmark("start_m0", "uwb_anchor", 10.0, 0.5),

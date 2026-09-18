@@ -303,7 +303,10 @@ and to collision, which is right for a radio, but a point at a fixed coordinate 
 inside a generated wall — or inside the room, where the rules forbid it and `validate_arena`
 refuses it on every run. **Survey, then place**: generate the arena, pick positions with
 `in_known_area`, and place them with `dataclasses.replace`. A tripod base, `radius_m=0.25`,
-makes the generator draw around each one while the ring and collision still ignore it.
+makes the generator draw around each one while the ring and collision still ignore it. A point
+in the Start Area needs no survey: nothing is generated there and `validate_arena` refuses an
+arena that breaks it ([R-WORLD-12](SPEC.md)), which is what lets `examples/04` fix its six
+Start Area anchors before the arena exists.
 
 The two aid rules the arena cannot check for itself — at most ten in the Known Search Area,
 each within 1 m x 1 m — are `validate_nav_aids(arena, ("uwb_anchor",))` in `world/arena.py`,
