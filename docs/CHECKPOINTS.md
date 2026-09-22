@@ -992,6 +992,19 @@ anchor cell in both sweeps ran with all ten anchors placed.
    waves, because searchers turned back by the room's face cross late. It is reported, not
    enforced, and the trial makes no attempt to cross abreast.
 
+**Statistical weight, before anyone quotes a cell.** The cells hold five seeds (ten drones)
+or three (twenty-five), and the `±` is a population standard deviation. Per cell, the
+contrasts above are not significant: row vs one anchor at five relays, 4/5 vs 2/5, Fisher
+exact p = 0.52; at twenty-five drones and eight relays, 3/3 vs 0/3, p = 0.10; the ten-drone
+47 vs 38, Welch p = 0.27. What survives is the pooled contrast and the one clean cell:
+**dispatch forms the relay more often than train** (12/30 vs 4/30 at ten drones, p = 0.039;
+7/12 vs 0/12 at twenty-five, p = 0.005); **a row forms it more often than one anchor** across
+every dispatch cell (15/21 vs 4/21, p = 0.002); and the twenty-five-drone row cell's score,
+77 vs 48, Welch p = 0.008 (Mann–Whitney 0.077). Say those; do not say "the row doubles
+P(relay)" from a five-seed cell. (Computed from the run footers with `scipy.stats`; a
+lesson's completeness critic raised it, and the arithmetic was re-run before this was
+written.)
+
 **Conditions (F-36).** Trail following, the carrot, the approach, the crumbs and the
 publications that pace launches run on ground-truth pose, and every horizontal correction
 uses the relay's own true altitude; crumbs, head announcements, chain order and the landing
@@ -1059,8 +1072,22 @@ with the run directories. Findings and what changed:
 
 **Open.** A lossy `Blackboard` and a noisy `PoseSource` before any of this is flown
 (ADR-0003) — the two seams that turn "given perfect pose and free comms" into a claim. An
-abreast crossing so five or more relays make one wave. The train's failure mode is the
-lead's trail; a train that routes would be a different trial. The crumb network's
+abreast crossing so five or more relays make one wave. **The train wedges, and the lead's
+trail is only half its failure.** Replaying the lead's crumbs through `TrailBuilder` for all
+42 train runs: 4 formed, 29 were infeasible by length or had no bonus landing by the lead,
+and **9 had enough relays and hovered to the end**. An instrumented re-run of one
+(`relay_train_r15_n25_a1_s1`, L = 4.5 m, five launched, five needed) shows two relays frozen
+in BAND with carrots 0.19 m apart along the trail, bodies held 0.48 m apart by the 0.3 m
+chain repulsion, each 0.14–0.15 m from its carrot — beyond `ON_CARROT_M` = 0.12 — so the band
+step that would separate them never fires and their commands are exactly zero for 500 s; a
+third relay's carrot sits 0.015 m from one of those bodies, so `toward()` slides for ever. A
+wedge of three constants (`ON_CARROT_M`, `CHAIN_AVOID_RANGE_M`, the FOLLOW targets
+`m·L/(n_active+1)` that narrow to 0.23 m apart as relays join), not a long trail. Dispatch
+runs the same code and escaped because its southern-row relays arrive ~75 ticks apart and the
+band moves the earlier joiner outward before the next arrives — timing, not design. Found by
+the lesson's completeness critic after this checkpoint's first commit; not fixed here. The
+fix is either to let the band step off-carrot when a chain neighbour is inside `d*`, or to
+space FOLLOW targets by `d*` rather than `L/(n_active+1)` while the head is still moving. The crumb network's
 free-disc chords rest on ring clearance capped at 0.8 m; the venue's walls are unmeasured
 (F-24). A-19 — the peer-ranging rate on stock firmware — is the number that decides whether
 1 Hz at twenty-five drones is what the team gets, and it is a bench afternoon.
