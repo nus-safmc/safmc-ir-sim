@@ -1,8 +1,8 @@
 """The world as a sensor sees it, and who is allowed to block what.
 
-This is the only view of the world a sensor is ever handed (R-SENS-15). It carries two things:
-geometry a ray can hit, and the landmarks placed in the arena. It does not carry the arena,
-the mission, or any agent.
+This is the only view of the world a sensor is ever handed (R-SENS-15). It carries three
+things: geometry a ray can hit, the landmarks placed in the arena, and the fleet (below). It
+does not carry the arena, the mission, or any agent.
 
 There are two distinct notions of "blocking" in this simulator and conflating them would
 silently break scoring:

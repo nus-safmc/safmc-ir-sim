@@ -68,8 +68,9 @@ failed by the next one, which a test caught before this record was committed.)
 **3. The physics is the ADR-0006 model applied to a second tag.** The true range is the
 three-dimensional distance between the two drones' true positions — a hovering drone 0.8 m
 from a landed one reads 0.94 m, and a policy must know that. Line of sight is the structural
-segment test at the **lower** of the two altitudes; walls and pillar shafts are 2.0 m, so for
-them the altitude does not matter below the ceiling, while a pillar's 0.15 m base obstructs a
+segment test at the **lower** of the two altitudes; inner walls and pillar shafts are 2.0 m
+and the perimeter 1.5 m, all above the 1.4 m ceiling, so for them the altitude does not
+matter, while a pillar's 0.15 m base obstructs a
 landed tag's link and not a hovering one's — and the scorer's own floor-level line of sight
 counts that base, so the lower altitude is what makes the tag agree with the rule (F-34). Airframes
 and markers are transparent, as R-SENS-17 already says for anchors. Noise, bias, dropout and
@@ -80,7 +81,8 @@ in precision.
 **4. The sweep rate now has a peer term, and it is pessimistic on purpose.**
 `peer_sweep_rate_hz(n_tags, n_anchors)`: a tag with `A` anchors and `P − 1` peers makes
 `A + P − 1` exchanges in its own slot; a shipping firmware ranges to eight per 10 ms slot
-(`UWB_MAX_ANCHORS_FIRMWARE`, `UWB_SLOT_S`), so it needs `ceil((A + P − 1) / 8)` slots and the
+(`UWB_PEER_EXCHANGES_PER_SLOT`, the same eight as `UWB_MAX_ANCHORS_FIRMWARE` read as an
+exchange budget; `UWB_SLOT_S`), so it needs `ceil((A + P − 1) / 8)` slots and the
 superframe is `n_tags` of them. Ten drones and one anchor: 5 Hz. Twenty-five and one: **1 Hz**.
 That is A-19, and its two halves are both assumptions: that every tag initiates to every
 other (a symmetric protocol needs half the exchanges) and that the exchange budget is the AT
@@ -117,13 +119,14 @@ deviations), `s_i` node `i`'s arclength along the **trail**.
 
 **The trail.** Every searcher publishes a breadcrumb — its pose and its ring's minimum range
 — each time it has moved 0.25 m. A relay accumulates every searcher's crumbs from tick 0 and
-**cuts loops**: when a new crumb comes within 0.6 m of an earlier crumb, and the chord plus a
-body radius fits inside the ring clearance recorded at *either* crumb (capped at 0.8 m), the
-trail between them is dropped. The chord then lies inside a disc a ring saw empty, so it is
+**cuts loops**: when a new crumb comes within 0.6 m of an earlier crumb (not its last two,
+which are always that close), and the chord plus a body radius fits inside the ring
+clearance recorded at *either* crumb (capped at 0.8 m), the trail between them is dropped. The chord then lies inside a disc a ring saw empty, so it is
 flyable and in line of sight without a map. The trail a relay follows for head `h` begins at
 an anchor and ends at `h`'s landing crumb (how it is chosen is amendment 5 below). Its length
 `L` decides the cost: the anchor and the head are the fixed ends, so
-`n_needed = ceil(L / 0.9) − 1`.
+`n_needed = max(1, ceil(L / 0.9) − 1)` — never zero, because the head lands where its victim
+is and the tail must be a relay.
 
 **The potential.** Each relay descends a one-dimensional potential on measured ranges,
 
@@ -220,7 +223,8 @@ same tick.
   30 MB at 25 drones over 600 s, before compression. `Recorder(sensor_every=...)` thins it.
 - **Cost:** the R-POL-4 walk gains a banned type; a reading that carried a `Fleet` is refused.
 - **Cost:** results on the relay trial are conditional on more than the tag's five numbers.
-  Trail following and role assignment run on ground-truth pose; crumbs and the landing
+  Trail following and the crumbs run on ground-truth pose (roles come from the tag's
+  roster); crumbs and the landing
   consensus run on the perfect blackboard (ADR-0003). The UWB-gated spacing and the tail's
   anchor certification are the two decisions that survive those caveats, and the write-up
   says so (F-36).
@@ -275,9 +279,10 @@ controller's shape did not change.
    in dispatch the trail is the **shortest route through every searcher's crumbs** to the
    nearest anchor — consecutive crumbs of one searcher (a flown segment), cross-links where
    two crumbs' ring-clearance discs cover the chord with room for a body (the loop cutter's
-   test between trails), and an anchor to any crumb within 0.9 m (Start Area free space) —
-   by Dijkstra, once per head. Still no map: every edge is a segment a drone flew or a chord
-   a ring saw empty. Train mode still follows the lead's own trail, which is one of the
+   test between trails), and an anchor to any crumb within 0.9 m (Start Area free space,
+   surveyed at configuration — amendment 8) — by Dijkstra, once per head. Still no map: every
+   edge is a segment a drone flew, a chord a ring saw empty, or a hop inside an anchor's
+   surveyed disc. Train mode still follows the lead's own trail, which is one of the
    things the sweep now compares.
 
 6. **The crumb network dropped every anchor edge between 0.6 and 0.9 m.** Its cell hash was

@@ -1070,6 +1070,23 @@ with the run directories. Findings and what changed:
   margin does not cover calibration offsets; a relay that crashes mid-chain keeps its last
   blackboard tuple for ever and the chain hovers.
 
+**After the checkpoint: what a max-depth lesson's checkers found (commit after `3d1453d`).**
+Forty-five agents wrote and refuted an eleven-section lesson on this build; besides the
+statistical caveat and the train wedge above, they found: the crumb network **double-weighted
+every flown segment** (the cell hash re-found each consecutive pair as a cross-link and
+`coo_matrix(...).tocsr()` sums duplicates), so Dijkstra leaned toward chords — `L` was still
+computed correctly on the chosen polyline, so feasibility was right and route *choice* was
+not; edges are now deduplicated to one weight per pair. The launch stagger sat after the
+climb branch, so the bands were 0 / 0.3 / 1.8 s apart, not 0 / 1.5 / 3 s; the wait now comes
+first. And six doc/code drifts (perimeter walls are 1.5 m, not "every wall 2.0 m"; the ADR
+named `UWB_MAX_ANCHORS_FIRMWARE` where the code uses `UWB_PEER_EXCHANGES_PER_SLOT`; "an
+earlier crumb" where the cutter exempts the last two; `n_needed` without its floor; "3 of
+200" lead-column seeds where the test catches four; the scene "carries two things"). **The
+sweep tables above were produced at `c86a48b`, before the two code fixes**, and were not
+rerun: the routing fix changes which of near-equal routes is chosen, the stagger fix when
+searchers reach the room; neither changes feasibility arithmetic, and a rerun is the next
+thing to do before quoting a cell that depends on them.
+
 **Open.** A lossy `Blackboard` and a noisy `PoseSource` before any of this is flown
 (ADR-0003) — the two seams that turn "given perfect pose and free comms" into a claim. An
 abreast crossing so five or more relays make one wave. **The train wedges, and the lead's

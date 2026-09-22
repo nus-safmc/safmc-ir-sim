@@ -300,8 +300,8 @@ MUST correspond to 2 Hz, the measured AprilTag rate on the real hardware
 **R-SENS-11** No sensor may read another agent's private state or any mission ground truth other
 than through its own geometric query.
 
-> Clarified with ADR-0005. The contract enforces the *reach*: a sensor is handed geometry and
-> the landmark list and nothing else (R-SENS-15). It cannot enforce the *use*: a sensor that
+> Clarified with ADR-0005. The contract enforces the *reach*: a sensor is handed geometry,
+> the landmark list and, since ADR-0007, the fleet, and nothing else (R-SENS-15). It cannot enforce the *use*: a sensor that
 > returned every landmark's exact position would be within reach and outside the rule. That
 > part is a review obligation -- the auditor checklist, and a FIDELITY entry for every sensor
 > -- not a property the code has.

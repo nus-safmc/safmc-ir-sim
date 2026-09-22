@@ -101,8 +101,9 @@ sample whatever the geometry, so the noise stream is a function of the seed alon
 **A peer range is the same model applied to a second tag.** The true range is the
 three-dimensional distance between the two drones' true positions -- a hovering drone 0.8 m
 from a landed one reads 0.94 m, and a policy that spaces a chain must know that. Line of
-sight is the same structural segment test at the **lower** of the two altitudes. Walls and
-pillar shafts are 2.0 m, so for them the altitude does not matter below the ceiling; a
+sight is the same structural segment test at the **lower** of the two altitudes. Inner walls
+and pillar shafts are 2.0 m and the perimeter 1.5 m, all above the 1.4 m ceiling, so for
+them the altitude does not matter; a
 pillar's 0.15 m base does -- it obstructs a landed tag's link and not a hovering one's --
 and the scorer's own floor-level line of sight counts that same base, so the lower altitude
 is what makes the tag agree with the rule (F-34). Airframes and markers are transparent, as
@@ -479,8 +480,9 @@ def line_of_sight(scene: RayScene, tag_xy: np.ndarray, anchor_xyz: np.ndarray, z
 def peer_line_of_sight(scene: RayScene, tag_xyz: np.ndarray, peer_xyz: np.ndarray) -> np.ndarray:
     """``(P,)`` bool: is the straight path from the tag to each peer's tag clear of ``scene``?
 
-    Tested at the **lower** of the two altitudes, pair by pair (R-SENS-18). Walls and pillar
-    shafts are taller than either tag, so for them the choice changes nothing; a pillar's
+    Tested at the **lower** of the two altitudes, pair by pair (R-SENS-18). Walls (2.0 m
+    inner, 1.5 m perimeter) and pillar shafts stand above the ceiling, so for them the
+    choice changes nothing; a pillar's
     0.15 m base obstructs a landed tag and not a hovering one, and the scorer's floor-level
     line of sight counts it too, so the lower altitude is the one that agrees with the rule
     (F-34). Pairs are grouped by their test altitude so a fleet costs one segment cast per

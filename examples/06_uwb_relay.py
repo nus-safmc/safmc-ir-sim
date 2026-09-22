@@ -30,7 +30,8 @@ What it shows, in order:
    cannot (ADR-0007). The two-dimensional command tracks the trail point at ``s``.
 4. **The landing gate is UWB alone.** A relay is *in place* when both neighbour ranges, reduced
    to the horizontal, have measured at most 0.9 m for three consecutive fresh sweeps -- both
-   ends of every link check it, so every relay in place means every link inside the rule's
+   ends of every relay-to-relay link check it, and the tail and the head-most relay check the
+   anchor and head links once, so every relay in place means every link inside the rule's
    *distance*. A range cannot certify the rule's floor-level line of sight; that comes from
    the trail's construction (flown segments and ring-evidenced chords) and is checked by the
    grader, not measured by the gate. The tail's predecessor is the anchor, and with the
@@ -120,8 +121,11 @@ generator on ``main`` lets an inner wall reach below the line -- 22 of 200 seeds
 version used 1.2 m, which also caught the room's *legal* south face (``y0`` as low as 6.05,
 1.05 m from the row) and silently thinned the row on 46 of 200 seeds, two of them in the
 sweep; the skeptic found it. At 0.95 m only the walls that really reach into the row drop
-anchors. With a single anchor there is nothing to fall back to, so it is kept regardless and
-the run's report says so."""
+anchors. ``structure_within`` measures to a wall's centre line and adds half its thickness,
+so the test radius is 1.00 m and the room's lowest legal centre line, ``y = 6.05``, is 1.05 m
+away. If every anchor of a row is dropped -- always the case for a single anchor near a wall,
+4 seeds of 200 for the lead's column -- the first is kept regardless, because the tail needs
+some certificate; nothing reports it."""
 
 
 def anchor_row(n_anchors: int, arena=None) -> tuple[Landmark, ...]:
@@ -145,8 +149,9 @@ def anchor_row(n_anchors: int, arena=None) -> tuple[Landmark, ...]:
             continue
         row.append(Landmark(f"start_anchor_{k}", "uwb_anchor", x, ANCHOR_Y))
     if not row:
-        # Every anchor has structure inside its disc (3 of 200 seeds for the lead's column
-        # alone). One anchor is still needed for the tail's certificate; keep the first.
+        # Every anchor has structure inside its disc (4 of 200 seeds for the lead's column
+        # alone: 92, 99, 102, 199). One anchor is still needed for the tail's certificate;
+        # keep the first.
         row.append(Landmark("start_anchor_0", "uwb_anchor", xs[0], ANCHOR_Y))
     return tuple(row)
 
@@ -226,7 +231,9 @@ searcher starts from the same row at the same speed, so without this they all re
 room's face together, all handed over to wasp_v5 with the same wall ahead, and neighbours
 1.25 m apart turned into each other -- two head-on losses at t = 14 s on seed 2 that the
 plain wasp_v5 baseline, which never lines up, does not show. A stagger in *height* did not
-help, because the handover fires at a fixed distance from the wall whatever the band."""
+help, because the handover fires at a fixed distance from the wall whatever the band. The
+wait comes before the climb; a first version waited after it, and since the climb takes
+1.2 s the bands were really 0 / 0.3 / 1.8 s apart -- a lesson's checker measured it."""
 
 BLOCKED_M = 0.9
 """A ring return this close in the direction of travel counts as blocked, and a drone flying
@@ -458,7 +465,15 @@ class CrumbNetwork:
         if not rows:
             return None
         r = np.concatenate(rows); c = np.concatenate(cols); w = np.concatenate(weights)
-        graph = coo_matrix((np.concatenate([w, w]), (np.concatenate([r, c]), np.concatenate([c, r]))),
+        # One weight per pair. The cell hash re-finds every flown segment as a cross-link, and
+        # coo_matrix(...).tocsr() SUMS duplicate entries, so consecutive crumbs weighed twice
+        # their length and Dijkstra leaned toward chords -- a lesson's checker found it.
+        lo, hi = np.minimum(r, c), np.maximum(r, c)
+        order = np.lexsort((w, hi, lo))
+        lo, hi, w = lo[order], hi[order], w[order]
+        first = np.concatenate(([True], (lo[1:] != lo[:-1]) | (hi[1:] != hi[:-1])))
+        lo, hi, w = lo[first], hi[first], w[first]
+        graph = coo_matrix((np.concatenate([w, w]), (np.concatenate([lo, hi]), np.concatenate([hi, lo]))),
                            shape=(n_nodes, n_nodes)).tocsr()
         dist, pred = dijkstra(graph, directed=False, indices=head_node, return_predecessors=True)
         reach = dist[:n_anchor]
@@ -641,11 +656,11 @@ class RelaySearcher(WaspV5Policy):
     def step(self, obs: Observation) -> Command:
         if obs.pose.z >= self.cruise_alt_m - 0.02:
             self._drop_crumb(obs)
+        if not self._crossed and obs.sim_time_s < self._leg_start_s:
+            return Velocity()                           # my band's turn has not come: stay down
         if obs.pose.z < self.cruise_alt_m - 0.02:
             return Velocity(vz=self.climb_rate_ms)
         if not self._crossed:
-            if obs.sim_time_s < self._leg_start_s:
-                return Velocity()                       # my band's turn has not come
             north = np.array([0.0, 1.0])
             past_the_line = obs.pose.y > self._leg_end_y
             # Past the anchor row and something ahead: the room's south face, a wall foot
