@@ -239,6 +239,20 @@ turning it on is a choice a run must make and report (F-30)."""
 UWB_OUTLIER_MAX_M = 1.5
 """A-18. Within the ~2.5 m tail the DW3000 CDF reaches (Flueratoru et al., Fig. 3a)."""
 
+UWB_PEER_EXCHANGES_PER_SLOT = 8
+"""A-19. How many double-sided exchanges one tag completes inside its own TDMA slot when it
+ranges to its anchors AND to every other tag (R-SENS-18). The figure is the shipping AT
+firmware's eight-anchor range report read as an exchange budget -- 10 ms / 8 = 1.25 ms per
+exchange, against ~0.51 ms of DS-TWR airtime (F-23) -- and the protocol behind it is the
+naive one: every tag initiates to every other, so each pair is ranged twice per superframe.
+Both halves are assumptions. A symmetric schedule halves the count; a broadcast
+swarm-ranging protocol (Shan et al., INFOCOM 2021) measured 16 Hz per pair at 13-14 drones
+on a DW1000, about four times what this budget gives at that fleet size (3.6-3.9 Hz), and
+the gap widens with the fleet because this schedule is quadratic in it and a broadcast is
+linear. Ten drones and one anchor: 5 Hz. Twenty-five and one: 1 Hz. Pessimistic on purpose, because it is the firmware
+the team would fly first, and because over-estimating a ranging rate is the mistake that
+survives to the live run (F-33). See ``uwb.peer_sweep_rate_hz``."""
+
 # Sources for the UWB block, one per number (docs/README.md asks for a URL per claim):
 #   Datasheet   DW3000 Datasheet v1.3 (Decawave/Qorvo, 2020). Table 14 sec 3.9 is the ranging
 #               specification; Table 16 sec 4.2 the channels; Table 12 sec 3.7 the link
@@ -264,6 +278,11 @@ UWB_OUTLIER_MAX_M = 1.5
 #   F-26        DW3000 datasheet Table 14 note 1 (+/-15 cm uncalibrated, +/-6 cm calibrated);
 #               DWM3000 Data Sheet Rev B sec 2 ("no transmit power or antenna delay
 #               calibration"); DWM3001C Data Sheet Rev B sec 1 (factory calibrated).
+#   A-19, F-33  Makerfabs UWB AT Command Manual v1.0.8 sec 3.11 (eight per slot, 10 ms slot);
+#               F. Shan, J. Zeng, Z. Li, J. Luo, W. Wu, "Ultra-Wideband Swarm Ranging",
+#               IEEE INFOCOM 2021, doi 10.1109/INFOCOM42981.2021.9488717 (broadcast
+#               protocol; 16 Hz per pair at 13-14 Crazyflies, DW1000, as reported by Li et
+#               al., arXiv 2003.05853). No DW3000 swarm-ranging measurement was found.
 
 # Simulation defaults (not claims about the world)
 DEFAULT_TICK_HZ = 20.0          # matches NAV_RATE_HZ

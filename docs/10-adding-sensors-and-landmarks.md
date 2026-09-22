@@ -86,11 +86,25 @@ class BeaconConfig(SensorConfig):
 
 **3. The sensor** — a `Sensor` subclass with `sample(truth, world, tick)`. `truth` is the
 carrying drone's exact `TrueState`; `world` is a `WorldScene`, which offers
-`sensing_scene(exclude_object_id=truth.object_id)` for anything a ray can hit and
-`landmarks_of(kind)` for placed things. Noise comes from `self.rng`, never `numpy.random`.
+`sensing_scene(exclude_object_id=truth.object_id)` for anything a ray can hit,
+`landmarks_of(kind)` for placed things, and `fleet` for the other drones. Noise comes from `self.rng`, never `numpy.random`.
 Keep the geometry in a pure function and let `sample` be the adapter — the pure function is
 what you unit-test. Return fixed-shape arrays from `record()` and the reading appears in the
 log as `<name>.npz`.
+
+> **`world.fleet` is a view to measure against, never to report.** It names every drone in
+> the run — whatever its lifecycle, so a landed teammate is there at `z = 0` — with its agent
+> id, its ir-sim id and its true position, in run order. It exists for a sensor that models a
+> device every airframe carries and every other airframe answers: a ranging radio computes
+> a distance against it and reports the distance. A sensor that copied `fleet.xyz` into a
+> reading would hand a policy every teammate's true position (R-POL-3), and the R-POL-4 walk
+> cannot tell a leaked position from a measured one — only the `Fleet` object itself is
+> caught. That is R-SENS-11's review obligation, and it is why every sensor owes
+> `FIDELITY.md` an entry. Find your own slot with `fleet.index_of(truth.object_id)`; it is
+> `-1` in a hand-built scene that was never refreshed, which a unit test should expect.
+> The bodies a ray hits are *active* drones only, because a parked drone is not a collision
+> hazard here (F-35); the fleet and the bodies are two views of the same post-step state
+> ([ADR-0007](adr/0007-tag-to-tag-ranging-and-the-relay.md)).
 
 ```python
 class BeaconRanger(Sensor):

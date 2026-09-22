@@ -239,6 +239,43 @@ localiser has to solve, and the reading is built not to solve it for you. The su
 positions are the team's own configuration — the same `ArenaConfig` that placed the anchors
 — not a leaked world position ([R-POL-3](SPEC.md) as amended).
 
+### Peers: the same tag ranging to the fleet (opt-in)
+
+`UWBConfig(peers=True)` makes the tag range to every other drone's tag as well
+([R-SENS-18](SPEC.md), [ADR-0007](adr/0007-tag-to-tag-ranging-and-the-relay.md)). The same
+reading then also carries:
+
+```python
+uwb.peer_ids         # every agent id in the run, in run order, your own included. Constant.
+uwb.peer_ranges_m    # (P,)   reported range per peer's tag, inf for yourself and where unheard
+uwb.peers_heard      # (P,)   bool, isfinite(peer_ranges_m); never True at your own slot
+```
+
+and nothing about the peer: not its altitude, not whether it is flying, landed or crashed. A
+tag is a radio, not a rotor — **a landed teammate's tag answers exactly as a flying one's
+does**, which is what makes the relay of R-MISS-4, a chain of *landed* drones a metre apart,
+something this sensor can space. Three things to know before using it:
+
+- **The range is three-dimensional.** A hovering drone at 0.5 m that is 0.8 m from a landed
+  one reads 0.94 m. You know your own altitude and, if you know the peer's role, its; the
+  reading will not tell you.
+- **The rate falls hard with the fleet.** A tag now makes `anchors + drones − 1` exchanges
+  in its own slot, and a shipping firmware fits eight per 10 ms (**A-19**), so
+  `peer_sweep_rate_hz(n_drones, n_anchors)` gives **5 Hz at ten drones and one anchor, 1 Hz
+  at twenty-five**. That is the naive every-tag-initiates schedule on stock firmware, about
+  four times under what a broadcast swarm-ranging protocol measured on a DW1000 at 13–14
+  drones and further under it as the fleet grows (F-33). Pessimistic on purpose; it is a
+  firmware question, and the one to measure first for anything built on peer ranges.
+- **Off is exactly off.** With `peers=False` the reading, the noise stream and the log are
+  what they were before the option existed; with it on, the anchor noise is still the same
+  run, because the peer draws come from a child generator spawned from the tag's own.
+
+The model below applies unchanged to a peer link, with line of sight tested at the lower of
+the two altitudes — which matters only at a pillar's 0.15 m base, and there agrees with the
+scorer's floor-level rule (F-34). The peer stream is a function of the seed *and the fleet
+size*: adding a drone changes every tag's peer noise, the anchor noise stays put. The log gains `peer_ranges_m` shaped `(ticks, agents, agents)`,
+column `j` being the header's `j`-th agent, and the diagonal is always `inf`.
+
 ### The model
 
 | Step | What happens | Number |

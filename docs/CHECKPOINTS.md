@@ -730,3 +730,381 @@ found nine defects, all now fixed:
 
 **379 tests.**
 
+
+---
+
+## C11 — the spec for tag-to-tag ranging and a relay trial
+
+The team's brief, 2026-09-17: *use UWB to form a relay, with tags on the drones and one
+anchor at the start line, via a potential-based method that converges towards a relay.*
+Research first, then a spec, then code — this checkpoint is the spec.
+
+**Built.** `docs/adr/0007-tag-to-tag-ranging-and-the-relay.md`; SPEC R-SENS-15 amended,
+**R-SENS-18** added, **A-19** registered; FIDELITY A-19 mirror and **F-33..F-36**;
+`constants.UWB_PEER_EXCHANGES_PER_SLOT` with its source line. No code behaviour changed.
+
+**Found while researching, and it reframes the brief.** In this rulebook a *relay* is the
+scoring chain of R-MISS-4 — landed drones ≤ 1.0 m apart with floor-level line of sight from
+a bonus-victim rescuer into the Start Area, worth ×2 — not a communications link. The docs
+say the real fleet has no drone-to-drone radio at all (`docs/02-hardware.md`). The team
+confirmed the scoring relay is the goal. It has never fired in any recorded run.
+
+**Found while auditing the platform for readiness.** Three blockers, none of them in the
+tag itself: `WorldScene` gives a sensor no sanctioned view of another drone's position
+(anonymous circles, `x, y` only, private arrays); `Runner._sense` drops every non-`ACTIVE`
+drone from the scene, and a relay is made of landed drones; and identity, draw-count and
+TDMA conventions all need restating for a reading whose targets are the fleet.
+`WorldScene.fleet` is the answer to the first two and is deliberately a second query
+beside the bodies, because a radio and a ray disagree about a parked airframe.
+
+**Found in the literature** (three threads, ~60 sources; the ADR's rejected-alternatives
+table is the digest). Range-only formation control almost always means *position* vectors
+with distance targets; a truly scalar-range chain is not rigid in the plane and the published
+fixes — dither, stop-and-go trilateration, extremum seeking — are slow and fragile under
+dropout. The design that survives is a one-dimensional spring chain along a *trail* a
+teammate flew, which fixes the geometry the ranges cannot, converges to equal spacing with
+both ends fixed, and needs the anchor for exactly one thing: certifying the tail is in the
+Start Area from a range rather than a pose. The closest validated system is Varadharajan et
+al.'s *Swarm Relays* (ICRA 2020, six Crazyflies and seven Kheperas), which is the same idea
+with spacing zones instead of a potential.
+
+**Verified.** Nothing executable yet. ASSERTED: A-19's arithmetic (5 Hz at ten drones and
+one anchor, 1 Hz at twenty-five) — a test pins it in C13. The trial's own requirements are
+T-1..T-5 in the ADR, written to be falsified in C15.
+
+**Open at this point.** All code: C12 the fleet query, C13 peer ranging, C14 the metric,
+C15 the example and its sweep, then the audit.
+
+---
+
+## C12 — `WorldScene.fleet`: every drone, every lifecycle, as a sensor's view
+
+**Built.** `sensors/scene.py`: a frozen `Fleet(agent_ids, object_ids, xyz)` with `index_of`,
+`WorldScene.fleet`, and `refresh_fleet(entries, cache_key)` — cached by tick and independent
+of `refresh_drones`, because the two are built from different subsets: bodies from active
+drones (what a ray can hit, what a drone can strike), the fleet from all of them (what a
+radio can range to). `runner._sense` feeds every agent's `(agent_id, robot.id, state)` from
+the same post-step state as the bodies. `Fleet` joins the R-POL-4 banned types and the
+smuggle list. `docs/10` and `sensors/base.py` say what the fleet is for and what it is not.
+
+**Verified — TESTED.** 396 tests (+9 in `tests/test_fleet.py`). The fleet is run-ordered,
+read-only through `.base` and the writeable flag, rebuilt once per key, refused on a repeated
+or empty id, and empty in a hand-built scene. On the runner path: land half of ten drones at
+tick 5 and the bodies a sensor sees fall from nine to four while the fleet stays at ten;
+every sensor's `index_of(truth.object_id)` is its run index; drone_00's fleet `z` equals its
+own pose each tick and hits `0.0` the tick after it lands. R-POL-4: a `Fleet` inside a
+reading is caught by the walk.
+
+**Behaviour that changed.** None visible to a policy or a log: no existing sensor reads the
+fleet. One more per-tick pass over the agent list in `_sense`.
+
+**Open.** No sensor consumes it yet — that is C13.
+
+---
+
+## C13 — the tag ranges to its peers
+
+**Built.** `sensors/uwb.py`: `UWBConfig(peers=True)`; `UWBRanges.peer_ids` /
+`peer_ranges_m` / `peers_heard`; `peer_line_of_sight` (the structural segment test at the
+lower of the two altitudes, grouped by altitude so a fleet costs one cast per distinct `z`);
+`peer_sweep_rate_hz(n_tags, n_anchors)` under the A-19 slot budget; `record()` adds
+`peer_ranges_m` only when peers are on. Peer noise is drawn from a **child generator spawned
+from the tag's own at build**. `docs/06` gains a peers section; `tests/test_audit_regressions`
+whitelists the dimensionless `peers` field.
+
+**Verified — TESTED.** 408 tests (+12 in `tests/test_uwb.py`). Self is `inf` and in the
+list; a peer range is the 3-D distance (0.8 m across and 0.5 m down reads 0.94 m); a wall
+biases a peer link and a teammate's body does not; line of sight is at the lower altitude
+(a 1.0 m wall blocks a 1.2 m drone from a landed one and not from another at 1.2 m); a peer
+beyond reach or dropped is `inf`; the anchor noise is identical with peers on and off for
+five consecutive sweeps **and the parent generator's next draw is identical**; the child
+consumes exactly four draws per fleet member per sweep whatever the reach or lifecycle;
+`peer_sweep_rate_hz` gives 5 Hz / 1 Hz / 1.67 Hz for 10 / 25 / 20 drones with one anchor,
+collapses to `sweep_rate_hz` when everything fits one slot, and twelve drones are refused by
+the runner while ten, fifteen, twenty and twenty-five are accepted; end to end, a landed
+teammate is still ranged and the range grows by exactly the height gap; the log holds
+`peer_ranges_m` square in the header's agent order with an `inf` diagonal and grades within
+6σ against `states.npz`; a peers-off log has exactly the old keys and the same anchor
+ranges as a peers-on one.
+
+**Found while building — two of the spec's claims were wrong and the tests caught both.**
+(1) R-SENS-18 first said the peer draws come "after the anchor draws, so that the anchor
+stream does not depend on `peers`". That holds within a sweep and fails by the next one:
+the parent generator has advanced by the peer draws. Fixed by spawning a child generator
+for peers at build, which also makes the byte-identity claim for peers-off true by
+construction; the spec, the ADR and the code now say so. (2) `peer_sweep_rate_hz`'s
+docstring said fifteen drones with one anchor give a rate the runner refuses. They do not:
+the decimation is `0.2 × n_tags × slots` = 6. Twelve is the fleet that does not divide.
+The same trap C10's audit found in `sweep_rate_hz`.
+
+**Behaviour that changed.** None for any existing run: `peers` defaults off, the reading's
+new fields default empty, `record()` is unchanged when off, and the parent generator is not
+touched.
+
+**Open.** No metric says *when* a relay forms (C14); no policy reads the peer ranges (C15).
+
+---
+
+## C14 — the relay as a moment: `relay_timeline`, `time_to_relay_s`, `relay_chain_drones`
+
+**Built.** `metrics.py`: `RelayMoment` and `relay_timeline(run)`, which replays a fresh
+`Mission` built from the recorded arena over `states.npz` at every tick on which the landed
+count grew — the mission's own latched `update` and `_find_relay`, not a second
+implementation of the rule. `RunMetrics` gains `time_to_relay_s` (first moment with a
+chain, or `None`) and `relay_chain_drones` (length of the footer's final chain). `docs/07`
+says so.
+
+**Verified — TESTED.** 411 tests (+3 in `tests/test_relay_metric.py`). A bonus victim
+planted at `(1.0, 7.6)` — the Known Area's west corridor, clear of the room on every seed
+— and three scripted drones landing at 0.8 m steps from `y = 6.9` to `y = 5.3`: the online
+score, the offline re-score and the timeline agree on the chain `drone_00 → drone_01 →
+drone_02`; the timeline has one moment per landing, empty chains for the first two and the
+chain on the third, at exactly the tick the log's lifecycle array shows the third drone
+LANDED; `time_to_relay_s` is that moment; the score is `2 × 15`. Pull the middle drone
+1.1 m south and no replay finds a relay, `time_to_relay_s` is `None`, the rescue still
+scores 15 unmultiplied. A run with no landings has an empty timeline.
+
+**This is also the first recorded run in which the relay fired**, scripted rather than
+searched, in a test. REVIEW.md's "has never fired in any recorded run" is now false in the
+narrow sense; the open question it was pointing at — can a *policy* reach it — is C15.
+
+**Behaviour that changed.** `RunMetrics` has two more fields; nothing else.
+
+**Open.** The example and its sweep.
+
+---
+
+## C15 — the relay trial: an elastic band of drones along a crumb trail, landed on UWB alone
+
+Commits `d48347c` (the example), `f8959fc`, `8e97118`, `64af741`, `be8c10d`, `687f85c`,
+`c86a48b` (two audits' and a skeptic's fixes), and this one. ADR-0007 "The trial" and
+"Amendments from the build"; F-36.
+
+**Built.** `examples/06_uwb_relay.py`, one registered policy `uwb_relay` that assigns a role
+per drone from the tag's roster: `drone_00` the *lead* (wasp_v5 that lands only on a bonus
+victim), `n_relay` *relays* from the southern take-off row (`relay_roles`), the rest wasp_v5
+searchers with the mission wrapper. Searchers leave the Start Area north along their column
+(staggered 0 / 1.5 / 3 s by index mod 3, handing over to wasp_v5 when the ring sees anything
+1.4 m ahead past the anchor row), drop a breadcrumb with their ring clearance every 0.25 m,
+and announce a head when they land on a bonus victim. A relay assembles a **trail**: in
+dispatch, the shortest route through every searcher's crumbs to the nearest anchor
+(`CrumbNetwork`: flown segments, ring-evidenced cross-links, anchor edges inside 0.9 m;
+Dijkstra once per head); in train, the lead's own trail grown incrementally
+(`TrailBuilder`), with map-free loop cuts (`Trail`). A relay joins the trail at the
+projection of its position onto the trail's first 1.5 m. The controller is the ADR's band:
+a one-dimensional spring potential on **measured** ranges to the two chain neighbours,
+stepped per fresh sweep only while the relay is on its carrot, equal spacing its
+equilibrium; a per-link UWB gate (both neighbour ranges ≤ 0.9 m horizontal for three
+consecutive sweeps), the tail's predecessor an anchor at tag height on the row `y = 5.0`;
+a same-tick consensus landing from the snapshot. `--anchors N` places a row (one is the
+brief), dropping any anchor with structure inside its 0.95 m disc for that seed; `grade()`
+checks T-2 and T-3 from the log alone; `--sweep` compares dispatch, train and no relay over
+seeds. `tests/test_relay_trial.py`, 14 tests.
+
+**Verified — TESTED.** 428 tests. The trail accumulates arclength, interpolates and
+projects; a revisit inside a seen free disc is cut and one without evidence is not;
+`relays_needed` is the spacing arithmetic; the network links an anchor to crumbs anywhere
+inside 0.9 m (the audit's reproduction) and routes through another searcher's crumbs at a
+fifth of the head's own trail; anchors within 0.95 m of structure are dropped for that seed
+(seeds 16, 144 and, for the lead's column, 99), the legal room face drops none over seeds
+0–59, and a lone anchor is kept; relays come from the southern row and launch northern-row
+first. **T-1** the relay forms on a planted bonus victim in both modes inside 120 s and
+scores 2 × 15; **T-2** every relay that landed is a link of the chain at formation, mean
+link ≤ 0.9 m, every link clear, tail in the Start Area; **T-3** every landed relay's last
+fresh sweep measured two links inside the gate and one certified against the anchor, and —
+the clause a gate that ignored the ranges would fail — one relay on a trail that needs two
+joins in train mode, parks between 0.9 and 1.35 m from the head and from the anchor on the
+floor (asserted), and hovers to the end of the run, while in dispatch it never launches;
+**T-4** the trial refuses to run without `peers=True`, without an anchor, with an unknown
+mode or with no searcher left; the relays landed on the same tick; the third relay never
+left the ground.
+
+**Verified — MEASURED (T-5).** `python examples/06_uwb_relay.py --sweep`, 600 s runs,
+`collision_behaviour="stop"`, `sensor_every=4`, at commit `c86a48b`; every figure below is
+recomputed from the run directories by a script, not typed. Ten drones, five seeds a cell:
+
+| mode | anchors | relays | P(relay) | score | ± | t_relay (s) | targets | crashed | waves |
+|---|---|---|---|---|---|---|---|---|---|
+| none | — | 0 | — | 38.0 | 8.1 | — | 3.4 | 1.2 | 1.0 |
+| dispatch | 1 | 3 | 0.00 | 34.0 | 9.2 | — | 2.8 | 1.2 | 1.0 |
+| dispatch | 1 | 5 | 0.40 | 41.0 | 17.4 | 88 | 2.6 | 0.4 | 2.2 |
+| dispatch | 1 | 8 | 0.20 | 25.0 | 13.0 | 58 | 1.6 | 0.2 | 1.4 |
+| dispatch | 10 | 3 | 0.40 | 39.0 | 16.6 | 43 | 2.4 | 1.2 | 1.2 |
+| **dispatch** | **10** | **5** | **0.80** | **47.0** | 12.5 | 74 | 2.4 | 0.6 | 1.8 |
+| dispatch | 10 | 8 | 0.60 | 35.0 | 8.9 | 80 | 1.8 | 0.2 | 2.4 |
+| train | 1 | 3 | 0.00 | 31.0 | 4.9 | — | 2.6 | 0.8 | 2.4 |
+| train | 1 | 5 | 0.20 | 37.0 | 6.8 | 66 | 2.8 | 0.2 | 3.0 |
+| train | 1 | 8 | 0.20 | 23.0 | 13.6 | 48 | 1.4 | 0.0 | 4.0 |
+| train | 10 | 3 | 0.00 | 33.0 | 7.5 | — | 2.8 | 0.6 | 2.8 |
+| train | 10 | 5 | 0.20 | 34.0 | 9.7 | 64 | 2.8 | 0.6 | 3.2 |
+| train | 10 | 8 | 0.20 | 26.0 | 12.4 | 50 | 1.8 | 0.0 | 4.2 |
+
+Twenty-five drones, three seeds a cell:
+
+| mode | anchors | relays | P(relay) | score | ± | t_relay (s) | targets | crashed | waves |
+|---|---|---|---|---|---|---|---|---|---|
+| none | — | 0 | — | 48.3 | 6.2 | — | 4.3 | 1.0 | 4.3 |
+| dispatch | 1 | 8 | 0.00 | 38.3 | 2.4 | — | 3.3 | 0.7 | 4.0 |
+| dispatch | 1 | 15 | 0.33 | 50.0 | 21.2 | 75 | 3.0 | 0.0 | 1.7 |
+| **dispatch** | **10** | **8** | **1.00** | **76.7** | 4.7 | 40 | 3.3 | 1.0 | 2.7 |
+| **dispatch** | **10** | **15** | **1.00** | **73.3** | 4.7 | 77 | 3.0 | 0.0 | 2.0 |
+| train | 1 | 8 | 0.00 | 38.3 | 2.4 | — | 3.3 | 0.7 | 4.7 |
+| train | 1 | 15 | 0.00 | 36.7 | 2.4 | — | 3.0 | 0.0 | 3.3 |
+| train | 10 | 8 | 0.00 | 38.3 | 2.4 | — | 3.3 | 0.7 | 5.3 |
+| train | 10 | 15 | 0.00 | 36.7 | 2.4 | — | 3.0 | 0.0 | 3.3 |
+
+Across every formed relay (16 + 7 runs, 50 + 14 links): mean link 0.76 m; longest 0.90 m
+at ten drones and 0.97 m at twenty-five — the latter the scorer starting its chain from a
+*second* bonus rescuer 0.97 m from a relay whose own head was 0.89 m away; every link in
+floor-level line of sight; every tail in the Start Area; every landed relay with at least
+two links inside the gate on its last sweep (0 exceptions in 23 runs); every formed relay
+with an anchor-certified relay; no relay landed in any run in which the mission did not
+score a relay. Formation times, raw: 26–141 s at ten drones (median 60), 36–120 s at
+twenty-five (median 49). Chain lengths: one relay in nine runs (heads 0.2–0.5 m north of
+the line), two in one, four or five in thirteen (heads up to 2.8 m north). In 4 of 23 runs
+a relay that landed is not in the scored chain — the mission's BFS returns the *shortest*
+chain and skips the anchor-certified tail when another relay sits inside the Start Area,
+1–31 cm past the line; those relays each had two gated links of their own. Every "10"
+anchor cell in both sweeps ran with all ten anchors placed.
+
+**What the numbers say, under the conditions below.**
+
+1. **The relay pays for itself when it forms.** Ten drones, five relays, an anchor row:
+   formed in four seeds of five, mean score 47 against the no-relay fleet's 38. Twenty-five
+   drones, the row: eight relays formed it three times in three for 77 against 48, fifteen
+   relays three in three for 73. Eight relays out of ten leave too few searchers (1.8
+   targets, 35); three cannot span most trails.
+2. **One anchor costs most of the relays it forms.** The same five relays with the single
+   anchor of the brief: two seeds of five and a mean of 41, a wash against 38; at
+   twenty-five drones, none of three with eight relays and one of three with fifteen. The
+   chain has to come back to the one point that can certify its tail. The fix is the row,
+   and rule 3.3.1 r.16 permits it.
+3. **Train is worse than not relaying.** Every one of the twelve train cells scores below
+   its baseline. The relays follow the lead's own wandering trail, which is usually too long
+   for them, and hover to the end; and reeling relays out one at a time crosses the line in
+   2.4–5.3 waves against a limit of two. Dispatch, which waits and routes, is the deployment
+   to keep.
+4. **Time.** From the start of the run to the relay: a median of 60 s at ten drones and
+   49 s at twenty-five, the tail of the distribution (up to 141 s) being relays flying the
+   anchor row from the far end of the grid and long chains settling.
+5. **The two-wave rule binds** on five of ten dispatch cells (2.2–4.0 waves; the other five
+   1.0–2.0) and on every train cell; the twenty-five-drone *baseline* itself crosses in 4.3
+   waves, because searchers turned back by the room's face cross late. It is reported, not
+   enforced, and the trial makes no attempt to cross abreast.
+
+**Statistical weight, before anyone quotes a cell.** The cells hold five seeds (ten drones)
+or three (twenty-five), and the `±` is a population standard deviation. Per cell, the
+contrasts above are not significant: row vs one anchor at five relays, 4/5 vs 2/5, Fisher
+exact p = 0.52; at twenty-five drones and eight relays, 3/3 vs 0/3, p = 0.10; the ten-drone
+47 vs 38, Welch p = 0.27. What survives is the pooled contrast and the one clean cell:
+**dispatch forms the relay more often than train** (12/30 vs 4/30 at ten drones, p = 0.039;
+7/12 vs 0/12 at twenty-five, p = 0.005); **a row forms it more often than one anchor** across
+every dispatch cell (15/21 vs 4/21, p = 0.002); and the twenty-five-drone row cell's score,
+77 vs 48, Welch p = 0.008 (Mann–Whitney 0.077). Say those; do not say "the row doubles
+P(relay)" from a five-seed cell. (Computed from the run footers with `scipy.stats`; a
+lesson's completeness critic raised it, and the arithmetic was re-run before this was
+written.)
+
+**Conditions (F-36).** Trail following, the carrot, the approach, the crumbs and the
+publications that pace launches run on ground-truth pose, and every horizontal correction
+uses the relay's own true altitude; crumbs, head announcements, chain order and the landing
+consensus run on the perfect blackboard (ADR-0003). Roles come from the tag's roster. The
+0.1 m gate margin covers A-14 and not the per-unit antenna-delay offsets (F-34). The gate
+certifies distance; line of sight comes from the trail's construction and is checked
+offline. The searchers are wasp_v5 with a north leg and a mission wrapper, on the census
+assumption A-10 and the detection range A-4. Nothing is measured on the team's kit.
+
+**Found while building — OBSERVED, the runs overwritten by later ones.** The record carries
+nine amendments; the audits and the skeptic forced most of them. In order of consequence:
+one certification point makes the relay expensive (a head 12 m east of the single anchor
+needed sixteen relays); the head's own trail is what it *flew*, and a Lévy walker's is long
+— routing through every searcher's crumbs cut a 9-relay trail to a 2-relay one; a relay
+aiming at the anchor point through a hovering teammate deadlocked for minutes; the band
+must not step while the airframe is still answering the last step; the gate must be per
+link, because a "balanced" gate is defeated by A-14; the anchor must stand at tag height,
+because a range is three-dimensional and the horizontal reduction dilutes it by `r / h`;
+launch order must be arrival order; the north leg must hand over before a wall and columns
+must not reach it together; a 1.2 m anchor clearance thinned the row on 46 of 200 seeds;
+and `main`'s generator lets an inner wall reach into the Start Area on 22 of 200 seeds,
+which the docs deny (a task is flagged). Recomposing a trail from scratch each tick made a
+600 s run take six minutes.
+
+**Audited.** Two adversarial passes, told to falsify, one on the platform pieces (C12–C14)
+and one on the trial; then every claim of this section's first draft was sent to a skeptic
+with the run directories. Findings and what changed:
+
+- A sensor returning `world.fleet` passed the build-time contract check; the ban was
+  test-time only. `check_reading_is_immutable` now refuses `Fleet`, `WorldScene`,
+  `Landmark`, `TrueState` and `Sensor` inside any reading, private fields included.
+- F-34's "the altitude changes no answer" was false at a pillar's 0.15 m base — where the
+  lower-altitude rule in fact agrees with the scorer's floor-level line of sight. Reworded in
+  four places.
+- "Ten times at 13–14 drones" was 4.2–4.5× by the code's own arithmetic; the
+  child-draw-count test compared the parent generator; adding a drone perturbs every tag's
+  peer stream (now stated in R-SENS-18 and pinned); `relay_chain_drones` is the footer's
+  chain (now said so).
+- `CrumbNetwork` dropped every anchor edge between 0.6 and 0.9 m (cell hash vs reach);
+  every dispatch result before the fix was biased toward infeasible.
+- Searchers parked against the room's south face, and neighbours reaching it together
+  turned into each other; the handover, the stagger and the slide followed.
+- T-3 could not fail on a gate that ignored the ranges; the one-relay-on-a-two-relay-trail
+  test can, and its parking distance is asserted. T-2's "links ≤ 1.0 and clear" is
+  tautological once T-1 holds and is now stated as such.
+- The grader judged the mission's *shortest* chain, which skips the anchor-certified tail
+  when a relay lands inside the Start Area; T-3 is graded over every landed relay.
+- With two take-off rows, "the last `n` ids" parked the relays north of the searchers;
+  `relay_roles` takes the southern row first.
+- **The skeptic:** the first draft's "174–183 s to a relay at twenty-five drones, mostly
+  flight" was the range of two cell means over raw values of 40–466 s, and the cause was a
+  deadlock, not flight — the second relay aiming at the anchor point through the first
+  relay's body; the anchor row was silently thinned on 46 of 200 seeds by a 1.2 m clearance
+  that also caught the room's legal face, two sweep seeds among them, and the first anchor
+  was exempt from a check three seeds needed; "every landed relay is a link" fails whenever
+  the scorer shortcuts; "1.8–2.7 waves" was the two bold cells; "one-relay chains, heads a
+  metre north" was three two-relay chains and heads 0.2–0.5 m north; "1.15 m" was a
+  docstring, not an assertion; the ADR said five amendments and listed eight. Each is fixed
+  above or in the ADR, both sweeps were rerun at the fixed commit, and the numbers here come
+  from a script over the logs.
+- Stated as overclaims and left as caveats: the gate certifies distance, not line of sight
+  (0 of 13 293 ~1 m chords along real trails were floor-blocked in the auditor's scan); the
+  margin does not cover calibration offsets; a relay that crashes mid-chain keeps its last
+  blackboard tuple for ever and the chain hovers.
+
+**After the checkpoint: what a max-depth lesson's checkers found (commit after `3d1453d`).**
+Forty-five agents wrote and refuted an eleven-section lesson on this build; besides the
+statistical caveat and the train wedge above, they found: the crumb network **double-weighted
+every flown segment** (the cell hash re-found each consecutive pair as a cross-link and
+`coo_matrix(...).tocsr()` sums duplicates), so Dijkstra leaned toward chords — `L` was still
+computed correctly on the chosen polyline, so feasibility was right and route *choice* was
+not; edges are now deduplicated to one weight per pair. The launch stagger sat after the
+climb branch, so the bands were 0 / 0.3 / 1.8 s apart, not 0 / 1.5 / 3 s; the wait now comes
+first. And six doc/code drifts (perimeter walls are 1.5 m, not "every wall 2.0 m"; the ADR
+named `UWB_MAX_ANCHORS_FIRMWARE` where the code uses `UWB_PEER_EXCHANGES_PER_SLOT`; "an
+earlier crumb" where the cutter exempts the last two; `n_needed` without its floor; "3 of
+200" lead-column seeds where the test catches four; the scene "carries two things"). **The
+sweep tables above were produced at `c86a48b`, before the two code fixes**, and were not
+rerun: the routing fix changes which of near-equal routes is chosen, the stagger fix when
+searchers reach the room; neither changes feasibility arithmetic, and a rerun is the next
+thing to do before quoting a cell that depends on them.
+
+**Open.** A lossy `Blackboard` and a noisy `PoseSource` before any of this is flown
+(ADR-0003) — the two seams that turn "given perfect pose and free comms" into a claim. An
+abreast crossing so five or more relays make one wave. **The train wedges, and the lead's
+trail is only half its failure.** Replaying the lead's crumbs through `TrailBuilder` for all
+42 train runs: 4 formed, 29 were infeasible by length or had no bonus landing by the lead,
+and **9 had enough relays and hovered to the end**. An instrumented re-run of one
+(`relay_train_r15_n25_a1_s1`, L = 4.5 m, five launched, five needed) shows two relays frozen
+in BAND with carrots 0.19 m apart along the trail, bodies held 0.48 m apart by the 0.3 m
+chain repulsion, each 0.14–0.15 m from its carrot — beyond `ON_CARROT_M` = 0.12 — so the band
+step that would separate them never fires and their commands are exactly zero for 500 s; a
+third relay's carrot sits 0.015 m from one of those bodies, so `toward()` slides for ever. A
+wedge of three constants (`ON_CARROT_M`, `CHAIN_AVOID_RANGE_M`, the FOLLOW targets
+`m·L/(n_active+1)` that narrow to 0.23 m apart as relays join), not a long trail. Dispatch
+runs the same code and escaped because its southern-row relays arrive ~75 ticks apart and the
+band moves the earlier joiner outward before the next arrives — timing, not design. Found by
+the lesson's completeness critic after this checkpoint's first commit; not fixed here. The
+fix is either to let the band step off-carrot when a chain neighbour is inside `d*`, or to
+space FOLLOW targets by `d*` rather than `L/(n_active+1)` while the head is still moving. The crumb network's
+free-disc chords rest on ring clearance capped at 0.8 m; the venue's walls are unmeasured
+(F-24). A-19 — the peer-ranging rate on stock firmware — is the number that decides whether
+1 Hz at twenty-five drones is what the team gets, and it is a bench afternoon.

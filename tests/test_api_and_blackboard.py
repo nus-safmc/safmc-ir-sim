@@ -77,7 +77,7 @@ def test_observation_exposes_no_route_to_ground_truth():
     from safmc_sim.sensors.base import Sensor, TrueState, read_only
     from safmc_sim.sensors.marker_cam import MarkerDetection
     from safmc_sim.sensors.uwb import UWBRanges
-    from safmc_sim.sensors.scene import WorldScene
+    from safmc_sim.sensors.scene import Fleet, WorldScene
     from safmc_sim.sensors.tof_ring import ToFConfig, ToFRing
     from safmc_sim.world.landmark import Landmark
 
@@ -101,7 +101,9 @@ def test_observation_exposes_no_route_to_ground_truth():
     # in the environment; and our own world objects, matched by type so a subclass under any
     # name is caught too. A Landmark inside a reading is a ground-truth position with an id.
     banned_names = ("ArenaSpec", "Mission", "Runner", "AgentView", "EnvBase", "ObjectBase", "World")
-    banned_types = (Sensor, Landmark, WorldScene, TrueState)
+    # A Fleet is every teammate's true position with its id -- the thing a peer-ranging
+    # sensor measures against and must never hand on (ADR-0007).
+    banned_types = (Sensor, Landmark, WorldScene, TrueState, Fleet)
     seen: set[int] = set()
 
     def walk(obj, path, depth=0):
@@ -167,6 +169,7 @@ def test_observation_exposes_no_route_to_ground_truth():
         Victim("v", "victim", 1.0, 2.0),
         ToFRing(ToFConfig(), np.random.default_rng(0)),
         TrueState("d", 0, 1.0, 2.0, 0.5, 0.0, 0.0, 0.0),
+        Fleet(("drone_01",), read_only(np.array([1])), read_only(np.array([[1.0, 2.0, 0.5]]))),
         deep,                                            # nine tuples down
         frozenset({Landmark("f", "nav_tag", 1.0, 2.0)}),
         boxed,                                           # a read-only object array

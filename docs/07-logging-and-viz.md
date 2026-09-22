@@ -106,6 +106,18 @@ Coverage is reported **two ways** because they measure different things:
   denominator excludes solid landmarks, mission markers included, so a number recomputed
   from a pre-C8 log moves by about 0.1 % relative.
 
+**The relay is reported as a moment, not only a bit.** `relay_formed` and
+`relay_chain_drones` are the footer's answers about the end of the run (the final chain,
+which a later bonus rescuer landing beside the tail can shorten); `time_to_relay_s` comes
+from `relay_timeline(load_run(dir))`, which replays the mission's own latched `update` and
+`_find_relay` over `states.npz` at every tick on which a drone landed — the same code the
+runner scored with, not a second implementation of the rule (R-MISS-8). A landed drone never
+moves, so a relay can only appear on a landing tick, and the replay costs at most one
+`Mission.update` per drone. Each `RelayMoment` carries the tick, the post-step time as
+`states.npz` records it (`(tick + 1) × dt`, one `dt` after the `landed` event's pre-step
+stamp), how many drones were down, and the shortest chain head-first (empty until one
+exists).
+
 ### The normalisation problem, stated honestly
 
 Under `collision_behaviour="stop"` a crashed drone contributes nothing for the rest of the

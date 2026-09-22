@@ -35,12 +35,12 @@ import numpy as np
 from .api import Lifecycle
 from .constants import DRONE_RADIUS_M
 from .constants import MAX_TAKEOFF_WAVES
-from .mission import takeoff_waves
+from .mission import Mission, takeoff_waves
 from .recorder import LIFECYCLE_NAMES, load_run
 from .sensors.raycast import RayScene, cast_rays
 from .world.arena import ArenaConfig, ArenaSpec, Pillar, Target, Wall
 
-__all__ = ["RunMetrics", "compute_metrics", "arena_from_log", "summarise"]
+__all__ = ["RunMetrics", "RelayMoment", "compute_metrics", "relay_timeline", "arena_from_log", "summarise"]
 
 _DEFAULT_GRID_M = 0.25
 _PATH_COVERAGE_RADIUS_M = 0.1   # ir-sim's goal_threshold default; the paper's implicit radius
@@ -58,6 +58,11 @@ class RunMetrics:
     score_total: int
     score_raw: int
     relay_formed: bool
+    relay_chain_drones: int
+    """How many landed drones the final relay chain runs through, head to tail; 0 if none."""
+    time_to_relay_s: float | None
+    """Sim time at which a relay first existed, by the mission's own rule replayed over the
+    log at every landing (:func:`relay_timeline`); ``None`` if it never did."""
     targets_serviced: int
     targets_total: int
 
@@ -84,6 +89,49 @@ class RunMetrics:
 # Re-exported from recorder so there is exactly one deserialiser. Two copies of this is how
 # offline re-scoring and offline metrics quietly drift apart.
 from .recorder import arena_from_log  # noqa: E402
+
+
+@dataclass(frozen=True)
+class RelayMoment:
+    """The relay's state at one tick on which the set of landed drones grew."""
+
+    tick: int
+    sim_time_s: float
+    landed: int
+    chain: tuple[str, ...]
+    """The shortest relay chain, head first, or empty if no relay exists yet."""
+
+
+def relay_timeline(run: Mapping[str, Any]) -> tuple[RelayMoment, ...]:
+    """Replay the mission's relay rule over a loaded log, once per landing.
+
+    ``relay_formed`` in the footer is a single bit about the end of the run. This answers
+    *when*: at every tick on which a drone landed, the landed set is fed to a fresh
+    :class:`~safmc_sim.mission.Mission` built from the recorded arena -- the same latched
+    ``update`` and the same ``_find_relay`` the runner used -- so the answer is the rule
+    itself and not a second implementation of it (R-MISS-8). A landed drone never moves, so
+    the relay can only appear on a landing tick, and at most ``n_drones`` replays are made.
+    """
+    header, states = run["header"], run["states"]
+    agents = header["agents"]
+    pose, lifecycle, times = states["pose"], states["lifecycle"], states["time_s"]
+    landed_code = _codes()[Lifecycle.LANDED]
+    is_landed = lifecycle == landed_code                       # (T, N)
+    n_landed = is_landed.sum(axis=1)
+    grew = np.flatnonzero(np.diff(np.concatenate(([0], n_landed))) > 0)
+    if not len(grew):
+        return ()
+    mission = Mission(arena_from_log(header))
+    moments: list[RelayMoment] = []
+    for t in grew:
+        landed = {
+            agents[i]: np.array([pose[t, i, 0], pose[t, i, 1]], dtype=float)
+            for i in np.flatnonzero(is_landed[t])
+        }
+        mission.update(int(t), float(times[t]), landed)
+        chain = mission.score(landed).relay_chain
+        moments.append(RelayMoment(int(t), float(times[t]), int(n_landed[t]), tuple(chain)))
+    return tuple(moments)
 
 
 def compute_metrics(
@@ -148,6 +196,10 @@ def compute_metrics(
     half = next((t for t, c in curve if c >= 0.5 * sensed_coverage and sensed_coverage > 0), None)
     lifecycles = footer["lifecycles"]
 
+    moments = relay_timeline(run)
+    first_relay = next((m for m in moments if m.chain), None)
+    final_chain = footer["score"].get("relay_chain", [])
+
     return RunMetrics(
         policy=header["config"]["policy"],
         seed=header["seed"],
@@ -156,6 +208,8 @@ def compute_metrics(
         score_total=footer["score"]["total"],
         score_raw=footer["score"]["raw_total"],
         relay_formed=bool(footer["score"]["relay_formed"]),
+        relay_chain_drones=len(final_chain),
+        time_to_relay_s=None if first_relay is None else first_relay.sim_time_s,
         targets_serviced=sum(1 for v in footer["mission_summary"].values() if v["serviced"]),
         targets_total=len(footer["mission_summary"]),
         sim_time_s=float(times[-1]) if n_ticks else 0.0,

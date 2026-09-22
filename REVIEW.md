@@ -123,6 +123,10 @@ The recent round found, and I fixed:
 
 **A. The relay — ~160 lines including tests.** My two reviewers disagreed, so I left it alone.
 
+> *Overtaken, 2026-09-17.* The relay has now fired — first in a scripted test (C14), then
+> from a policy: `examples/06_uwb_relay.py` forms it with UWB peer ranging (ADR-0007), and
+> `metrics.relay_timeline` says when. The "cut it" argument below is recorded as it stood.
+
 - *Cut it:* it has never fired in any recorded run, and no shipped policy can reach it. It
   answers a formation question, not a search question.
 - *Keep it:* it is worth 2× the entire mission score, which makes it arguably the highest-value

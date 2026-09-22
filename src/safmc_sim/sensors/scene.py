@@ -1,8 +1,8 @@
 """The world as a sensor sees it, and who is allowed to block what.
 
-This is the only view of the world a sensor is ever handed (R-SENS-15). It carries two things:
-geometry a ray can hit, and the landmarks placed in the arena. It does not carry the arena,
-the mission, or any agent.
+This is the only view of the world a sensor is ever handed (R-SENS-15). It carries three
+things: geometry a ray can hit, the landmarks placed in the arena, and the fleet (below). It
+does not carry the arena, the mission, or any agent.
 
 There are two distinct notions of "blocking" in this simulator and conflating them would
 silently break scoring:
@@ -21,10 +21,24 @@ Live drone bodies are rebuilt from ir-sim's robot list once per tick, by the run
 ``env.step()`` and before any sensor samples. That ordering is forced: ir-sim moves every
 object and rebuilds its tree during the step, so anything read before it would be one tick
 stale. The rebuild is cached by tick so N sensors on N drones cost one pass.
+
+**The fleet is a third view, and it is not the bodies.** A body is what a ray can hit and
+what a drone can collide with, so the runner builds bodies from *active* drones only: a
+landed drone is ``unobstructed`` and out of both (PR #8). A device every airframe carries and
+every other airframe answers -- a ranging radio -- does not care whether the airframe under
+it is flying, parked or wrecked. So :attr:`WorldScene.fleet` names every drone in the run,
+whatever its lifecycle, with its agent id and true position, and is refreshed by the runner
+from the same post-step state as the bodies (R-SENS-15 as amended by ADR-0007). It is a
+view for a sensor to *measure against*, never to report: a sensor that returned ``fleet.xyz``
+would hand a policy every teammate's true position, which R-SENS-11 forbids and no walk can
+tell from a measured one. The :class:`Fleet` object itself is refused inside a reading by the
+runner's build-time check (``check_reading_is_immutable``) and by the R-POL-4 walk; a copy of
+its numbers is not, and that is the review obligation.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Iterable
 
 import numpy as np
@@ -32,9 +46,49 @@ import numpy as np
 from ..constants import DRONE_RADIUS_M
 from ..errors import ConfigError
 from ..world.landmark import Landmark, occluder_scene
+from .base import read_only
 from .raycast import RayScene
 
-__all__ = ["WorldScene"]
+__all__ = ["Fleet", "WorldScene"]
+
+
+def _empty_fleet_array(width: int) -> np.ndarray:
+    return read_only(np.zeros((0, width) if width else (0,), dtype=float))
+
+
+@dataclass(frozen=True)
+class Fleet:
+    """Every drone in the run, in run order, at this tick's post-step truth.
+
+    Handed to sensors through :attr:`WorldScene.fleet` and to nothing else. ``agent_ids`` is
+    the roster -- the same order as the log header's ``agents`` list, so a reading indexed
+    like this array is recoverable from the log alone (R-OBS-3). ``object_ids`` are ir-sim's
+    ids, so a sensor can find its own drone with :meth:`index_of`. ``xyz`` is the true
+    position of every drone whatever its lifecycle: a landed drone is here at ``z = 0``, a
+    crashed one where it stopped.
+
+    This is ground truth about *other* drones, which is exactly what a policy must never
+    receive (R-POL-3). It exists so a sensor can compute what a device would measure against
+    the fleet -- a range, a bearing -- and report that. Reporting the object itself is refused
+    at build; reporting a copy of ``xyz`` would not be, and is the leak review has to catch.
+    """
+
+    agent_ids: tuple[str, ...] = ()
+    object_ids: np.ndarray = field(default_factory=lambda: read_only(np.zeros(0, dtype=int)))
+    xyz: np.ndarray = field(default_factory=lambda: _empty_fleet_array(3))
+
+    def __len__(self) -> int:
+        return len(self.agent_ids)
+
+    def index_of(self, object_id: int) -> int:
+        """The run-order index of the drone with this ir-sim id, or ``-1`` if it is not here.
+
+        ``-1`` rather than an exception because a sensor built outside a run -- a unit test
+        with a hand-made scene and no fleet -- has a drone the fleet has never heard of, and
+        "no self slot" is a legitimate answer for it.
+        """
+        hits = np.flatnonzero(self.object_ids == int(object_id))
+        return int(hits[0]) if len(hits) else -1
 
 
 class WorldScene:
@@ -61,6 +115,8 @@ class WorldScene:
         self._cache_key: object = None
         self._drone_ids: np.ndarray = np.zeros((0,), dtype=int)
         self._drone_scene: RayScene = RayScene()
+        self._fleet_key: object = None
+        self._fleet: Fleet = Fleet()
 
     @classmethod
     def from_arena(cls, arena) -> "WorldScene":
@@ -161,4 +217,52 @@ class WorldScene:
         # and is height-gated to match.
         self._drone_scene = RayScene(
             circles=circles, circle_heights=np.full(n, np.inf)
+        )
+
+    # -- per-tick fleet: every drone, every lifecycle ------------------------------------
+
+    @property
+    def fleet(self) -> Fleet:
+        """Every drone in the run at this tick's truth, for a sensor to measure against.
+
+        Empty until the runner's first :meth:`refresh_fleet`; a scene built by hand for a
+        unit test has no fleet unless the test supplies one. See :class:`Fleet` for what a
+        sensor may and may not do with it.
+        """
+        return self._fleet
+
+    def refresh_fleet(self, entries, cache_key: object) -> None:
+        """Rebuild the fleet from ``(agent_id, object_id, state)`` triples, once per key.
+
+        ``state`` is the 6-row Quad25D column ``[x, y, theta, z, vx, vy]`` (R-DRONE-1). The
+        runner passes **every** agent, in run order, from the same post-step state it builds
+        the bodies from, so the fleet and the bodies never disagree about where a drone is.
+        Cached by tick like :meth:`refresh_drones`, and independently of it, because the two
+        are refreshed from different subsets of the fleet.
+        """
+        if cache_key is not None and cache_key == self._fleet_key:
+            return
+        self._fleet_key = cache_key
+
+        entries = list(entries)
+        if not entries:
+            self._fleet = Fleet()
+            return
+        ids: list[str] = []
+        object_ids = np.empty(len(entries), dtype=int)
+        xyz = np.empty((len(entries), 3), dtype=float)
+        for i, (agent_id, object_id, state) in enumerate(entries):
+            if not isinstance(agent_id, str) or not agent_id:
+                raise ConfigError(f"fleet entry {i} has no agent id: {agent_id!r}")
+            if agent_id in ids:
+                raise ConfigError(f"fleet entry {i} repeats agent id {agent_id!r}")
+            ids.append(agent_id)
+            object_ids[i] = int(object_id)
+            xyz[i, 0] = float(state[0, 0])
+            xyz[i, 1] = float(state[1, 0])
+            xyz[i, 2] = float(state[3, 0])
+        # Read-only copies: the fleet is shared by every sensor on every drone this tick, and
+        # a sensor that wrote into it would move a teammate for every sensor sampled after it.
+        self._fleet = Fleet(
+            agent_ids=tuple(ids), object_ids=read_only(object_ids), xyz=read_only(xyz)
         )
