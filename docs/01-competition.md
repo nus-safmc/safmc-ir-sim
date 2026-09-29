@@ -37,6 +37,14 @@ Indoor, Singapore EXPO Hall 2B. No GNSS. Netting on all sides, safety net 8 m up
 The boundary between Start Area and Known Search Area is a **virtual line**, not a wall. Crossing
 it starts the run clock.
 
+**The Start Area is empty.** The §3.2 diagram draws nothing in the green strip — every inner wall
+and pillar is in the Known Search Area — and the inner walls "will follow the diagram". It is
+also the staging strip: drones are placed there, test-flown there during setup (3.3.1 r.5), take
+off from it (r.1) and may be reset on it (r.7). The generator keeps it clear and validation
+refuses an arena that does not ([R-WORLD-12](SPEC.md)); the only things in it are what the team
+puts there, which r.16 leaves unlimited. Because the boundary is a virtual line no gap applies at
+it, so the room's south face and an inner wall's end may sit on the line exactly.
+
 ### The rules force randomisation on you
 
 Verbatim from §3.2:

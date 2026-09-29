@@ -186,6 +186,24 @@ NOT apply that check: an experiment may deliberately exceed the cap to ask what 
 coverage would be worth, and the check exists so that nobody quotes such a run without
 knowing that is what it was.
 
+**R-WORLD-12** The Start Area MUST contain no structure. The play-field diagram draws the
+20 m x 6 m Start Area empty and §3.2 says the inner walls "will follow the diagram"; it is
+also where every drone is placed, test-flown during setup and takes off, and where teams may
+reset a take-off [src: SAFMC 2026 Cat Swarm Challenge Booklet v2.0 §3.2 diagram and notes;
+§3.3.1 r.1, r.5, r.7]. The generator MUST reject any sampled wall whose footprint reaches
+south of the Start Area boundary (`y < START_AREA_DEPTH_M`), not merely constrain its centre,
+and validation (R-WORLD-4) MUST refuse an arena in which any wall other than the perimeter
+and the net, or any pillar, has footprint area inside the strip -- whatever built the
+`ArenaSpec`. The boundary is a virtual line, not a wall, so no gap rule applies at it: a
+face lying on the line exactly is legal, the same reading the room's placement takes.
+Placed landmarks are not structure and are governed by R-WORLD-11 (r.16: any number of aids
+in the Start Area).
+
+> Before this rule the sampler bounded only a wall's *centre* to y >= 7 m, so a 5 m wall could
+> reach y = 4.5 m; 22 of seeds 0..199 had an inner wall inside the Start Area, as low as
+> y = 4.80 on seed 16, while `docs/06`, `examples/04`, `sensors/uwb.py` and the take-off grid
+> all assumed the strip was clear. A test over seeds 0..199 pins the fix.
+
 **R-DRONE-1** Drone state MUST be `[x, y, theta, z, vx, vy]` where `vx, vy` are ARENA-frame
 velocities carried as state so that a first-order velocity lag can be modelled.
 
